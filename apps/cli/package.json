@@ -1,0 +1,22 @@
+{
+  "name": "@hk-mahjong/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mahjong": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --clean"
+  },
+  "dependencies": {
+    "@hk-mahjong/analysis": "workspace:*",
+    "@hk-mahjong/bots": "workspace:*",
+    "@hk-mahjong/coach": "workspace:*",
+    "@hk-mahjong/core": "workspace:*",
+    "@hk-mahjong/hk-rules": "workspace:*",
+    "@hk-mahjong/persistence": "workspace:*",
+    "@hk-mahjong/protocol": "workspace:*"
+  }
+}

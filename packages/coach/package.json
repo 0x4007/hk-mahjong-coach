@@ -1,0 +1,22 @@
+{
+  "name": "@hk-mahjong/coach",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean"
+  },
+  "dependencies": {
+    "@hk-mahjong/analysis": "workspace:*",
+    "@hk-mahjong/core": "workspace:*",
+    "@hk-mahjong/hk-rules": "workspace:*",
+    "openai": "7.3.0",
+    "zod": "4.4.3"
+  }
+}

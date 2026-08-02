@@ -1,0 +1,473 @@
+{
+  "$id": "https://local.hk-mahjong-coach.invalid/ruleset.schema.json",
+  "title": "Hong Kong Mahjong Coach Ruleset",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": { "type": "number", "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "displayName": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "disclaimer": { "type": "string", "minLength": 1 },
+    "standardComparisonRulesetId": {
+      "anyOf": [{ "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, { "type": "null" }]
+    },
+    "scoringEvaluatorVersion": { "type": "string", "const": "hk-scoring-v1" },
+    "patternSemantics": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string", "const": "hk_nyc_limits_v1" },
+        "fourConcealedPungs": {
+          "type": "object",
+          "properties": {
+            "winMode": { "type": "string", "const": "self_draw_only" },
+            "concealedKongsCount": { "type": "boolean" }
+          },
+          "required": ["winMode", "concealedKongsCount"],
+          "additionalProperties": false
+        },
+        "nineGates": {
+          "type": "object",
+          "properties": {
+            "waitMode": { "type": "string", "const": "pure_nine_sided" },
+            "declaredKongsAllowed": { "type": "boolean" }
+          },
+          "required": ["waitMode", "declaredKongsAllowed"],
+          "additionalProperties": false
+        },
+        "thirteenOrphans": {
+          "type": "object",
+          "properties": { "requireThirteenSidedWait": { "type": "boolean" } },
+          "required": ["requireThirteenSidedWait"],
+          "additionalProperties": false
+        },
+        "coloredDragons": {
+          "type": "object",
+          "properties": {
+            "requireAllPungsOrKongs": { "type": "boolean" },
+            "requireMatchingSuitPair": { "type": "boolean" }
+          },
+          "required": ["requireAllPungsOrKongs", "requireMatchingSuitPair"],
+          "additionalProperties": false
+        },
+        "heavenlyHand": {
+          "type": "object",
+          "properties": {
+            "initialBonusReplacementsAllowed": { "type": "boolean" },
+            "kongBeforeWinAllowed": { "type": "boolean" }
+          },
+          "required": ["initialBonusReplacementsAllowed", "kongBeforeWinAllowed"],
+          "additionalProperties": false
+        },
+        "earthlyHand": {
+          "type": "object",
+          "properties": {
+            "trigger": { "type": "string", "const": "dealer_first_discard" },
+            "initialBonusReplacementsAllowed": { "type": "boolean" },
+            "kongBeforeWinAllowed": { "type": "boolean" }
+          },
+          "required": ["trigger", "initialBonusReplacementsAllowed", "kongBeforeWinAllowed"],
+          "additionalProperties": false
+        },
+        "limitAggregation": { "type": "string", "const": "cap_once_list_all_matches" },
+        "suppressNonLimitRulesWhenLimitMatches": { "type": "boolean" }
+      },
+      "required": [
+        "version",
+        "fourConcealedPungs",
+        "nineGates",
+        "thirteenOrphans",
+        "coloredDragons",
+        "heavenlyHand",
+        "earthlyHand",
+        "limitAggregation",
+        "suppressNonLimitRulesWhenLimitMatches"
+      ],
+      "additionalProperties": false
+    },
+    "tileSet": {
+      "type": "object",
+      "properties": {
+        "bonusTilesEnabled": { "type": "boolean" },
+        "replacementDrawDirection": { "type": "string", "const": "back" },
+        "ordinaryDrawDirection": { "type": "string", "const": "front" },
+        "exhaustionBoundary": { "type": "string", "const": "draw_ends_meet" }
+      },
+      "required": [
+        "bonusTilesEnabled",
+        "replacementDrawDirection",
+        "ordinaryDrawDirection",
+        "exhaustionBoundary"
+      ],
+      "additionalProperties": false
+    },
+    "bonusRules": {
+      "type": "object",
+      "properties": {
+        "seatMapping": {
+          "minItems": 4,
+          "maxItems": 4,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "seat": { "type": "string", "enum": ["east", "south", "west", "north"] },
+              "flower": {
+                "type": "string",
+                "enum": ["flower.plum", "flower.orchid", "flower.chrysanthemum", "flower.bamboo"]
+              },
+              "season": {
+                "type": "string",
+                "enum": ["season.spring", "season.summer", "season.autumn", "season.winter"]
+              }
+            },
+            "required": ["seat", "flower", "season"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["seatMapping"],
+      "additionalProperties": false
+    },
+    "winRules": {
+      "type": "object",
+      "properties": {
+        "minimumFaan": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "capFaan": { "type": "integer", "exclusiveMinimum": 0, "maximum": 9007199254740991 },
+        "multipleWinners": { "type": "boolean" },
+        "sameTileWinLockUntilNextDraw": { "type": "boolean" },
+        "passedWinLockTriggers": {
+          "type": "string",
+          "enum": ["explicit_pass", "any_unclaimed_legal_win"]
+        },
+        "passedWinLockIncludesKongRobbery": { "type": "boolean" },
+        "allowSevenPairs": { "type": "boolean" },
+        "sevenPairsAllowsQuadAsTwoPairs": { "type": "boolean" },
+        "specialHandsStackWithSuitPatterns": { "type": "boolean" },
+        "allowThirteenOrphans": { "type": "boolean" },
+        "allowNineGates": { "type": "boolean" },
+        "initialDealWinsEnabled": { "type": "boolean" }
+      },
+      "required": [
+        "minimumFaan",
+        "capFaan",
+        "multipleWinners",
+        "sameTileWinLockUntilNextDraw",
+        "passedWinLockTriggers",
+        "passedWinLockIncludesKongRobbery",
+        "allowSevenPairs",
+        "sevenPairsAllowsQuadAsTwoPairs",
+        "specialHandsStackWithSuitPatterns",
+        "allowThirteenOrphans",
+        "allowNineGates",
+        "initialDealWinsEnabled"
+      ],
+      "additionalProperties": false
+    },
+    "claimRules": {
+      "type": "object",
+      "properties": {
+        "equalPriorityResolution": { "type": "string", "const": "nearest_after_discarder" },
+        "multipleWinnerPayment": { "type": "string", "const": "settle_each_winner" }
+      },
+      "required": ["equalPriorityResolution", "multipleWinnerPayment"],
+      "additionalProperties": false
+    },
+    "kongRules": {
+      "type": "object",
+      "properties": {
+        "robAddedKong": { "type": "boolean" },
+        "robConcealedKong": { "type": "boolean" },
+        "concealedKongRobberyForms": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["standard", "thirteen_orphans"] }
+        },
+        "allowKongImmediatelyAfterChowOrPung": { "type": "boolean" }
+      },
+      "required": [
+        "robAddedKong",
+        "robConcealedKong",
+        "concealedKongRobberyForms",
+        "allowKongImmediatelyAfterChowOrPung"
+      ],
+      "additionalProperties": false
+    },
+    "roundRules": {
+      "type": "object",
+      "properties": {
+        "prevailingWinds": {
+          "minItems": 1,
+          "maxItems": 4,
+          "type": "array",
+          "items": { "type": "string", "enum": ["east", "south", "west", "north"] }
+        },
+        "dealerRepeatsOnWin": { "type": "boolean" },
+        "dealerRepeatsOnDraw": { "type": "boolean" },
+        "dealerRepeatsWhenAmongMultipleWinners": { "type": "boolean" }
+      },
+      "required": [
+        "prevailingWinds",
+        "dealerRepeatsOnWin",
+        "dealerRepeatsOnDraw",
+        "dealerRepeatsWhenAmongMultipleWinners"
+      ],
+      "additionalProperties": false
+    },
+    "scoringRules": {
+      "minItems": 34,
+      "maxItems": 34,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "no_bonus_tiles",
+              "seat_flower",
+              "seat_season",
+              "all_chows",
+              "concealed_hand",
+              "dragon_pung",
+              "seat_wind",
+              "prevailing_wind",
+              "self_draw",
+              "last_tile_draw",
+              "last_tile_discard",
+              "robbing_kong",
+              "replacement_win",
+              "all_flowers",
+              "all_seasons",
+              "all_pungs",
+              "half_flush",
+              "little_three_dragons",
+              "seven_pairs",
+              "full_flush",
+              "four_concealed_pungs",
+              "big_three_dragons",
+              "little_four_winds",
+              "big_four_winds",
+              "all_honors",
+              "all_terminals",
+              "nine_gates",
+              "thirteen_orphans",
+              "all_kongs",
+              "jade_dragon",
+              "ruby_dragon",
+              "pearl_dragon",
+              "heavenly_hand",
+              "earthly_hand"
+            ]
+          },
+          "names": {
+            "type": "object",
+            "properties": {
+              "en": { "type": "string", "minLength": 1 },
+              "zhHant": { "type": "string", "minLength": 1 },
+              "zhHans": { "type": "string", "minLength": 1 }
+            },
+            "required": ["en", "zhHant", "zhHans"],
+            "additionalProperties": false
+          },
+          "evaluator": {
+            "type": "string",
+            "enum": [
+              "no_bonus_tiles",
+              "seat_flower",
+              "seat_season",
+              "all_chows",
+              "concealed_hand",
+              "dragon_pung",
+              "seat_wind",
+              "prevailing_wind",
+              "self_draw",
+              "last_tile_draw",
+              "last_tile_discard",
+              "robbing_kong",
+              "replacement_win",
+              "all_flowers",
+              "all_seasons",
+              "all_pungs",
+              "half_flush",
+              "little_three_dragons",
+              "seven_pairs",
+              "full_flush",
+              "four_concealed_pungs",
+              "big_three_dragons",
+              "little_four_winds",
+              "big_four_winds",
+              "all_honors",
+              "all_terminals",
+              "nine_gates",
+              "thirteen_orphans",
+              "all_kongs",
+              "jade_dragon",
+              "ruby_dragon",
+              "pearl_dragon",
+              "heavenly_hand",
+              "earthly_hand"
+            ]
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string", "const": "faan" },
+                  "amount": { "type": "integer", "minimum": 1, "maximum": 99 }
+                },
+                "required": ["type", "amount"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": { "type": { "type": "string", "const": "limit" } },
+                "required": ["type"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "enabled": { "type": "boolean" },
+          "category": {
+            "type": "string",
+            "enum": ["hand_composition", "bonus", "wind_dragon", "winning_condition"]
+          },
+          "stackingGroup": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
+          "implies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string", "enum": ["rule", "stacking_group"] },
+                "id": { "type": "string", "minLength": 1 }
+              },
+              "required": ["target", "id"],
+              "additionalProperties": false
+            }
+          },
+          "suppresses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string", "enum": ["rule", "stacking_group"] },
+                "id": { "type": "string", "minLength": 1 }
+              },
+              "required": ["target", "id"],
+              "additionalProperties": false
+            }
+          },
+          "excludes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": { "type": "string", "enum": ["rule", "stacking_group"] },
+                "id": { "type": "string", "minLength": 1 }
+              },
+              "required": ["target", "id"],
+              "additionalProperties": false
+            }
+          },
+          "explanation": { "type": "string", "minLength": 1 },
+          "examples": {
+            "minItems": 1,
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "houseRuleSensitive": { "type": "boolean" }
+        },
+        "required": [
+          "id",
+          "names",
+          "evaluator",
+          "value",
+          "enabled",
+          "category",
+          "stackingGroup",
+          "implies",
+          "suppresses",
+          "excludes",
+          "explanation",
+          "examples",
+          "houseRuleSensitive"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "payment": {
+      "type": "object",
+      "properties": {
+        "strategy": { "type": "string", "enum": ["each_loser_pays", "discarder_pays_all"] },
+        "basePointBuckets": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "minimumFaan": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+              "maximumFaan": {
+                "anyOf": [
+                  { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+                  { "type": "null" }
+                ]
+              },
+              "basePoints": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": ["minimumFaan", "maximumFaan", "basePoints"],
+            "additionalProperties": false
+          }
+        },
+        "discard": {
+          "type": "object",
+          "properties": {
+            "discarderMultiplier": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "otherLoserMultiplier": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          },
+          "required": ["discarderMultiplier", "otherLoserMultiplier"],
+          "additionalProperties": false
+        },
+        "selfDraw": {
+          "type": "object",
+          "properties": {
+            "loserMultiplier": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          },
+          "required": ["loserMultiplier"],
+          "additionalProperties": false
+        },
+        "dealerMultiplier": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["strategy", "basePointBuckets", "discard", "selfDraw", "dealerMultiplier"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "id",
+    "version",
+    "displayName",
+    "description",
+    "disclaimer",
+    "standardComparisonRulesetId",
+    "scoringEvaluatorVersion",
+    "patternSemantics",
+    "tileSet",
+    "bonusRules",
+    "winRules",
+    "claimRules",
+    "kongRules",
+    "roundRules",
+    "scoringRules",
+    "payment"
+  ],
+  "additionalProperties": false
+}

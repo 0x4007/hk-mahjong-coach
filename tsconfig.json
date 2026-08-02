@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": false,
+    "checkJs": false,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "ignoreDeprecations": "6.0",
+    "skipLibCheck": true,
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@hk-mahjong/core": ["./packages/core/src/index.ts"],
+      "@hk-mahjong/hk-rules": ["./packages/hk-rules/src/index.ts"],
+      "@hk-mahjong/analysis": ["./packages/analysis/src/index.ts"],
+      "@hk-mahjong/bots": ["./packages/bots/src/index.ts"],
+      "@hk-mahjong/coach": ["./packages/coach/src/index.ts"],
+      "@hk-mahjong/protocol": ["./packages/protocol/src/index.ts"],
+      "@hk-mahjong/persistence": ["./packages/persistence/src/index.ts"],
+      "@hk-mahjong/tile-ui": ["./packages/tile-ui/src/index.ts"],
+      "@hk-mahjong/test-fixtures": ["./packages/test-fixtures/src/index.ts"]
+    }
+  },
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "scripts/**/*.ts",
+    "tests/**/*.ts",
+    "*.config.ts"
+  ],
+  "exclude": ["**/dist/**", "coverage", "node_modules", "playwright-report", "test-results"]
+}

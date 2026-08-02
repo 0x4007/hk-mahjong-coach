@@ -1,0 +1,45 @@
+{
+  "name": "hk-mahjong-coach",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.18.0",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": ">=11 <12"
+  },
+  "scripts": {
+    "dev": "pnpm build:packages && concurrently --kill-others --names server,web \"pnpm --filter @hk-mahjong/server dev\" \"pnpm --filter @hk-mahjong/web dev\"",
+    "build:packages": "pnpm --filter \"./packages/**\" --workspace-concurrency=1 run build",
+    "build": "pnpm build:packages && pnpm --filter @hk-mahjong/cli build && pnpm --filter @hk-mahjong/web build && pnpm --filter @hk-mahjong/server build",
+    "start": "node apps/server/dist/index.js",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "rulesets:generate": "tsx scripts/generate-rulesets.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:sim": "tsx scripts/simulate.ts 10000",
+    "test:e2e": "playwright test",
+    "smoke": "tsx scripts/smoke.ts",
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:coverage && pnpm build && pnpm smoke"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitest/coverage-v8": "4.1.10",
+    "concurrently": "10.0.4",
+    "eslint": "10.8.0",
+    "fast-check": "4.9.0",
+    "prettier": "3.9.6",
+    "tsup": "8.5.1",
+    "tsx": "4.23.2",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}
