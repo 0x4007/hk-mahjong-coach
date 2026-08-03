@@ -192,7 +192,8 @@ const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
 const SEATED_EYE_HEIGHT = 1.45;
 const STANDING_FOV = 90;
 const SEATED_FOV = 68;
-const JUMP_SPEED = 4.6;
+// A ~0.9-unit apex with a ~0.55-second airtime reads as a full, quick jump at this scene scale.
+const JUMP_SPEED = 6.6;
 const GRAVITY = 24;
 const ROOM_BOUNDS = {
   minX: -6.7,
