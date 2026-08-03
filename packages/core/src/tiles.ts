@@ -73,6 +73,7 @@ const PINYIN_RANKS = ["yī", "èr", "sān", "sì", "wǔ", "liù", "qī", "bā", 
 
 const valueAt = <Value>(values: readonly Value[], index: number): Value => {
   const value = values[index];
+  /* v8 ignore next -- catalog construction uses fixed indices into equally sized metadata tables */
   if (value === undefined) {
     throw new Error(`Missing canonical tile metadata at index ${String(index)}`);
   }
@@ -331,6 +332,7 @@ const tileTypesByCompactCode = new Map(
 );
 const tileTypeOrder = new Map(TILE_DEFINITIONS.map(({ id }, index) => [id, index]));
 
+/* v8 ignore next -- module constants are statically reviewed and locked by catalog tests */
 if (
   TILE_DEFINITIONS.length !== 42 ||
   tileDefinitionsById.size !== TILE_DEFINITIONS.length ||

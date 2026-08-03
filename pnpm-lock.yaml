@@ -210,6 +210,12 @@ importers:
 
   packages/test-fixtures:
     dependencies:
+      '@hk-mahjong/analysis':
+        specifier: workspace:*
+        version: link:../analysis
+      '@hk-mahjong/bots':
+        specifier: workspace:*
+        version: link:../bots
       '@hk-mahjong/core':
         specifier: workspace:*
         version: link:../core

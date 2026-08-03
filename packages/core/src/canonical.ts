@@ -164,7 +164,7 @@ const canonicalize = (value: unknown, ancestors: WeakSet<object>, depth: number)
     }
 
     const entries = Object.entries(value)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .sort(([left], [right]) => (left < right ? -1 : 1))
       .map(
         ([key, item]) => `${quoteCanonicalString(key)}:${canonicalize(item, ancestors, depth + 1)}`,
       );

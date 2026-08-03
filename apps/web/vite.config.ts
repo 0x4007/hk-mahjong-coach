@@ -8,6 +8,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      "@hk-mahjong/core/public": fromRoot("../../packages/core/src/public.ts"),
       "@hk-mahjong/core": fromRoot("../../packages/core/src/index.ts"),
       "@hk-mahjong/protocol": fromRoot("../../packages/protocol/src/index.ts"),
       "@hk-mahjong/tile-ui": fromRoot("../../packages/tile-ui/src/index.tsx"),

@@ -34,6 +34,7 @@ const hashSeed = (seed: string): [number, number, number, number] => {
     (fourth ^ first) >>> 0,
   ];
 
+  /* v8 ignore next -- defensive guard for the astronomically unlikely all-zero seed hash */
   if (result.every((value) => value === 0)) {
     result[0] = 1;
   }

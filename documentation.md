@@ -35,6 +35,78 @@
 - In `hk_modern_13f_v1`, unlisted former limit patterns are explicitly stored as 10 faan; only the
   four patterns named as 13/limit in `spec.md` use the 13-faan cap. There is no runtime inheritance.
 
+## 2026-08-02 — Event, scoring, and payment boundaries
+
+- Commands emit immutable authoritative events; reducers validate persisted facts and never invoke
+  the scorer or payment settlement during replay.
+- Claim windows persist each eligible player's complete scoring assessment. This preserves
+  first-discard, last-tile, kong-robbery, bonus-replacement, and opening-kong provenance even after
+  later state fields change.
+- Legal actions contain only scoring previews. Terminal authoritative events contain full scoring
+  and payments; public projection uses an explicit allowlist, converts the winning physical ID to a
+  tile type, and removes evaluator evidence.
+- Every scoring decomposition is evaluated. Selection prefers legal over illegal, then capped faan,
+  raw faan, and canonical decomposition order.
+- `stackingGroup` is metadata unless a rule explicitly references it. True limits are only rules
+  whose configured value is `limit`; multiple true limits are listed while the cap is aggregated
+  once.
+- Dealer multipliers are applied once. Co-winners are excluded from payer sets, arithmetic is
+  checked as safe integers, and every persisted settlement is exactly zero-sum.
+
+## 2026-08-03 — Observation-only analysis and bot simulation
+
+- The public analysis package exposes observation-derived analyzers and result types, not raw
+  physical-tile entry points. Low-level distance, path, and visibility helpers remain package
+  internals for focused tests and composition inside the official analyzer.
+- Bot construction accepts a resolved ruleset rather than an injected analyzer. The bot package
+  creates the official analyzer itself, preventing a composition root from supplying an analyzer
+  that closes over authoritative state. Static import restrictions and type tests keep normal
+  analysis/bot sources on `@hk-mahjong/core/public`.
+- Relative-risk language remains comparative. The heuristic combines visible copies, exposed suit
+  and honor direction, publicly established faan, the order of recent public discards, fresh late
+  honors/middle tiles, and wall count; prior discards never become a guaranteed-safety claim.
+- Adaptive difficulty chooses a fixed ordinary strength from evidence and locks that choice to one
+  hand. Only a `hand_ended` or `match_ended` observation may release the lock. Product persistence
+  and mode wiring remain part of Milestone 8.
+- Basic bot discard ordering keeps distance primary, then uses the already computed
+  personality-weighted candidate score. This preserves the basic difficulty boundary while allowing
+  fast, value, and balanced policies to diverge deterministically on equal-distance decisions.
+- The fast simulation uses normal `BotPolicy` decisions throughout. To remain a practical 500-hand
+  gate, it mixes three full seeded shuffled-wall hands (one for each bundled ruleset) with a seeded
+  terminal regression wall where South has a thirteen-sided Thirteen Orphans wait and East has no
+  initial win. The terminal wall never selects a bot action; it shuffles its unused tail with the
+  injected RNG, and every policy must still rank an emitted action. The receipt identifies the wall
+  profiles separately so the short corpus cannot be mistaken for 500 natural-length hands.
+- Each simulated one-wind match is capped at 32 hands, each hand at 1,024 accepted commands, and the
+  runner fails on rejection, conservation error, crash, bound excess, or replay mismatch. The full
+  10,000-hand and broader release evidence remain Milestone 10 gates.
+- The extended natural-wall gate is prepared in `.github/workflows/natural-simulation.yml` as a
+  manual `workflow_dispatch`. It partitions the requested corpus across up to 20 deterministic
+  shards, runs unchanged normal policies with `natural_shuffle` walls, uploads redacted shard
+  receipts, and verifies one aggregate digest. A one-hand local shard/aggregate smoke passed with
+  aggregate digest
+  `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
+  The interrupted local natural run is not 500-hand acceptance evidence; the first accepted
+  500-hand receipt must come from the remote workflow after the implementation commit is pushed.
+
+## 2026-08-03 — Canonical takeover and Milestone 4 reconciliation
+
+- The canonical continuation lane is
+  `.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54` on branch
+  `implementation-takeover-019fc5b7-g06506cba54`, based at
+  `b3d5946ce9d69efebd361433f00b988ea658a600`.
+- The pre-existing dirty `main` checkout and `natural-simulation-ci-g6bdbe4486d` worktree remain
+  preserved. Canonical integrated the natural lane's workflow plus its shard/common/aggregate
+  helpers. It rejected two unrelated `matchIndexOffset` runner variants because that workflow does
+  not consume them and no focused test covers them.
+- On the corrected canonical candidate, `pnpm test` passes 274 tests. `pnpm test:sim:fast` completes
+  500 hands with zero illegal actions, invariant failures, crashes, command-bound failures, or
+  replay mismatches. Its receipt digest is
+  `sha256:1073e8769314772f57d8880e11fa710d2889730d7f1eff8db0fedebc79533352`,
+  and its hand digest root is
+  `sha256:219b345c5c8795d1668f7dc975e03cb26c1cc1e7674c7d9fa67bf188eaa7b284`.
+- `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` also pass.
+
 ## Commands
 
 ```bash
@@ -52,4 +124,8 @@ None.
 
 ## Known limitations
 
-- Milestones 0 and 1 are complete. Milestones 2–10 remain pending or in progress.
+- Milestones 0–4 are complete. Milestone 5 is in progress; Milestones 6–10 remain pending.
+- Persistence, protocol, coach, and tile UI package slices exist but have not yet been accepted as
+  complete milestones or wired through the placeholder CLI, server, and browser clients.
+- The persistence slice still needs deletion/privacy, recovery/export, migration, restart/resume,
+  and coverage repairs before Milestone 5 can close.
