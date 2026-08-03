@@ -87,27 +87,50 @@ Evidence recorded 2026-08-03:
 - Four fixed strengths and three personalities make deterministic legal decisions. Adaptive
   selection uses stored independent-decision evidence, changes by at most one level, remains locked
   for a hand, and cannot unlock before a terminal observation.
+- Basic policies prioritize distance and then use the personality-weighted analysis score, so the
+  fast, value, and balanced styles can make different deterministic choices without turning basic
+  play into rollout-based advanced analysis.
 - `pnpm test:sim:fast` completes 500 seeded hands with all 500 event prefixes replayed to the same
   terminal hashes. The fast receipt deliberately combines 3 normal shuffled-wall hands (one per
   bundled ruleset) with 497 short seeded terminal regression hands; normal policies choose every
-  action in both profiles. It records all 12 strength/personality combinations, 715 discards, 2
-  chows, 7 pungs, 499 wins, 1 exhaustive draw, and zero illegal actions, invariant violations,
-  crashes, command-bound failures, or replay mismatches. Receipt digest:
-  `sha256:6a9d354a58154b33c966915e8dd5b1a6d56a33a02145a299fdb8e332771ee7bb`.
-- The reconciliation gate closes with 272 passing tests plus successful `pnpm format:check`,
+  action in both profiles. It records all 12 strength/personality combinations, 683 discards, 4
+  pungs, 500 wins, and zero illegal actions, invariant violations, crashes, command-bound failures,
+  or replay mismatches. Receipt digest:
+  `sha256:1073e8769314772f57d8880e11fa710d2889730d7f1eff8db0fedebc79533352`;
+  hand digest root:
+  `sha256:219b345c5c8795d1668f7dc975e03cb26c1cc1e7674c7d9fa67bf188eaa7b284`.
+- The reconciliation gate closes with 274 passing tests plus successful `pnpm format:check`,
   `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke`.
-- The fully natural extended gate is now wired for manual GitHub Actions dispatch with exactly 128
-  deterministic matrix shards, a 20-runner concurrency cap, distinct seed namespaces, contiguous
-  global hand offsets, allowlisted redacted receipts, and fail-closed aggregate digest validation.
-  `tests/simulation-ci.test.ts` covers the matrix shape, partition reproducibility, digest tampering,
-  and incomplete receipt rejection. The local natural run was interrupted at 3m58.286s without a
-  final receipt, so remote 500-hand acceptance remains pending.
+- The fully natural extended gate is now wired for manual GitHub Actions dispatch with deterministic
+  up-to-20-way sharding and redacted aggregate receipts. A one-hand natural shard and aggregate smoke
+  passed locally with aggregate digest
+  `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
+  The earlier local 500-hand run was interrupted without a receipt, so remote 500-hand acceptance
+  remains pending.
 
-## Milestone 5 — Persistence and replay (`pending`)
+## Milestone 5 — Persistence and replay (`complete`)
 
 - Implement SQLite migrations and transactional repositories for events, snapshots, decisions,
   mastery, drills, reviews, export/import/reset, replay, and nondestructive branching.
 - Acceptance: restart/resume, hash verification, corruption fallback, and export/import round trip.
+
+Evidence recorded 2026-08-03:
+
+- The persistence slice now has 4 schema migrations with contiguous-ledger validation, immutable
+  historical ruleset/session configuration hashes, event/snapshot journaling, crash-safe restart,
+  replay, corruption recovery, idempotent requests, practice branching, learner evidence, reset,
+  and export/import validation.
+- Process-level restart/resume and abrupt `SIGKILL` recovery both restore the exact state hash;
+  corrupt snapshots fall back to replay and remain playable/exportable; imported reviews require a
+  completed hand; and learner-owned decisions/reviews cannot cross game owners.
+- Accepted decision evidence is tied to the emitted player/action/revision event batch, and a
+  duplicate practice-branch request remains idempotent after the child advances.
+- Focused M5/M3/protocol tests pass (181 tests); the full suite passes 21 files and 328 tests.
+  Coverage passes the configured gates: core/hk-rules/protocol 95% statements and branches,
+  analysis/bots/coach/persistence at least 85% statements (persistence 87.97%, coach 95.30%).
+- Serialized `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`,
+  `pnpm test:coverage`, `pnpm test:sim:fast` (500 hands), `pnpm build`, and `pnpm smoke` pass on
+  the exact dirty takeover SHA.
 
 ## Milestone 6 — CLI and JSONL protocol (`pending`)
 

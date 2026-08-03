@@ -2,11 +2,13 @@ import Database from "better-sqlite3";
 import {
   canonicalJsonHash,
   canonicalJson,
+  computeRoundProgression,
   reduceGameEvent,
   type CoreGameRules,
   type GameEvent,
   type GameMode,
   type GameState,
+  type LegalAction,
   type PracticeBranchCreatedEvent,
 } from "@hk-mahjong/core";
 
@@ -41,6 +43,7 @@ import {
   type GameBranchMetadata,
   type GameKey,
   type GameMetadata,
+  type GameSessionConfigurationV1,
   type HandRecord,
   type HintRecord,
   type HintRecordInput,
@@ -53,7 +56,9 @@ import {
   type LlmRequestMetadata,
   type LlmRequestMetadataInput,
   type LoadedGame,
+  type LoadedResumableGame,
   type PersistenceExport,
+  type PersistenceExportData,
   type PersistenceRepository,
   type PersistenceRepositoryOptions,
   type ReplayResult,
@@ -77,6 +82,7 @@ import {
   persistenceHash,
   requireBoolean,
   requireFiniteNumber,
+  requireHash,
   requireJsonObject,
   requireNonEmptyString,
   requireOptionalString,
@@ -94,8 +100,33 @@ const GAME_MODES = new Set<GameMode>([
 ]);
 const LLM_STATUSES = new Set(["aborted", "error", "success"] as const);
 const DRILL_SOURCES = new Set(["bundled", "generated", "replay"] as const);
+const BOT_DIFFICULTIES = new Set(["novice", "basic", "intermediate", "advanced"] as const);
+const BOT_PERSONALITIES = new Set(["fast", "value", "balanced"] as const);
+const COACH_PROVIDERS = new Set(["templates", "openai"] as const);
+const COACH_VERBOSITIES = new Set(["brief", "normal", "detailed"] as const);
 const PRACTICE_BRANCH_MODES = new Set<GameMode>(["learn", "guided", "socratic", "sandbox"]);
 const MAX_BRANCH_DEPTH = 32;
+const PERSISTENCE_EXPORT_DATA_FIELDS = [
+  "learners",
+  "learnerPreferences",
+  "conceptMastery",
+  "games",
+  "branches",
+  "hands",
+  "events",
+  "snapshots",
+  "commandReceipts",
+  "decisions",
+  "analysisFacts",
+  "hints",
+  "reviews",
+  "drillItems",
+  "drillAttempts",
+  "schedules",
+  "llmRequests",
+] as const satisfies readonly (keyof PersistenceExportData)[];
+const compareCodePoints = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
 
 interface GameRow {
   game_id: string;
@@ -104,6 +135,8 @@ interface GameRow {
   ruleset_version: string;
   ruleset_hash: string;
   ruleset_json: string | null;
+  session_config_json: string | null;
+  session_config_hash: string | null;
   seed: string;
   rng_version: string;
   mode: string;
@@ -119,6 +152,7 @@ interface BranchRow {
   fork_event_chain_hash: string;
   practice: number;
   created_at: string;
+  activity_order: number;
   current_revision: number;
   state_hash: string | null;
   event_chain_hash: string;
@@ -372,15 +406,154 @@ const requireHistoricalRulesetDefinition = (
   value: unknown,
   expected: Pick<CoreGameRules, "id" | "version" | "hash">,
   label: string,
+  validate: PersistenceRepositoryOptions["validateRulesetDefinition"],
+  expectedCoreRules?: CoreGameRules,
 ): JsonObject => {
   const definition = requireJsonObject(value, label);
-  const id = requireNonEmptyString(definition.id, `${label} ID`);
-  const version = requireNonEmptyString(definition.version, `${label} version`);
-  const hash = `sha256:${canonicalJsonHash(definition)}`;
+  let validated: ReturnType<PersistenceRepositoryOptions["validateRulesetDefinition"]>;
+  try {
+    validated = validate(definition);
+  } catch (caught) {
+    const reason = caught instanceof Error ? caught.message : "unknown validation failure";
+    throw new PersistenceValidationError(`${label} is invalid: ${reason}`);
+  }
+  const validatedDefinition = requireJsonObject(validated.definition, `${label} resolved value`);
+  const validatedCoreRules = requireJsonObject(validated.coreRules, `${label} resolved core rules`);
+  const id = requireNonEmptyString(validatedDefinition.id, `${label} ID`);
+  const version = requireNonEmptyString(validatedDefinition.version, `${label} version`);
+  const hash = requireHash(validated.hash, `${label} resolved hash`);
+  if (
+    canonicalJson(validatedDefinition) !== canonicalJson(definition) ||
+    hash !== `sha256:${canonicalJsonHash(validatedDefinition)}`
+  ) {
+    throw new PersistenceValidationError(`${label} is not the canonical resolved ruleset`);
+  }
   if (id !== expected.id || version !== expected.version || hash !== expected.hash) {
     throw new PersistenceValidationError(`${label} does not match the persisted ruleset identity`);
   }
-  return definition;
+  if (
+    expectedCoreRules !== undefined &&
+    canonicalJson(validatedCoreRules) !== canonicalJson(expectedCoreRules)
+  ) {
+    throw new PersistenceValidationError(
+      `${label} does not match the authoritative core rule projection`,
+    );
+  }
+  return validatedDefinition;
+};
+
+const requireExactFields = (
+  value: JsonObject,
+  expectedFields: readonly string[],
+  label: string,
+): void => {
+  const expected = new Set(expectedFields);
+  if (
+    Object.keys(value).length !== expected.size ||
+    Object.keys(value).some((field) => !expected.has(field))
+  ) {
+    throw new PersistenceValidationError(`${label} has unsupported fields`);
+  }
+};
+
+const requireSessionConfiguration = (
+  value: unknown,
+  label: string,
+  expectedBotPlayerIds?: readonly string[],
+): GameSessionConfigurationV1 => {
+  const configuration = requireJsonObject(value, label);
+  requireExactFields(configuration, ["schemaVersion", "bots", "coach"], label);
+  if (configuration.schemaVersion !== 1) {
+    throw new PersistenceValidationError(`${label} schema version is unsupported`);
+  }
+  const rawBots: unknown = configuration.bots;
+  if (!Array.isArray(rawBots)) {
+    throw new PersistenceValidationError(`${label} bots must be an array`);
+  }
+  const bots: GameSessionConfigurationV1["bots"][number][] = [];
+  for (const [index, rawBot] of rawBots.entries()) {
+    const bot = requireJsonObject(rawBot, `${label} bot ${String(index)}`);
+    requireExactFields(
+      bot,
+      ["playerId", "difficulty", "personality"],
+      `${label} bot ${String(index)}`,
+    );
+    const playerId = requireNonEmptyString(bot.playerId, `${label} bot player ID`);
+    const difficulty = requireNonEmptyString(bot.difficulty, `${label} bot difficulty`);
+    const personality = requireNonEmptyString(bot.personality, `${label} bot personality`);
+    if (
+      !BOT_DIFFICULTIES.has(difficulty as GameSessionConfigurationV1["bots"][number]["difficulty"])
+    ) {
+      throw new PersistenceValidationError(`${label} bot difficulty is unsupported`);
+    }
+    if (
+      !BOT_PERSONALITIES.has(
+        personality as GameSessionConfigurationV1["bots"][number]["personality"],
+      )
+    ) {
+      throw new PersistenceValidationError(`${label} bot personality is unsupported`);
+    }
+    bots.push({
+      playerId,
+      difficulty: difficulty as GameSessionConfigurationV1["bots"][number]["difficulty"],
+      personality: personality as GameSessionConfigurationV1["bots"][number]["personality"],
+    });
+  }
+  bots.sort((left, right) => compareCodePoints(left.playerId, right.playerId));
+  const botPlayerIds = bots.map(({ playerId }) => playerId);
+  if (new Set(botPlayerIds).size !== botPlayerIds.length) {
+    throw new PersistenceValidationError(`${label} contains duplicate bot player IDs`);
+  }
+  if (expectedBotPlayerIds !== undefined) {
+    const expected = [...expectedBotPlayerIds].sort(compareCodePoints);
+    if (
+      expected.length !== botPlayerIds.length ||
+      expected.some((playerId, index) => playerId !== botPlayerIds[index])
+    ) {
+      throw new PersistenceValidationError(
+        `${label} must configure every persisted bot player exactly once`,
+      );
+    }
+  }
+
+  const coach = requireJsonObject(configuration.coach, `${label} coach`);
+  requireExactFields(coach, ["enabled", "provider", "verbosity"], `${label} coach`);
+  const enabled = requireBoolean(coach.enabled, `${label} coach enabled`);
+  const provider = requireNonEmptyString(coach.provider, `${label} coach provider`);
+  const verbosity = requireNonEmptyString(coach.verbosity, `${label} coach verbosity`);
+  if (!COACH_PROVIDERS.has(provider as GameSessionConfigurationV1["coach"]["provider"])) {
+    throw new PersistenceValidationError(`${label} coach provider is unsupported`);
+  }
+  if (!COACH_VERBOSITIES.has(verbosity as GameSessionConfigurationV1["coach"]["verbosity"])) {
+    throw new PersistenceValidationError(`${label} coach verbosity is unsupported`);
+  }
+  return {
+    schemaVersion: 1,
+    bots,
+    coach: {
+      enabled,
+      provider: provider as GameSessionConfigurationV1["coach"]["provider"],
+      verbosity: verbosity as GameSessionConfigurationV1["coach"]["verbosity"],
+    },
+  };
+};
+
+const sessionConfigurationHashFor = (configuration: GameSessionConfigurationV1): string =>
+  persistenceHash({
+    kind: "hk-mahjong-persistence-session-configuration",
+    version: 1,
+    configuration,
+  });
+
+const requireSessionConfigurationForState = (
+  configuration: GameSessionConfigurationV1,
+  state: GameState,
+  label: string,
+): void => {
+  const expectedBotPlayerIds = Object.values(state.players)
+    .filter(({ controller }) => controller === "bot")
+    .map(({ id }) => id);
+  requireSessionConfiguration(configuration, label, expectedBotPlayerIds);
 };
 
 const rootChainHash = (gameId: string): string =>
@@ -435,7 +608,13 @@ const isHandBoundaryEvent = (event: GameEvent): boolean =>
   event.type === "hand_ended" ||
   event.type === "match_ended";
 
-const rowToGameMetadata = (row: GameRow): GameMetadata => {
+const isTruncatedCompletedMatch = (state: GameState): boolean =>
+  state.phase === "hand_ended" && computeRoundProgression(state).matchComplete;
+
+const rowToGameMetadata = (
+  row: GameRow,
+  validateRulesetDefinition: PersistenceRepositoryOptions["validateRulesetDefinition"],
+): GameMetadata => {
   const mode = dbString(row.mode, "Game mode");
   if (!GAME_MODES.has(mode as GameMode)) {
     return corruption("Game mode is corrupt");
@@ -455,6 +634,21 @@ const rowToGameMetadata = (row: GameRow): GameMetadata => {
     return corruption("Game historical ruleset definition is missing");
   }
   try {
+    let sessionConfiguration: GameSessionConfigurationV1 | null = null;
+    let sessionConfigurationHash: string | null = null;
+    if (row.session_config_json !== null || row.session_config_hash !== null) {
+      if (row.session_config_json === null || row.session_config_hash === null) {
+        return corruption("Game session configuration metadata is incomplete");
+      }
+      sessionConfiguration = requireSessionConfiguration(
+        parsePersistedJson(row.session_config_json, "Game session configuration"),
+        "Game session configuration",
+      );
+      sessionConfigurationHash = dbHash(row.session_config_hash, "Game session configuration hash");
+      if (sessionConfigurationHash !== sessionConfigurationHashFor(sessionConfiguration)) {
+        return corruption("Game session configuration hash is corrupt");
+      }
+    }
     return {
       ...metadata,
       rulesetDefinition: requireHistoricalRulesetDefinition(
@@ -465,7 +659,10 @@ const rowToGameMetadata = (row: GameRow): GameMetadata => {
           hash: metadata.rulesetHash,
         },
         "Game historical ruleset definition",
+        validateRulesetDefinition,
       ),
+      sessionConfiguration,
+      sessionConfigurationHash,
     };
   } catch (caught) {
     const reason =
@@ -482,6 +679,7 @@ const rowToBranchMetadata = (row: BranchRow): GameBranchMetadata => {
   const forkStateHash =
     row.fork_state_hash === null ? null : dbHash(row.fork_state_hash, "Fork state hash");
   const currentRevision = dbInteger(row.current_revision, "Branch revision", 0);
+  const activityOrder = dbInteger(row.activity_order, "Branch activity order", 0);
   const stateHash = row.state_hash === null ? null : dbHash(row.state_hash, "Branch state hash");
   const parentKey = parentBranchId === null ? null : { gameId, branchId: parentBranchId };
   const practice = dbBoolean(row.practice, "Branch practice flag");
@@ -509,6 +707,7 @@ const rowToBranchMetadata = (row: BranchRow): GameBranchMetadata => {
     forkEventChainHash: dbHash(row.fork_event_chain_hash, "Fork event chain hash"),
     practice,
     createdAt: dbString(row.created_at, "Branch creation time"),
+    activityOrder,
     currentRevision,
     stateHash,
     eventChainHash: dbHash(row.event_chain_hash, "Branch event chain hash"),
@@ -624,6 +823,8 @@ const asStringArrayFromStored = (text: string, label: string): readonly string[]
 export class SqlitePersistenceRepository implements PersistenceRepository {
   private readonly database: Database.Database;
   private readonly reducer: NonNullable<PersistenceRepositoryOptions["reducer"]>;
+  private readonly legalActions: PersistenceRepositoryOptions["legalActions"];
+  private readonly validateRulesetDefinition: PersistenceRepositoryOptions["validateRulesetDefinition"];
   private readonly snapshotEveryEvents: number;
   private readonly clock: () => string;
 
@@ -634,6 +835,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         ? 16
         : requireSafeInteger(options.snapshotEveryEvents, "Snapshot interval", 1);
     this.reducer = options.reducer ?? reduceGameEvent;
+    this.legalActions = options.legalActions;
+    this.validateRulesetDefinition = options.validateRulesetDefinition;
     this.clock = options.clock ?? (() => new Date().toISOString());
     this.database = new Database(options.databasePath, options.databaseOptions);
     try {
@@ -654,13 +857,71 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
   }
 
   appendAcceptedCommand(input: AppendAcceptedCommandInput): AppendAcceptedCommandResult {
-    return this.database.transaction(() => this.appendAcceptedCommandInternal(input))();
+    return this.database.transaction(() => {
+      const result = this.appendAcceptedCommandInternal(input);
+      this.persistAcceptedDecisionEvidenceInternal(input, result.disposition);
+      return result;
+    })();
   }
 
   loadGame(key: GameKey): LoadedGame {
     return this.database.transaction(() => {
       const branch = this.requireBranchInternal(key);
       return this.loadGameAtRevisionInternal(key, branch.currentRevision);
+    })();
+  }
+
+  loadLatestResumableGame(learnerId: string | null): LoadedResumableGame | null {
+    if (learnerId !== null) {
+      requireNonEmptyString(learnerId, "Latest resumable learner ID");
+    }
+    return this.database.transaction(() => {
+      const rows = this.database
+        .prepare<[string | null], { game_id: string; branch_id: string }>(
+          `SELECT games.game_id, branches.branch_id
+           FROM games
+           JOIN game_branches AS branches
+             ON branches.game_id = games.game_id
+           JOIN game_events AS terminal_event
+             ON terminal_event.game_id = branches.game_id
+            AND terminal_event.branch_id = branches.branch_id
+            AND terminal_event.revision = branches.current_revision
+           WHERE games.learner_id IS ?
+             AND games.session_config_json IS NOT NULL
+             AND games.session_config_hash IS NOT NULL
+             AND terminal_event.event_type <> 'match_ended'
+           ORDER BY branches.activity_order DESC, terminal_event.created_at DESC,
+                    branches.created_at DESC, games.created_at DESC,
+                    games.game_id DESC, branches.branch_id DESC`,
+        )
+        .all(learnerId);
+      for (const row of rows) {
+        const key = {
+          gameId: dbString(row.game_id, "Latest resumable game ID"),
+          branchId: dbString(row.branch_id, "Latest resumable branch ID"),
+        };
+        const loaded = this.loadGameAtRevisionInternal(
+          key,
+          this.requireBranchInternal(key).currentRevision,
+        );
+        if (loaded.state.phase === "match_ended") {
+          continue;
+        }
+        const sessionConfiguration = loaded.game.sessionConfiguration;
+        const sessionConfigurationHash = loaded.game.sessionConfigurationHash;
+        if (sessionConfiguration === null || sessionConfigurationHash === null) {
+          return corruption("Latest resumable game metadata is inconsistent");
+        }
+        return {
+          ...loaded,
+          game: {
+            ...loaded.game,
+            sessionConfiguration,
+            sessionConfigurationHash,
+          },
+        };
+      }
+      return null;
     })();
   }
 
@@ -673,6 +934,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
   replayToTerminal(key: GameKey): ReplayResult {
     return this.database.transaction(() => {
       const branch = this.requireBranchInternal(key);
+      this.validateBranchJournalBoundsInternal(branch);
       const history = this.collectHistoryInternal(key, branch.currentRevision);
       const state = this.replayHistoryInternal(history);
       return { key: { ...key }, state, eventCount: history.events.length };
@@ -789,10 +1051,18 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
 
   importData(input: unknown, options: ImportOptions = {}): ImportResult {
     try {
-      const mode = options.mode ?? "merge";
+      const requestedMode: unknown = options.mode ?? "merge";
+      if (requestedMode !== "merge" && requestedMode !== "replace") {
+        throw new PersistenceValidationError("Persistence import mode is unsupported");
+      }
       const document = this.parseImportDocument(input);
-      return this.database.transaction(() => this.importDataInternal(document, mode))();
+      return this.database.transaction(() => this.importDataInternal(document, requestedMode))();
     } catch (caught) {
+      if (caught instanceof PersistenceCorruptionError) {
+        throw new PersistenceValidationError(
+          `Persistence import contains corrupt or inconsistent data: ${caught.message}`,
+        );
+      }
       if (caught instanceof PersistenceError) {
         throw caught;
       }
@@ -804,15 +1074,83 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     requireNonEmptyString(learnerId, "Learner ID");
     this.database.transaction(() => {
       this.requireLearnerInternal(learnerId);
+      const invalidRetainedOrigin = this.database
+        .prepare<[string, string], { decision_id: string }>(
+          `SELECT decisions.decision_id
+           FROM decisions
+           JOIN games ON games.game_id = decisions.game_id
+           JOIN game_events
+             ON game_events.game_id = decisions.game_id
+            AND game_events.event_type = 'practice_branch_created'
+            AND json_extract(game_events.event_json, '$.originDecisionId') =
+                decisions.decision_id
+           WHERE decisions.learner_id = ?
+             AND games.learner_id IS NOT ?
+           LIMIT 1`,
+        )
+        .get(learnerId, learnerId);
+      if (invalidRetainedOrigin !== undefined) {
+        return corruption(
+          "Learner reset found a cross-owner practice origin that requires a clean hard-cutover database",
+        );
+      }
       this.database
-        .prepare<[string]>("DELETE FROM llm_requests WHERE learner_id = ?")
-        .run(learnerId);
+        .prepare<[string, string, string]>(
+          `UPDATE llm_requests
+           SET decision_id = NULL, fact_ids_json = '[]'
+           WHERE (
+               (learner_id IS NOT NULL AND learner_id <> ?)
+               OR (
+                 learner_id IS NULL
+                 AND decision_id IN (
+                   SELECT decisions.decision_id
+                   FROM decisions
+                   WHERE decisions.learner_id IS NOT NULL
+                     AND decisions.learner_id <> ?
+                 )
+               )
+             )
+             AND decision_id IN (
+               SELECT decisions.decision_id
+               FROM decisions
+               WHERE decisions.game_id IN (
+                 SELECT game_id FROM games WHERE learner_id = ?
+               )
+             )`,
+        )
+        .run(learnerId, learnerId, learnerId);
+      this.database
+        .prepare<[string, string, string]>(
+          `DELETE FROM llm_requests
+           WHERE learner_id = ?
+              OR (
+                learner_id IS NULL
+                AND decision_id IN (
+                  SELECT decisions.decision_id
+                  FROM decisions
+                  WHERE decisions.learner_id = ?
+                     OR (
+                       decisions.learner_id IS NULL
+                       AND decisions.game_id IN (
+                         SELECT game_id FROM games WHERE learner_id = ?
+                       )
+                     )
+                )
+              )`,
+        )
+        .run(learnerId, learnerId, learnerId);
       // A learner reset removes their owned game history as well as derived progress. Preferences
       // remain on the learner row, while game FK cascades remove branches, events, snapshots,
       // hands, receipts, decisions, and facts together.
       this.database.prepare<[string]>("DELETE FROM games WHERE learner_id = ?").run(learnerId);
       this.database.prepare<[string]>("DELETE FROM hints WHERE learner_id = ?").run(learnerId);
       this.database.prepare<[string]>("DELETE FROM reviews WHERE learner_id = ?").run(learnerId);
+      this.database
+        .prepare<[string]>("DELETE FROM drill_attempts WHERE learner_id = ?")
+        .run(learnerId);
+      this.database
+        .prepare<[string]>("DELETE FROM spaced_repetition_schedule WHERE learner_id = ?")
+        .run(learnerId);
       this.database
         .prepare<[string]>("DELETE FROM drill_items WHERE learner_id = ?")
         .run(learnerId);
@@ -831,23 +1169,33 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     return requireNonEmptyString(this.clock(), "Persistence clock result");
   }
 
+  private nextActivityOrderInternal(): number {
+    const row = this.database
+      .prepare<[], { next_activity_order: number }>(
+        `SELECT COALESCE(MAX(activity_order), 0) + 1 AS next_activity_order
+         FROM game_branches`,
+      )
+      .get();
+    return dbInteger(row?.next_activity_order, "Next branch activity order", 1);
+  }
+
   private getGameInternal(gameId: string): GameMetadata | null {
     const row = this.database
       .prepare<[string], GameRow>(
-        `SELECT game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json, seed, rng_version,
-                mode, created_at
+        `SELECT game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json,
+                session_config_json, session_config_hash, seed, rng_version, mode, created_at
          FROM games WHERE game_id = ?`,
       )
       .get(gameId);
-    return row === undefined ? null : rowToGameMetadata(row);
+    return row === undefined ? null : rowToGameMetadata(row, this.validateRulesetDefinition);
   }
 
   private getBranchInternal(key: GameKey): GameBranchMetadata | null {
     const row = this.database
       .prepare<[string, string], BranchRow>(
         `SELECT game_id, branch_id, parent_branch_id, fork_revision, fork_state_hash,
-                fork_event_chain_hash, practice, created_at, current_revision, state_hash,
-                event_chain_hash
+                fork_event_chain_hash, practice, created_at, activity_order, current_revision,
+                state_hash, event_chain_hash
          FROM game_branches WHERE game_id = ? AND branch_id = ?`,
       )
       .get(key.gameId, key.branchId);
@@ -886,6 +1234,90 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       .run(learnerId, this.now());
   }
 
+  private requireDrillItemOwnerInternal(drillItemId: string, learnerId: string): void {
+    const row = this.database
+      .prepare<[string], { learner_id: string }>(
+        "SELECT learner_id FROM drill_items WHERE drill_item_id = ?",
+      )
+      .get(drillItemId);
+    if (row === undefined) {
+      throw new PersistenceNotFoundError(`Drill item ${drillItemId} does not exist`);
+    }
+    if (dbString(row.learner_id, "Drill item learner ID") !== learnerId) {
+      throw new PersistenceValidationError(
+        "Drill attempts and schedules must belong to the drill item's learner",
+      );
+    }
+  }
+
+  private getDecisionInternal(decisionId: string): DecisionRecord | null {
+    const row = this.database
+      .prepare<[string], DecisionRow>(
+        `SELECT decision_id, game_id, branch_id, learner_id, hand_id, revision, player_id,
+                request_id, action_id, independent, quality, analysis_version, weighting_version,
+                data_json, created_at
+         FROM decisions
+         WHERE decision_id = ?`,
+      )
+      .get(decisionId);
+    return row === undefined ? null : this.rowToDecision(row);
+  }
+
+  private requireHandRecordInternal(key: GameKey, handId: string): HandRecord {
+    const row = this.database
+      .prepare<[string, string, string], HandRow>(
+        `SELECT game_id, branch_id, hand_id, seed, hand_index, started_revision, ended_revision,
+                result_json, practice
+         FROM hands
+         WHERE game_id = ? AND branch_id = ? AND hand_id = ?`,
+      )
+      .get(key.gameId, key.branchId, handId);
+    if (row === undefined) {
+      throw new PersistenceValidationError(
+        `Hand ${key.gameId}/${key.branchId}/${handId} does not exist`,
+      );
+    }
+    return this.rowToHand(row);
+  }
+
+  private requireLlmFactScopeInternal(
+    learnerId: string | null,
+    decisionId: string | null,
+    factIds: readonly string[],
+    label: string,
+  ): void {
+    if (new Set(factIds).size !== factIds.length) {
+      throw new PersistenceValidationError(`${label} contains duplicate fact IDs`);
+    }
+    if (decisionId === null) {
+      if (factIds.length > 0) {
+        throw new PersistenceValidationError(`${label} without a decision cannot reference facts`);
+      }
+      return;
+    }
+    const decision = this.getDecisionInternal(decisionId);
+    if (decision === null) {
+      throw new PersistenceValidationError(`${label} decision does not exist`);
+    }
+    if (learnerId !== null && decision.learnerId !== learnerId) {
+      throw new PersistenceValidationError(
+        `${label} learner must match its referenced decision learner`,
+      );
+    }
+    for (const factId of factIds) {
+      const fact = this.database
+        .prepare<[string, string], { fact_id: string }>(
+          "SELECT fact_id FROM analysis_facts WHERE fact_id = ? AND decision_id = ?",
+        )
+        .get(factId, decisionId);
+      if (fact === undefined) {
+        throw new PersistenceValidationError(
+          `${label} fact does not belong to its referenced decision`,
+        );
+      }
+    }
+  }
+
   private appendAcceptedCommandInternal(
     input: AppendAcceptedCommandInput,
     receiptKey: GameKey = input.key,
@@ -911,6 +1343,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
 
     let game = this.getGameInternal(input.key.gameId);
     let branch = this.getBranchInternal(input.key);
+    const initializingGame = branch === null;
     if (branch === null) {
       if (game !== null) {
         throw new PersistenceNotFoundError(
@@ -929,7 +1362,6 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         "A persisted game cannot be reassigned to another learner",
       );
     }
-
     const commandHash = commandHashFor(input.requestId, input.events, input.state.stateHash);
     const existingReceipt = this.getReceiptInternal(receiptKey, input.requestId);
     if (existingReceipt !== null) {
@@ -937,6 +1369,54 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         throw new PersistenceConflictError(
           `Request ${input.requestId} was already accepted with a different command payload`,
         );
+      }
+      const creationRetry =
+        existingReceipt.startRevision === 1 && input.events[0]?.type === "game_created";
+      if (input.sessionConfiguration !== undefined) {
+        if (
+          !creationRetry ||
+          game.sessionConfiguration === null ||
+          game.sessionConfigurationHash === null
+        ) {
+          throw new PersistenceValidationError(
+            "Game session configuration is immutable after game creation",
+          );
+        }
+        const retryConfiguration = requireSessionConfiguration(
+          input.sessionConfiguration,
+          "Retried game session configuration",
+          Object.values(input.state.players)
+            .filter(({ controller }) => controller === "bot")
+            .map(({ id }) => id),
+        );
+        if (sessionConfigurationHashFor(retryConfiguration) !== game.sessionConfigurationHash) {
+          throw new PersistenceConflictError(
+            "Retried game creation has different session configuration",
+          );
+        }
+      }
+      if (input.rulesetDefinition !== undefined) {
+        if (!creationRetry) {
+          throw new PersistenceValidationError(
+            "Historical ruleset definition is immutable after game creation",
+          );
+        }
+        const retryRuleset = requireHistoricalRulesetDefinition(
+          input.rulesetDefinition,
+          {
+            id: game.rulesetId,
+            version: game.rulesetVersion,
+            hash: game.rulesetHash,
+          },
+          "Retried game historical ruleset definition",
+          this.validateRulesetDefinition,
+          input.state.ruleset,
+        );
+        if (canonicalJson(retryRuleset) !== canonicalJson(game.rulesetDefinition)) {
+          throw new PersistenceConflictError(
+            "Retried game creation has a different historical ruleset definition",
+          );
+        }
       }
       if (existingReceipt.endRevision > branch.currentRevision) {
         return corruption("Command receipt extends past its branch revision");
@@ -961,9 +1441,20 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         stateHash: existingReceipt.stateHash,
       };
     }
+    if (
+      !initializingGame &&
+      (input.sessionConfiguration !== undefined || input.rulesetDefinition !== undefined)
+    ) {
+      throw new PersistenceValidationError(
+        "Game session configuration and historical ruleset are immutable after game creation",
+      );
+    }
 
     let currentState: GameState | undefined;
     if (branch.currentRevision > 0) {
+      if (branch.currentRevision > branch.forkRevision) {
+        this.validateBranchJournalBoundsInternal(branch);
+      }
       currentState = this.reconstructInternal(input.key, branch.currentRevision).state;
     } else if (branch.key.branchId !== MAIN_BRANCH_ID || branch.parentKey !== null) {
       return corruption("An empty non-root branch is invalid");
@@ -1006,6 +1497,11 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         "Accepted command state does not exactly match the reducer's reconstructed state",
       );
     }
+    if (isTruncatedCompletedMatch(finalState)) {
+      throw new PersistenceValidationError(
+        "A completed match must persist hand_ended and match_ended in the same command",
+      );
+    }
 
     const createdAt = this.now();
     let previousChainHash = branch.eventChainHash;
@@ -1034,7 +1530,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         createdAt,
       };
       this.insertStoredEventInternal(stored);
-      this.upsertHandInternal(input.key, state, branch.practice);
+      this.upsertHandInternal(input.key, state, branch.practice, event);
       if (isHandBoundaryEvent(event) || event.revision % this.snapshotEveryEvents === 0) {
         this.insertSnapshotInternal({
           key: { ...input.key },
@@ -1051,15 +1547,16 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
 
     const updated = this.database
-      .prepare<[number, string, string, string, string]>(
+      .prepare<[number, string, string, number, string, string]>(
         `UPDATE game_branches
-         SET current_revision = ?, state_hash = ?, event_chain_hash = ?
+         SET current_revision = ?, state_hash = ?, event_chain_hash = ?, activity_order = ?
          WHERE game_id = ? AND branch_id = ?`,
       )
       .run(
         finalState.revision,
         finalState.stateHash,
         previousChainHash,
+        this.nextActivityOrderInternal(),
         input.key.gameId,
         input.key.branchId,
       );
@@ -1119,7 +1616,23 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       input.rulesetDefinition,
       created.rules,
       "Game historical ruleset definition",
+      this.validateRulesetDefinition,
+      created.rules,
     );
+    if (input.sessionConfiguration === undefined) {
+      throw new PersistenceValidationError(
+        "Game creation must include immutable bot and coach session configuration",
+      );
+    }
+    const expectedBotPlayerIds = Object.values(input.state.players)
+      .filter(({ controller }) => controller === "bot")
+      .map(({ id }) => id);
+    const sessionConfiguration = requireSessionConfiguration(
+      input.sessionConfiguration,
+      "Game session configuration",
+      expectedBotPlayerIds,
+    );
+    const sessionConfigurationHash = sessionConfigurationHashFor(sessionConfiguration);
     if (input.learnerId !== undefined) {
       requireNonEmptyString(input.learnerId, "Game learner ID");
       this.ensureLearnerInternal(input.learnerId);
@@ -1127,11 +1640,25 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const createdAt = this.now();
     this.database
       .prepare<
-        [string, string | null, string, string, string, string, string, string, string, string]
+        [
+          string,
+          string | null,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+          string,
+        ]
       >(
         `INSERT INTO games (
-           game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json, seed, rng_version, mode, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json,
+           session_config_json, session_config_hash, seed, rng_version, mode, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         created.gameId,
@@ -1140,6 +1667,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         created.rules.version,
         created.rules.hash,
         canonicalJson(rulesetDefinition),
+        canonicalJson(sessionConfiguration),
+        sessionConfigurationHash,
         created.seed,
         created.rngVersion,
         created.mode,
@@ -1258,9 +1787,14 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       );
   }
 
-  private upsertHandInternal(key: GameKey, state: GameState, practice: boolean): void {
+  private upsertHandInternal(
+    key: GameKey,
+    state: GameState,
+    practice: boolean,
+    event: GameEvent,
+  ): void {
     const resultJson = state.hand.result === null ? null : canonicalJson(state.hand.result);
-    const terminal = state.phase === "hand_ended" || state.phase === "match_ended";
+    const terminal = event.type === "hand_won" || event.type === "hand_ended";
     this.database
       .prepare<
         [string, string, string, string, number, number, number | null, string | null, number]
@@ -1297,11 +1831,24 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         `Revision ${String(revision)} is outside branch ${key.branchId}'s available history`,
       );
     }
+    if (revision === branch.currentRevision) {
+      this.validateBranchJournalBoundsInternal(branch);
+    }
     const game = this.getGameInternal(key.gameId);
     if (game === null) {
       return corruption(`Game ${key.gameId} is missing metadata`);
     }
     const reconstruction = this.reconstructInternal(key, revision);
+    if (revision === branch.currentRevision && isTruncatedCompletedMatch(reconstruction.state)) {
+      return corruption("Branch head stops before the required match_ended event");
+    }
+    if (game.sessionConfiguration !== null) {
+      requireSessionConfigurationForState(
+        game.sessionConfiguration,
+        reconstruction.state,
+        "Persisted game session configuration",
+      );
+    }
     return {
       key: { ...key },
       game,
@@ -1482,6 +2029,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const history = this.collectHistoryInternal(key, targetRevision);
     let state: GameState | undefined;
     let usedSnapshotRevision: number | null = null;
+    const skippedCorruptSnapshotRows: SnapshotRow[] = [];
     const skippedCorruptSnapshotRevisions: number[] = [];
     for (const row of this.snapshotRowsForHistoryInternal(history)) {
       try {
@@ -1497,13 +2045,15 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
             "Snapshot does not match its event stream checkpoint",
           );
         }
-        state = snapshot.state;
-        usedSnapshotRevision = snapshot.revision;
-        break;
+        if (state === undefined) {
+          state = snapshot.state;
+          usedSnapshotRevision = snapshot.revision;
+        }
       } catch (caught) {
         if (!(caught instanceof PersistenceCorruptionError)) {
           throw caught;
         }
+        skippedCorruptSnapshotRows.push(row);
         skippedCorruptSnapshotRevisions.push(dbInteger(row.revision, "Snapshot revision", 1));
       }
     }
@@ -1518,6 +2068,21 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       return corruption("Replay could not reconstruct a game state");
     }
     this.assertReconstructionTerminalInternal(history, state);
+    for (const row of skippedCorruptSnapshotRows) {
+      const removed = this.database
+        .prepare<[string, string, number]>(
+          `DELETE FROM game_snapshots
+           WHERE game_id = ? AND branch_id = ? AND revision = ?`,
+        )
+        .run(
+          dbString(row.game_id, "Snapshot game ID"),
+          dbString(row.branch_id, "Snapshot branch ID"),
+          dbInteger(row.revision, "Snapshot revision", 1),
+        );
+      if (removed.changes !== 1) {
+        return corruption("Corrupt snapshot could not be removed after successful recovery");
+      }
+    }
     return {
       state,
       recovery: { usedSnapshotRevision, skippedCorruptSnapshotRevisions },
@@ -1579,6 +2144,19 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         history.branch.eventChainHash !== expectedChainHash)
     ) {
       return corruption("Reconstructed state does not match branch metadata");
+    }
+    try {
+      requireHistoricalRulesetDefinition(
+        history.game.rulesetDefinition,
+        state.ruleset,
+        "Reconstructed game historical ruleset definition",
+        this.validateRulesetDefinition,
+        state.ruleset,
+      );
+    } catch (caught) {
+      const reason =
+        caught instanceof Error ? caught.message : "unknown core ruleset projection mismatch";
+      return corruption(`Reconstructed game ruleset is corrupt: ${reason}`);
     }
   }
 
@@ -1649,7 +2227,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const originDecision = this.rowToDecision(originRow);
     if (
       originDecision.revision !== event.parentRevision ||
-      originDecision.playerId !== event.requestedByPlayerId
+      originDecision.playerId !== event.requestedByPlayerId ||
+      (originDecision.learnerId !== null && originDecision.learnerId !== game.learnerId)
     ) {
       throw new PersistenceValidationError(
         "Practice branch event does not match its origin decision",
@@ -1670,8 +2249,12 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         );
       }
       const existing = this.requireBranchInternal(key);
-      if (existing.stateHash !== existingReceipt.stateHash) {
-        return corruption("Practice branch receipt does not match the child head");
+      if (existing.currentRevision < existingReceipt.endRevision) {
+        return corruption("Practice branch receipt extends past the child head");
+      }
+      const recorded = this.reconstructInternal(key, existingReceipt.endRevision).state;
+      if (recorded.stateHash !== existingReceipt.stateHash) {
+        return corruption("Practice branch receipt does not match its recorded child state");
       }
       return { branch: existing, disposition: "idempotent" };
     }
@@ -1885,17 +2468,25 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     if (state.hand.id !== handId || state.players[playerId] === undefined) {
       throw new PersistenceValidationError("Decision does not match the persisted hand or player");
     }
+    const game = this.getGameInternal(input.key.gameId);
+    if (game === null) {
+      return corruption("Decision branch has no persisted game metadata");
+    }
+    if (game.learnerId !== null && learnerId !== game.learnerId) {
+      throw new PersistenceValidationError(
+        "A decision learner must own the persisted game that produced it",
+      );
+    }
+    const legalAction = this.legalActions(state, playerId, game.rulesetDefinition).find(
+      ({ id }) => id === actionId,
+    );
+    if (legalAction === undefined) {
+      throw new PersistenceValidationError(
+        "Decision action was not emitted for the persisted player and revision",
+      );
+    }
     if (requestId !== null) {
-      const event = this.database
-        .prepare<[string, string, string], { event_id: string }>(
-          `SELECT event_id FROM game_events
-           WHERE game_id = ? AND branch_id = ? AND request_id = ?
-           LIMIT 1`,
-        )
-        .get(input.key.gameId, input.key.branchId, requestId);
-      if (event === undefined) {
-        throw new PersistenceValidationError("Decision request ID has no persisted branch event");
-      }
+      this.assertDecisionMatchesAcceptedCommandInternal(input, legalAction, requestId);
     }
     this.database
       .prepare<
@@ -1957,6 +2548,192 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     };
   }
 
+  /**
+   * A request ID is the durable bridge between a learner's pre-action analysis and the command
+   * that was actually accepted.  Merely finding another event with the same request ID is not
+   * enough: the selected action, player, and revision must agree with the emitted event batch.
+   */
+  private assertDecisionMatchesAcceptedCommandInternal(
+    input: DecisionRecordInput,
+    action: LegalAction,
+    requestId: string,
+  ): void {
+    const events = this.database
+      .prepare<[string, string, string], EventRow>(
+        `SELECT game_id, branch_id, revision, event_id, request_id, event_type, visibility,
+                event_json, event_hash, state_hash, event_chain_hash, created_at
+         FROM game_events
+         WHERE game_id = ? AND branch_id = ? AND request_id = ?
+         ORDER BY revision`,
+      )
+      .all(input.key.gameId, input.key.branchId, requestId)
+      .map(rowToStoredEvent);
+    if (events.length === 0) {
+      throw new PersistenceValidationError("Decision request ID has no persisted branch event");
+    }
+    if (events[0]?.revision !== input.revision + 1) {
+      throw new PersistenceValidationError(
+        "Decision request does not immediately follow the analyzed revision",
+      );
+    }
+    const matches = events.some(({ event }) => {
+      switch (event.type) {
+        case "tile_discarded":
+          return (
+            action.type === "discard" &&
+            event.playerId === input.playerId &&
+            event.tileId === action.tileId
+          );
+        case "claim_response_recorded":
+          return event.playerId === input.playerId && event.action.id === action.id;
+        case "hand_won":
+          return event.winners.some(
+            (winner) =>
+              winner.playerId === input.playerId &&
+              ((action.type === "declare_win" && winner.source === action.source) ||
+                (action.type === "claim_win" && winner.source === action.source)),
+          );
+        case "kong_completed":
+          return (
+            (action.type === "declare_concealed_kong" &&
+              event.playerId === input.playerId &&
+              event.kongKind === "concealed" &&
+              canonicalJson(event.tileIds) === canonicalJson(action.tileIds)) ||
+            (action.type === "declare_added_kong" &&
+              event.playerId === input.playerId &&
+              event.kongKind === "added" &&
+              event.meldId === action.meldId &&
+              event.tileIds.includes(action.tileId))
+          );
+        case "kong_proposed":
+          return (
+            (action.type === "declare_concealed_kong" &&
+              event.proposerId === input.playerId &&
+              event.kongKind === "concealed" &&
+              canonicalJson(event.concealedTileIds) === canonicalJson(action.tileIds)) ||
+            (action.type === "declare_added_kong" &&
+              event.proposerId === input.playerId &&
+              event.kongKind === "added" &&
+              event.meldId === action.meldId &&
+              event.robberyTileId === action.tileId)
+          );
+        default:
+          return false;
+      }
+    });
+    if (!matches) {
+      throw new PersistenceValidationError(
+        "Decision action does not match the accepted command selected by its request ID",
+      );
+    }
+  }
+
+  private persistAcceptedDecisionEvidenceInternal(
+    input: AppendAcceptedCommandInput,
+    disposition: AppendAcceptedCommandResult["disposition"],
+  ): void {
+    const evidence = input.decisionEvidence;
+    if (evidence === undefined) {
+      return;
+    }
+    const decisionInput: DecisionRecordInput = {
+      ...evidence.decision,
+      key: { ...input.key },
+      requestId: input.requestId,
+    };
+    const facts: AnalysisFactRecordInput[] = evidence.analysisFacts.map((fact) => ({
+      ...fact,
+      decisionId: evidence.decision.id,
+    }));
+    if (disposition === "appended") {
+      this.recordDecisionInternal(decisionInput);
+      this.recordAnalysisFactsInternal(facts);
+      return;
+    }
+    this.assertAcceptedDecisionEvidenceMatchesInternal(decisionInput, facts);
+  }
+
+  private assertAcceptedDecisionEvidenceMatchesInternal(
+    decisionInput: DecisionRecordInput,
+    facts: readonly AnalysisFactRecordInput[],
+  ): void {
+    const existing = this.getDecisionInternal(
+      requireNonEmptyString(decisionInput.id, "Accepted decision ID"),
+    );
+    if (existing === null) {
+      return corruption("Accepted command receipt is missing its atomic decision evidence");
+    }
+    const expectedDecision: DecisionRecord = {
+      id: decisionInput.id,
+      key: {
+        gameId: requireNonEmptyString(decisionInput.key.gameId, "Accepted decision game ID"),
+        branchId: requireNonEmptyString(decisionInput.key.branchId, "Accepted decision branch ID"),
+      },
+      learnerId: requireOptionalString(decisionInput.learnerId, "Accepted decision learner ID"),
+      handId: requireNonEmptyString(decisionInput.handId, "Accepted decision hand ID"),
+      revision: requireSafeInteger(decisionInput.revision, "Accepted decision revision", 1),
+      playerId: requireNonEmptyString(decisionInput.playerId, "Accepted decision player ID"),
+      requestId: requireOptionalString(decisionInput.requestId, "Accepted decision request ID"),
+      actionId: requireNonEmptyString(decisionInput.actionId, "Accepted decision action ID"),
+      independent: requireBoolean(decisionInput.independent, "Accepted decision independent flag"),
+      quality:
+        decisionInput.quality === null
+          ? null
+          : requireFiniteNumber(decisionInput.quality, "Accepted decision quality"),
+      analysisVersion: requireNonEmptyString(
+        decisionInput.analysisVersion,
+        "Accepted decision analysis version",
+      ),
+      weightingVersion: requireNonEmptyString(
+        decisionInput.weightingVersion,
+        "Accepted decision weighting version",
+      ),
+      data: requireJsonObject(decisionInput.data, "Accepted decision data"),
+      createdAt:
+        decisionInput.createdAt === undefined
+          ? existing.createdAt
+          : requireNonEmptyString(decisionInput.createdAt, "Accepted decision creation time"),
+    };
+    if (canonicalJson(existing) !== canonicalJson(expectedDecision)) {
+      throw new PersistenceConflictError(
+        "Accepted command was already recorded with different decision evidence",
+      );
+    }
+    for (const factInput of facts) {
+      const factId = requireNonEmptyString(factInput.id, "Accepted analysis fact ID");
+      const row = this.database
+        .prepare<[string], FactRow>(
+          `SELECT fact_id, decision_id, kind, summary, data_json, created_at
+           FROM analysis_facts
+           WHERE fact_id = ?`,
+        )
+        .get(factId);
+      if (row === undefined) {
+        return corruption("Accepted command receipt is missing atomic analysis evidence");
+      }
+      const actual = this.rowToFact(row);
+      const expected: AnalysisFactRecord = {
+        id: factId,
+        decisionId: requireNonEmptyString(
+          factInput.decisionId,
+          "Accepted analysis fact decision ID",
+        ),
+        kind: requireNonEmptyString(factInput.kind, "Accepted analysis fact kind"),
+        summary: requireNonEmptyString(factInput.summary, "Accepted analysis fact summary"),
+        data: requireJsonObject(factInput.data, "Accepted analysis fact data"),
+        createdAt:
+          factInput.createdAt === undefined
+            ? actual.createdAt
+            : requireNonEmptyString(factInput.createdAt, "Accepted analysis fact creation time"),
+      };
+      if (canonicalJson(actual) !== canonicalJson(expected)) {
+        throw new PersistenceConflictError(
+          "Accepted command was already recorded with different analysis evidence",
+        );
+      }
+    }
+  }
+
   private recordAnalysisFactsInternal(
     input: readonly AnalysisFactRecordInput[],
   ): readonly AnalysisFactRecord[] {
@@ -1997,6 +2774,12 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const data = requireJsonObject(input.data, "Hint data");
     const createdAt = requireOptionalTimestamp(input.createdAt, this.now());
     this.ensureLearnerInternal(input.learnerId);
+    if (decisionId !== null) {
+      const decision = this.getDecisionInternal(decisionId);
+      if (decision?.learnerId !== input.learnerId) {
+        throw new PersistenceValidationError("A linked hint must belong to the decision's learner");
+      }
+    }
     this.database
       .prepare<[string, string, string | null, number, string, string]>(
         `INSERT INTO hints (hint_id, learner_id, decision_id, level, data_json, created_at)
@@ -2018,7 +2801,20 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     requireNonEmptyString(input.learnerId, "Review learner ID");
     assertGameKey(input.key);
     this.requireBranchInternal(input.key);
+    const game = this.getGameInternal(input.key.gameId);
+    if (game === null) {
+      return corruption("Review branch has no persisted game metadata");
+    }
+    if (game.learnerId !== null && game.learnerId !== input.learnerId) {
+      throw new PersistenceValidationError(
+        "A review learner must own the persisted game that produced it",
+      );
+    }
     const handId = requireNonEmptyString(input.handId, "Review hand ID");
+    const hand = this.requireHandRecordInternal(input.key, handId);
+    if (hand.endedRevision === null) {
+      throw new PersistenceValidationError("A review requires a completed persisted hand");
+    }
     const data = requireJsonObject(input.data, "Review data");
     const createdAt = requireOptionalTimestamp(input.createdAt, this.now());
     this.ensureLearnerInternal(input.learnerId);
@@ -2056,6 +2852,17 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const difficulty = requireFiniteNumber(input.difficulty, "Drill difficulty");
     const data = requireJsonObject(input.data, "Drill data");
     const createdAt = requireOptionalTimestamp(input.createdAt, this.now());
+    const existingOwner = this.database
+      .prepare<[string], { learner_id: string }>(
+        "SELECT learner_id FROM drill_items WHERE drill_item_id = ?",
+      )
+      .get(input.id);
+    if (
+      existingOwner !== undefined &&
+      dbString(existingOwner.learner_id, "Drill item learner ID") !== input.learnerId
+    ) {
+      throw new PersistenceValidationError("A drill item's learner is immutable");
+    }
     this.ensureLearnerInternal(input.learnerId);
     this.database
       .prepare<[string, string, string, string, number, string, string]>(
@@ -2063,7 +2870,6 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
            drill_item_id, learner_id, source, concept_ids_json, difficulty, data_json, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (drill_item_id) DO UPDATE SET
-           learner_id = excluded.learner_id,
            source = excluded.source,
            concept_ids_json = excluded.concept_ids_json,
            difficulty = excluded.difficulty,
@@ -2100,6 +2906,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
     const data = requireJsonObject(input.data, "Drill attempt data");
     const createdAt = requireOptionalTimestamp(input.createdAt, this.now());
+    this.requireDrillItemOwnerInternal(input.drillItemId, input.learnerId);
     this.ensureLearnerInternal(input.learnerId);
     this.database
       .prepare<[string, string, string, number, number, string, string]>(
@@ -2139,6 +2946,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     const intervalDays = requireFiniteNumber(input.intervalDays, "Spaced repetition interval", 0);
     const ease = requireFiniteNumber(input.ease, "Spaced repetition ease", Number.MIN_VALUE);
     const updatedAt = requireOptionalTimestamp(input.updatedAt, this.now());
+    this.requireDrillItemOwnerInternal(input.drillItemId, input.learnerId);
     this.ensureLearnerInternal(input.learnerId);
     this.database
       .prepare<[string, string, string, number, number, string]>(
@@ -2184,6 +2992,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
     const errorCode = requireOptionalString(input.errorCode, "LLM error code");
     const createdAt = requireOptionalTimestamp(input.createdAt, this.now());
+    this.requireLlmFactScopeInternal(learnerId, decisionId, factIds, "LLM request metadata");
     if (learnerId !== null) {
       this.ensureLearnerInternal(learnerId);
     }
@@ -2264,30 +3073,11 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
     const exportedAt = requireNonEmptyString(document.exportedAt, "Persistence import timestamp");
     const data = requireJsonObject(document.data, "Persistence import data");
-    const dataFields = [
-      "learners",
-      "learnerPreferences",
-      "conceptMastery",
-      "games",
-      "branches",
-      "hands",
-      "events",
-      "snapshots",
-      "commandReceipts",
-      "decisions",
-      "analysisFacts",
-      "hints",
-      "reviews",
-      "drillItems",
-      "drillAttempts",
-      "schedules",
-      "llmRequests",
-    ] as const;
-    const expectedDataFields = new Set<string>(dataFields);
+    const expectedDataFields = new Set<string>(PERSISTENCE_EXPORT_DATA_FIELDS);
     if (Object.keys(data).some((field) => !expectedDataFields.has(field))) {
       throw new PersistenceValidationError("Persistence import data contains unknown fields");
     }
-    const records = <T extends (typeof dataFields)[number]>(
+    const records = <T extends (typeof PERSISTENCE_EXPORT_DATA_FIELDS)[number]>(
       field: T,
     ): PersistenceExport["data"][T] => {
       const value: JsonValue | undefined = data[field];
@@ -2344,12 +3134,36 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
           hash: game.rulesetHash,
         },
         "Imported game historical ruleset definition",
+        this.validateRulesetDefinition,
       );
+      let sessionConfiguration: GameSessionConfigurationV1 | null = null;
+      let sessionConfigurationHash: string | null = null;
+      if (game.sessionConfiguration !== null || game.sessionConfigurationHash !== null) {
+        if (game.sessionConfiguration === null || game.sessionConfigurationHash === null) {
+          throw new PersistenceValidationError(
+            "Imported game session configuration metadata is incomplete",
+          );
+        }
+        sessionConfiguration = requireSessionConfiguration(
+          game.sessionConfiguration,
+          "Imported game session configuration",
+        );
+        sessionConfigurationHash = requireHash(
+          game.sessionConfigurationHash,
+          "Imported game session configuration hash",
+        );
+        if (sessionConfigurationHash !== sessionConfigurationHashFor(sessionConfiguration)) {
+          throw new PersistenceValidationError(
+            "Imported game session configuration hash does not match its data",
+          );
+        }
+      }
       this.database
         .prepare(
           `INSERT INTO games (
-             game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json, seed, rng_version, mode, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json,
+             session_config_json, session_config_hash, seed, rng_version, mode, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           game.gameId,
@@ -2358,6 +3172,10 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
           game.rulesetVersion,
           game.rulesetHash,
           canonicalJsonText(rulesetDefinition, "Imported game historical ruleset definition"),
+          sessionConfiguration === null
+            ? null
+            : canonicalJsonText(sessionConfiguration, "Imported game session configuration"),
+          sessionConfigurationHash,
           game.seed,
           game.rngVersion,
           game.mode,
@@ -2366,6 +3184,15 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
 
     const remainingBranches = [...data.branches];
+    if (
+      remainingBranches.some(
+        (branch) => branch.parentKey !== null && branch.parentKey.gameId !== branch.key.gameId,
+      )
+    ) {
+      throw new PersistenceValidationError(
+        "Persistence import branch parent must belong to the same game",
+      );
+    }
     while (remainingBranches.length > 0) {
       const nextIndex = remainingBranches.findIndex(
         (branch) => branch.parentKey === null || this.getBranchInternal(branch.parentKey) !== null,
@@ -2383,8 +3210,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         .prepare(
           `INSERT INTO game_branches (
              game_id, branch_id, parent_branch_id, fork_revision, fork_state_hash, fork_event_chain_hash,
-             practice, created_at, current_revision, state_hash, event_chain_hash
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             practice, created_at, activity_order, current_revision, state_hash, event_chain_hash
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           branch.key.gameId,
@@ -2395,6 +3222,7 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
           branch.forkEventChainHash,
           branch.practice ? 1 : 0,
           branch.createdAt,
+          branch.activityOrder,
           branch.currentRevision,
           branch.stateHash,
           branch.eventChainHash,
@@ -2663,7 +3491,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     }
 
     this.validateAllBranchesInternal();
-    this.exportDataInternal(true);
+    const roundTripped = this.exportDataInternal(true);
+    this.assertImportedDataCanonicalInternal(data, roundTripped.data);
     return {
       mode,
       importedGames: data.games.length,
@@ -2672,11 +3501,42 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
   }
 
   private deleteAllDataInternal(): void {
-    this.database.exec("DELETE FROM games; DELETE FROM learners;");
+    this.database.exec("DELETE FROM llm_requests; DELETE FROM games; DELETE FROM learners;");
+  }
+
+  private assertImportedDataCanonicalInternal(
+    imported: PersistenceExportData,
+    persisted: PersistenceExportData,
+  ): void {
+    for (const field of PERSISTENCE_EXPORT_DATA_FIELDS) {
+      const remaining = new Map<string, number>();
+      for (const record of persisted[field]) {
+        const canonical = canonicalJsonText(record, `Persisted ${field} record`);
+        remaining.set(canonical, (remaining.get(canonical) ?? 0) + 1);
+      }
+      for (const record of imported[field]) {
+        const canonical = canonicalJsonText(record, `Imported ${field} record`);
+        const count = remaining.get(canonical) ?? 0;
+        if (count < 1) {
+          throw new PersistenceValidationError(
+            `Persistence import ${field} contains a non-canonical record`,
+          );
+        }
+        if (count === 1) {
+          remaining.delete(canonical);
+        } else {
+          remaining.set(canonical, count - 1);
+        }
+      }
+    }
   }
 
   private exportDataInternal(includeLlmMetadata: boolean): PersistenceExport {
+    for (const branch of this.allBranchesInternal()) {
+      this.reconstructInternal(branch.key, branch.currentRevision);
+    }
     this.validateAllBranchesInternal();
+    this.validateDerivedSemanticsInternal();
     const learners = this.database
       .prepare<[], LearnerRow>("SELECT learner_id, created_at FROM learners ORDER BY learner_id")
       .all()
@@ -2705,11 +3565,12 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       .map((row) => this.rowToConceptMastery(row));
     const games = this.database
       .prepare<[], GameRow>(
-        `SELECT game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json, seed, rng_version,
-                mode, created_at FROM games ORDER BY game_id`,
+        `SELECT game_id, learner_id, ruleset_id, ruleset_version, ruleset_hash, ruleset_json,
+                session_config_json, session_config_hash, seed, rng_version, mode, created_at
+         FROM games ORDER BY game_id`,
       )
       .all()
-      .map(rowToGameMetadata);
+      .map((row) => rowToGameMetadata(row, this.validateRulesetDefinition));
     const branches = this.allBranchesInternal();
     const hands = this.database
       .prepare<[], HandRow>(
@@ -2834,8 +3695,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     return this.database
       .prepare<[], BranchRow>(
         `SELECT game_id, branch_id, parent_branch_id, fork_revision, fork_state_hash,
-                fork_event_chain_hash, practice, created_at, current_revision, state_hash,
-                event_chain_hash
+                fork_event_chain_hash, practice, created_at, activity_order, current_revision,
+                state_hash, event_chain_hash
          FROM game_branches ORDER BY game_id, created_at, branch_id`,
       )
       .all()
@@ -2931,11 +3792,15 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     if (!DRILL_SOURCES.has(source as DrillItemRecord["source"])) {
       return corruption("Drill source is corrupt");
     }
+    const conceptIds = asStringArrayFromStored(row.concept_ids_json, "Drill concept IDs");
+    if (new Set(conceptIds).size !== conceptIds.length) {
+      return corruption("Drill concept IDs contain duplicates");
+    }
     return {
       id: dbString(row.drill_item_id, "Drill item ID"),
       learnerId: dbString(row.learner_id, "Drill learner ID"),
       source: source as DrillItemRecord["source"],
-      conceptIds: asStringArrayFromStored(row.concept_ids_json, "Drill concept IDs"),
+      conceptIds,
       difficulty: dbNumber(row.difficulty, "Drill difficulty"),
       data: asJsonObjectFromStored(row.data_json, "Drill data"),
       createdAt: dbString(row.created_at, "Drill creation time"),
@@ -2994,8 +3859,266 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     };
   }
 
-  private validateAllBranchesInternal(): void {
+  private validateDerivedSemanticsInternal(): void {
     for (const branch of this.allBranchesInternal()) {
+      const history = this.collectHistoryInternal(branch.key, branch.currentRevision);
+      let state: GameState | undefined;
+      const expectedHands = new Map<string, HandRecord>();
+      const localEvents: StoredGameEvent[] = [];
+      for (const event of history.events) {
+        state = this.reduceStoredEventInternal(state, event);
+        if (event.key.gameId !== branch.key.gameId || event.key.branchId !== branch.key.branchId) {
+          continue;
+        }
+        localEvents.push(event);
+        const existing = expectedHands.get(state.hand.id);
+        const terminal = event.event.type === "hand_won" || event.event.type === "hand_ended";
+        expectedHands.set(state.hand.id, {
+          key: { ...branch.key },
+          handId: state.hand.id,
+          seed: state.hand.seed,
+          handIndex: state.match.handIndex,
+          startedRevision: existing?.startedRevision ?? state.revision,
+          endedRevision: terminal ? state.revision : (existing?.endedRevision ?? null),
+          result:
+            state.hand.result === null
+              ? (existing?.result ?? null)
+              : (state.hand.result as JsonValue),
+          practice: branch.practice,
+        });
+      }
+      if (state === undefined || localEvents.length === 0) {
+        throw new PersistenceValidationError("Persisted branch has no local event history");
+      }
+      const actualHands = this.database
+        .prepare<[string, string], HandRow>(
+          `SELECT game_id, branch_id, hand_id, seed, hand_index, started_revision, ended_revision,
+                  result_json, practice
+           FROM hands
+           WHERE game_id = ? AND branch_id = ?
+           ORDER BY hand_id`,
+        )
+        .all(branch.key.gameId, branch.key.branchId)
+        .map((row) => this.rowToHand(row));
+      const expected = [...expectedHands.values()].sort((left, right) =>
+        compareCodePoints(left.handId, right.handId),
+      );
+      if (canonicalJson(actualHands) !== canonicalJson(expected)) {
+        throw new PersistenceValidationError(
+          "Persisted hand records do not match their authoritative event history",
+        );
+      }
+
+      if (branch.parentKey === null) {
+        if (branch.practice) {
+          throw new PersistenceValidationError("A root game branch cannot be marked as practice");
+        }
+        continue;
+      }
+      if (!branch.practice) {
+        throw new PersistenceValidationError("A child game branch must be marked as practice");
+      }
+      const marker = localEvents[0]?.event;
+      if (
+        marker?.type !== "practice_branch_created" ||
+        marker.gameId !== branch.key.gameId ||
+        marker.branchId !== branch.key.branchId ||
+        marker.parentBranchId !== branch.parentKey.branchId ||
+        marker.originDecisionBranchId !== branch.parentKey.branchId ||
+        marker.parentRevision !== branch.forkRevision ||
+        marker.parentStateHash !== branch.forkStateHash ||
+        marker.revision !== branch.forkRevision + 1
+      ) {
+        throw new PersistenceValidationError(
+          "Practice branch metadata does not match its first local marker",
+        );
+      }
+      const parentHistory = this.collectHistoryInternal(branch.parentKey, branch.forkRevision);
+      const parentState = this.replayHistoryInternal(parentHistory);
+      if (
+        marker.parentEventId !== parentState.lastEventId ||
+        branch.forkEventChainHash !== parentHistory.chainHashByRevision.get(branch.forkRevision)
+      ) {
+        throw new PersistenceValidationError(
+          "Practice branch does not match its parent checkpoint",
+        );
+      }
+      const originDecision = this.getDecisionInternal(marker.originDecisionId);
+      if (
+        originDecision?.key.gameId !== branch.parentKey.gameId ||
+        originDecision.key.branchId !== branch.parentKey.branchId ||
+        originDecision.revision !== marker.parentRevision ||
+        originDecision.playerId !== marker.requestedByPlayerId ||
+        (originDecision.learnerId !== null && originDecision.learnerId !== history.game.learnerId)
+      ) {
+        throw new PersistenceValidationError("Practice branch does not match its origin decision");
+      }
+      const receipt = this.getReceiptInternal(branch.parentKey, marker.requestId);
+      if (
+        receipt?.resultKey.gameId !== branch.key.gameId ||
+        receipt.resultKey.branchId !== branch.key.branchId
+      ) {
+        throw new PersistenceValidationError(
+          "Practice branch is missing its parent-side creation receipt",
+        );
+      }
+    }
+
+    const decisions = this.database
+      .prepare<[], DecisionRow>(
+        `SELECT decision_id, game_id, branch_id, learner_id, hand_id, revision, player_id,
+                request_id, action_id, independent, quality, analysis_version, weighting_version,
+                data_json, created_at
+         FROM decisions`,
+      )
+      .all()
+      .map((row) => this.rowToDecision(row));
+    for (const decision of decisions) {
+      const branch = this.requireBranchInternal(decision.key);
+      const game = this.getGameInternal(decision.key.gameId);
+      if (game === null) {
+        return corruption("Persisted decision branch has no game metadata");
+      }
+      if (game.learnerId !== null && decision.learnerId !== game.learnerId) {
+        throw new PersistenceValidationError("Persisted decision learner does not own its game");
+      }
+      const firstVisibleRevision = branch.parentKey === null ? 1 : branch.forkRevision + 1;
+      if (decision.revision < firstVisibleRevision || decision.revision > branch.currentRevision) {
+        throw new PersistenceValidationError(
+          "Persisted decision revision is outside its branch history",
+        );
+      }
+      const stateAtDecision = this.reconstructInternal(decision.key, decision.revision).state;
+      if (
+        stateAtDecision.hand.id !== decision.handId ||
+        stateAtDecision.players[decision.playerId] === undefined
+      ) {
+        throw new PersistenceValidationError(
+          "Persisted decision does not match its hand or player",
+        );
+      }
+      if (
+        !this.legalActions(stateAtDecision, decision.playerId, game.rulesetDefinition).some(
+          ({ id }) => id === decision.actionId,
+        )
+      ) {
+        throw new PersistenceValidationError(
+          "Persisted decision action was not emitted for its player and revision",
+        );
+      }
+      if (decision.requestId !== null) {
+        const event = this.database
+          .prepare<[string, string, string], { event_id: string }>(
+            `SELECT event_id FROM game_events
+             WHERE game_id = ? AND branch_id = ? AND request_id = ?
+             LIMIT 1`,
+          )
+          .get(decision.key.gameId, decision.key.branchId, decision.requestId);
+        if (event === undefined) {
+          throw new PersistenceValidationError(
+            "Persisted decision request has no same-branch event",
+          );
+        }
+      }
+    }
+
+    const attempts = this.database
+      .prepare<[], DrillAttemptRow>(
+        `SELECT drill_attempt_id, drill_item_id, learner_id, correct, hint_level, data_json,
+                created_at
+         FROM drill_attempts`,
+      )
+      .all()
+      .map((row) => this.rowToDrillAttempt(row));
+    for (const attempt of attempts) {
+      this.requireDrillItemOwnerInternal(attempt.drillItemId, attempt.learnerId);
+    }
+    const schedules = this.database
+      .prepare<[], ScheduleRow>(
+        `SELECT drill_item_id, learner_id, next_review_at, interval_days, ease, updated_at
+         FROM spaced_repetition_schedule`,
+      )
+      .all()
+      .map((row) => this.rowToSchedule(row));
+    for (const schedule of schedules) {
+      this.requireDrillItemOwnerInternal(schedule.drillItemId, schedule.learnerId);
+    }
+
+    const reviews = this.database
+      .prepare<[], ReviewRow>(
+        `SELECT review_id, learner_id, game_id, branch_id, hand_id, data_json, created_at
+         FROM reviews`,
+      )
+      .all()
+      .map((row) => this.rowToReview(row));
+    for (const review of reviews) {
+      const game = this.getGameInternal(review.key.gameId);
+      if (game === null) {
+        return corruption("Persisted review branch has no game metadata");
+      }
+      if (game.learnerId !== null && review.learnerId !== game.learnerId) {
+        throw new PersistenceValidationError("Persisted review learner does not own its game");
+      }
+      const hand = this.requireHandRecordInternal(review.key, review.handId);
+      if (hand.endedRevision === null) {
+        throw new PersistenceValidationError(
+          "Persisted review requires a completed persisted hand",
+        );
+      }
+    }
+    const hints = this.database
+      .prepare<[], HintRow>(
+        "SELECT hint_id, learner_id, decision_id, level, data_json, created_at FROM hints",
+      )
+      .all()
+      .map((row) => this.rowToHint(row));
+    for (const hint of hints) {
+      if (hint.decisionId === null) {
+        continue;
+      }
+      const decision = this.getDecisionInternal(hint.decisionId);
+      if (decision?.learnerId !== hint.learnerId) {
+        throw new PersistenceValidationError(
+          "Persisted hint does not belong to its linked decision learner",
+        );
+      }
+    }
+    const llmRequests = this.database
+      .prepare<[], LlmRequestRow>(
+        `SELECT llm_request_id, learner_id, decision_id, provider, model, latency_ms,
+                input_tokens, output_tokens, fact_ids_json, status, error_code, created_at
+         FROM llm_requests`,
+      )
+      .all()
+      .map((row) => this.rowToLlmRequest(row));
+    for (const request of llmRequests) {
+      this.requireLlmFactScopeInternal(
+        request.learnerId,
+        request.decisionId,
+        request.factIds,
+        "Persisted LLM request metadata",
+      );
+    }
+  }
+
+  private validateAllBranchesInternal(): void {
+    const branches = this.allBranchesInternal();
+    const gameRows = this.database
+      .prepare<[], { game_id: string }>("SELECT game_id FROM games ORDER BY game_id")
+      .all();
+    for (const { game_id: rawGameId } of gameRows) {
+      const gameId = dbString(rawGameId, "Validated game ID");
+      const roots = branches.filter(
+        ({ key, parentKey }) => key.gameId === gameId && parentKey === null,
+      );
+      if (roots.length !== 1 || roots[0]?.key.branchId !== MAIN_BRANCH_ID) {
+        return corruption("Every persisted game must have exactly one main root branch");
+      }
+    }
+
+    for (const branch of branches) {
+      this.validateBranchJournalBoundsInternal(branch);
+
       const history = this.collectHistoryInternal(branch.key, branch.currentRevision);
       const state = this.replayHistoryInternal(history);
       if (
@@ -3013,6 +4136,8 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
           history.game.rulesetDefinition,
           state.ruleset,
           "Persisted game historical ruleset definition",
+          this.validateRulesetDefinition,
+          state.ruleset,
         );
       } catch (caught) {
         const reason =
@@ -3021,6 +4146,16 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
       }
       if (state.branchId !== branch.key.branchId || state.practiceBranch !== branch.practice) {
         return corruption("Replayed state does not match persisted branch identity");
+      }
+      if (isTruncatedCompletedMatch(state)) {
+        return corruption("Branch head stops before the required match_ended event");
+      }
+      if (history.game.sessionConfiguration !== null) {
+        requireSessionConfigurationForState(
+          history.game.sessionConfiguration,
+          state,
+          "Persisted game session configuration",
+        );
       }
       for (const row of this.snapshotRowsForHistoryInternal(history)) {
         const snapshot = rowToSnapshot(row);
@@ -3035,6 +4170,51 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     this.validateCommandReceiptsInternal();
   }
 
+  private validateBranchJournalBoundsInternal(branch: GameBranchMetadata): void {
+    const expectedLocalEventCount = branch.currentRevision - branch.forkRevision;
+    const eventBounds = this.database
+      .prepare<
+        [string, string],
+        {
+          event_count: number;
+          minimum_revision: number | null;
+          maximum_revision: number | null;
+        }
+      >(
+        `SELECT COUNT(*) AS event_count, MIN(revision) AS minimum_revision,
+                MAX(revision) AS maximum_revision
+         FROM game_events
+         WHERE game_id = ? AND branch_id = ?`,
+      )
+      .get(branch.key.gameId, branch.key.branchId);
+    if (
+      expectedLocalEventCount < 1 ||
+      dbInteger(eventBounds?.event_count, "Branch local event count", 0) !==
+        expectedLocalEventCount ||
+      dbInteger(eventBounds?.minimum_revision, "Branch first local event revision", 1) !==
+        branch.forkRevision + 1 ||
+      dbInteger(eventBounds?.maximum_revision, "Branch last local event revision", 1) !==
+        branch.currentRevision
+    ) {
+      return corruption("Branch metadata does not bound its complete local event journal");
+    }
+    const snapshotRows = this.database
+      .prepare<[string, string], { revision: number }>(
+        `SELECT revision
+         FROM game_snapshots
+         WHERE game_id = ? AND branch_id = ?`,
+      )
+      .all(branch.key.gameId, branch.key.branchId);
+    if (
+      snapshotRows.some(({ revision }) => {
+        const parsed = dbInteger(revision, "Branch snapshot revision", 1);
+        return parsed <= branch.forkRevision || parsed > branch.currentRevision;
+      })
+    ) {
+      return corruption("Branch contains a snapshot outside its local event journal");
+    }
+  }
+
   private validateCommandReceiptsInternal(): void {
     const receipts = this.database
       .prepare<[], ReceiptRow>(
@@ -3042,9 +4222,58 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
                 state_hash, created_at
          FROM command_receipts`,
       )
+      .all()
+      .map(rowToReceipt);
+    const receiptByResultBatch = new Map<string, CommandReceipt>();
+    for (const receipt of receipts) {
+      const batchId = `${receipt.resultKey.gameId}\u0000${receipt.resultKey.branchId}\u0000${receipt.requestId}`;
+      if (receiptByResultBatch.has(batchId)) {
+        return corruption("Multiple command receipts claim the same accepted event batch");
+      }
+      receiptByResultBatch.set(batchId, receipt);
+    }
+    const eventBatches = this.database
+      .prepare<
+        [],
+        {
+          game_id: string;
+          branch_id: string;
+          request_id: string;
+          first_revision: number;
+          last_revision: number;
+          event_count: number;
+        }
+      >(
+        `SELECT game_id, branch_id, request_id, MIN(revision) AS first_revision,
+                MAX(revision) AS last_revision, COUNT(*) AS event_count
+         FROM game_events
+         GROUP BY game_id, branch_id, request_id`,
+      )
       .all();
-    for (const row of receipts) {
-      const receipt = rowToReceipt(row);
+    for (const batch of eventBatches) {
+      const gameId = dbString(batch.game_id, "Accepted event batch game ID");
+      const branchId = dbString(batch.branch_id, "Accepted event batch branch ID");
+      const requestId = dbString(batch.request_id, "Accepted event batch request ID");
+      const firstRevision = dbInteger(
+        batch.first_revision,
+        "Accepted event batch first revision",
+        1,
+      );
+      const lastRevision = dbInteger(batch.last_revision, "Accepted event batch last revision", 1);
+      const eventCount = dbInteger(batch.event_count, "Accepted event batch count", 1);
+      const receipt = receiptByResultBatch.get(`${gameId}\u0000${branchId}\u0000${requestId}`);
+      if (
+        receipt?.startRevision !== firstRevision ||
+        receipt.endRevision !== lastRevision ||
+        eventCount !== lastRevision - firstRevision + 1
+      ) {
+        return corruption("Accepted event batch is missing its exact command receipt");
+      }
+    }
+    if (receiptByResultBatch.size !== eventBatches.length) {
+      return corruption("Command receipt set does not match accepted event batches");
+    }
+    for (const receipt of receipts) {
       const events = this.database
         .prepare<[string, string, number, number], EventRow>(
           `SELECT game_id, branch_id, revision, event_id, request_id, event_type, visibility,
@@ -3065,6 +4294,27 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
         events.some((event) => event.requestId !== receipt.requestId)
       ) {
         return corruption("Command receipt does not match an atomic event range");
+      }
+      if (
+        receipt.key.gameId !== receipt.resultKey.gameId ||
+        receipt.key.branchId !== receipt.resultKey.branchId
+      ) {
+        const resultBranch = this.requireBranchInternal(receipt.resultKey);
+        const marker = events.length === 1 ? events[0]?.event : undefined;
+        if (
+          resultBranch.parentKey?.gameId !== receipt.key.gameId ||
+          resultBranch.parentKey.branchId !== receipt.key.branchId ||
+          !resultBranch.practice ||
+          receipt.startRevision !== resultBranch.forkRevision + 1 ||
+          receipt.endRevision !== receipt.startRevision ||
+          marker?.type !== "practice_branch_created" ||
+          marker.gameId !== receipt.resultKey.gameId ||
+          marker.branchId !== receipt.resultKey.branchId ||
+          marker.parentBranchId !== receipt.key.branchId ||
+          marker.requestId !== receipt.requestId
+        ) {
+          return corruption("Cross-branch command receipt is not a valid practice fork receipt");
+        }
       }
       const terminal = events.at(-1);
       if (

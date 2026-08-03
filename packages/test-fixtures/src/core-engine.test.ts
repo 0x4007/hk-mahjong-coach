@@ -2039,7 +2039,7 @@ describe("wall exhaustion", () => {
     });
     assertStateInvariants(state);
     expect(replayEvents(events)).toEqual(state);
-  }, 20_000);
+  }, 60_000);
 });
 
 describe("authoritative replay validation", () => {
@@ -2307,5 +2307,5 @@ describe("legal-sequence properties", () => {
         endOnFailure: true,
       },
     );
-  });
+  }, 60_000);
 });

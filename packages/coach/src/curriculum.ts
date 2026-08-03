@@ -82,20 +82,19 @@ export const CURRICULUM_STAGES: readonly CurriculumStage[] = [
 
 export const curriculumStageFor = (mastery: readonly ConceptMastery[]): CurriculumStage => {
   const byConcept = new Map(mastery.map((record) => [record.conceptId, record] as const));
-  let active = CURRICULUM_STAGES[0];
   for (const stage of CURRICULUM_STAGES) {
     const complete = stage.conceptIds.every(
       (conceptId) => (byConcept.get(conceptId)?.mastery ?? 0) >= 0.75,
     );
     if (!complete) {
-      break;
+      return stage;
     }
-    active = stage;
   }
-  if (active === undefined) {
+  const finalStage = CURRICULUM_STAGES.at(-1);
+  if (finalStage === undefined) {
     throw new Error("Curriculum has no initial stage");
   }
-  return active;
+  return finalStage;
 };
 
 export const nextCurriculumConcept = (
@@ -107,11 +106,12 @@ export const nextCurriculumConcept = (
     (conceptId, index, all) => all.indexOf(conceptId) === index,
   );
   const next = ranked
-    .map((conceptId) => ({ conceptId, mastery: byConcept.get(conceptId)?.mastery ?? 0 }))
-    .sort(
-      (left, right) =>
-        left.mastery - right.mastery || left.conceptId.localeCompare(right.conceptId),
-    )[0];
+    .map((conceptId, priority) => ({
+      conceptId,
+      mastery: byConcept.get(conceptId)?.mastery ?? 0,
+      priority,
+    }))
+    .sort((left, right) => left.mastery - right.mastery || left.priority - right.priority)[0];
   return next?.conceptId ?? null;
 };
 

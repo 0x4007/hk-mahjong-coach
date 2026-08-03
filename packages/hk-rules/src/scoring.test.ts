@@ -1,4 +1,5 @@
 import {
+  compactCodeForTile,
   parseTileTypes,
   type Meld,
   type PaymentSettlementInput,
@@ -13,6 +14,11 @@ import {
 import { describe, expect, it } from "vitest";
 import { getBundledRuleset } from "./bundled.js";
 import { toCoreGameRules } from "./core-rules.js";
+import {
+  GOLDEN_SCORING_FIXTURES,
+  type GoldenScoringExpected,
+  type GoldenScoringInput,
+} from "./golden-scoring-fixtures.js";
 import {
   basePointsForFaan,
   createHongKongScoringSystem,
@@ -317,7 +323,8 @@ const RULE_CASES: readonly RuleGoldenCase[] = [
       concealed: "1m 1m 2m 2m 3p 3p 4p 4p 5s 5s 6s 6s E E",
     },
     nearMiss: {
-      concealed: "1m 1m 1m 1m 2m 2m 3p 3p 4p 4p 5s 5s 6s 6s",
+      concealed: "1m 1m 1m 2m 3m 4m 4p 5p 6p 7s 8s 9s E E",
+      bonus: "",
     },
   },
   {
@@ -403,7 +410,8 @@ const RULE_CASES: readonly RuleGoldenCase[] = [
       concealed: "1m 9m 1p 9p 1s 9s E S W N R G Wh 1m",
     },
     nearMiss: {
-      concealed: "1m 9m 1p 9p 1s 9s E S W N R G 2m 1m",
+      concealed: "1m 2m 3m 1p 2p 3p 1s 2s 3s E E E Wh Wh",
+      bonus: "",
     },
   },
   {
@@ -505,28 +513,211 @@ const RULE_CASES: readonly RuleGoldenCase[] = [
   },
 ];
 
-const RULE_FIXTURES = RULE_CASES.flatMap(({ ruleId, positive, nearMiss }) => [
-  { id: `${ruleId}:positive`, ruleId, shouldMatch: true, fixture: positive },
-  { id: `${ruleId}:near-miss`, ruleId, shouldMatch: false, fixture: nearMiss },
-]);
+const GOLDEN_PLAYERS: PaymentSettlementInput["players"] = [
+  { id: "east", seat: "east" },
+  { id: "south", seat: "south" },
+  { id: "west", seat: "west" },
+  { id: "north", seat: "north" },
+];
+
+const materializeGolden = (
+  fixture: GoldenScoringInput,
+): {
+  input: ScoringAssessmentInput;
+  ruleset: ReturnType<typeof getBundledRuleset>;
+} => {
+  const ruleset = getBundledRuleset(fixture.rulesetId);
+  if (ruleset.definition.version !== fixture.rulesetVersion) {
+    throw new Error(`Golden fixture ${fixture.rulesetId} has a stale ruleset version`);
+  }
+  const allocator = new PhysicalAllocator();
+  const concealedTileIds = allocator.allocate(fixture.concealedTiles);
+  const winningTileId = fixture.winningTileId as TileInstanceId;
+  if (!concealedTileIds.includes(winningTileId)) {
+    throw new Error(`Golden fixture winning tile ${winningTileId} is not concealed`);
+  }
+  const melds: Meld[] = fixture.melds.map((meld) => {
+    const tileIds = allocator.allocate(meld.tiles);
+    const claimedTileId = meld.claimedTileId as TileInstanceId | null;
+    const expectedClaimedTileId = meld.exposed ? (tileIds[0] ?? null) : null;
+    if (claimedTileId !== expectedClaimedTileId) {
+      throw new Error(`Golden fixture meld ${meld.id} has stale physical tile identity`);
+    }
+    return {
+      id: meld.id,
+      kind: meld.kind,
+      kongKind: meld.kongKind,
+      tileIds: [...tileIds],
+      exposed: meld.exposed,
+      claimedFrom: meld.claimedFrom,
+      claimedTileId,
+      createdEventId: meld.createdEventId,
+    };
+  });
+  return {
+    ruleset,
+    input: {
+      rules: toCoreGameRules(ruleset),
+      mode: fixture.mode,
+      player: {
+        id: fixture.playerId,
+        seat: fixture.seat,
+        concealedTileIds,
+        melds,
+        bonusTileIds: allocator.allocate(fixture.bonusTiles),
+      },
+      prevailingWind: fixture.prevailingWind,
+      dealerPlayerId: fixture.dealerPlayerId,
+      winningTileId,
+      winSource: fixture.winSource,
+      fromPlayerId: fixture.fromPlayerId,
+      replacementReason: fixture.replacementReason,
+      isInitialDeal: fixture.isInitialDeal,
+      isDealerFirstDiscard: fixture.isDealerFirstDiscard,
+      initialBonusReplacementOccurred: fixture.initialBonusReplacementOccurred,
+      openingKongOccurred: fixture.openingKongOccurred,
+      firstDiscardCompleted: fixture.firstDiscardCompleted,
+      callsOccurred: fixture.callsOccurred,
+      robbedKongKind: fixture.robbedKongKind,
+      winningTileWasFinalLiveTile: fixture.winningTileWasFinalLiveTile,
+      discardFollowedFinalLiveDraw: fixture.discardFollowedFinalLiveDraw,
+    },
+  };
+};
+
+const goldenRuleValue = (
+  value: ScoringBreakdown["applied"][number]["value"],
+): readonly ["faan", number] | readonly ["limit"] =>
+  value.type === "faan" ? ["faan", value.amount] : ["limit"];
+
+const goldenDecomposition = (decomposition: ScoringBreakdown["decomposition"]) => ({
+  form: decomposition.form,
+  concealedGroups: decomposition.concealedGroups.map(
+    ({ kind, tileTypes }) =>
+      [kind, tileTypes.map((tileType) => compactCodeForTile(tileType)).join(" ")] as const,
+  ),
+  declaredMeldIds: decomposition.declaredMeldIds,
+});
+
+const normalizeGoldenExpected = (
+  fixture: GoldenScoringInput,
+  assessment: ReturnType<ReturnType<typeof createHongKongScoringSystem>["assess"]>,
+  ruleset: ReturnType<typeof getBundledRuleset>,
+): GoldenScoringExpected => {
+  const breakdown = assessment.breakdown;
+  const settlement =
+    breakdown?.legalWin === true
+      ? settlePayments(ruleset.definition.payment, {
+          players: GOLDEN_PLAYERS,
+          dealerPlayerId: fixture.dealerPlayerId,
+          winners: [
+            {
+              playerId: fixture.playerId,
+              source: fixture.winSource,
+              fromPlayerId: fixture.fromPlayerId,
+              breakdown,
+            },
+          ],
+        })
+      : null;
+  return {
+    decomposition: breakdown === null ? null : goldenDecomposition(breakdown.decomposition),
+    alternateForms: breakdown?.alternatives.map(({ decomposition }) => decomposition.form) ?? [],
+    applied:
+      breakdown?.applied.map(
+        ({ ruleId, value, occurrences, faanContribution, impliedByRuleIds }) => [
+          ruleId as ScoringRuleId,
+          goldenRuleValue(value),
+          occurrences,
+          faanContribution,
+          impliedByRuleIds,
+        ],
+      ) ?? [],
+    suppressed:
+      breakdown?.suppressed.map(
+        ({ ruleId, value, occurrences, wouldAddFaan, reason, byRuleIds }) => [
+          ruleId as ScoringRuleId,
+          goldenRuleValue(value),
+          occurrences,
+          wouldAddFaan,
+          reason,
+          byRuleIds as readonly ScoringRuleId[],
+        ],
+      ) ?? [],
+    rawFaan: assessment.preview.rawFaan,
+    cappedFaan: assessment.preview.cappedFaan,
+    minimumRequired: assessment.preview.minimumRequired,
+    missingFaan: assessment.preview.missingFaan,
+    legalWin: assessment.preview.legalWin,
+    basePoints: breakdown?.basePoints ?? null,
+    payment:
+      settlement === null
+        ? null
+        : {
+            payments: settlement.payments.map(
+              ({ fromPlayerId, toPlayerId, points, basePoints, multiplier, reasons }) => [
+                fromPlayerId,
+                toPlayerId,
+                points,
+                basePoints,
+                multiplier,
+                reasons,
+              ],
+            ),
+            scoreDeltas: [
+              settlement.scoreDeltas.east ?? 0,
+              settlement.scoreDeltas.south ?? 0,
+              settlement.scoreDeltas.west ?? 0,
+              settlement.scoreDeltas.north ?? 0,
+            ],
+          },
+  };
+};
 
 describe("golden scoring rules", () => {
   it("contains the required positive and near-miss fixture for every rule", () => {
-    expect(RULE_CASES.map(({ ruleId }) => ruleId)).toHaveLength(34);
-    expect(new Set(RULE_CASES.map(({ ruleId }) => ruleId)).size).toBe(34);
-    expect(RULE_FIXTURES).toHaveLength(68);
+    expect(GOLDEN_SCORING_FIXTURES).toHaveLength(75);
+    expect(new Set(GOLDEN_SCORING_FIXTURES.map(({ id }) => id)).size).toBe(75);
+    const coverage = GOLDEN_SCORING_FIXTURES.flatMap((fixture) =>
+      fixture.coverage === null ? [] : [fixture.coverage],
+    );
+    expect(coverage).toHaveLength(68);
+    const bundledRuleIds = getBundledRuleset("hk_nyc_social_v1")
+      .definition.scoringRules.map(({ id }) => id)
+      .sort();
+    const coveredRuleIds = [...new Set(coverage.map(({ ruleId }) => ruleId))].sort();
+    expect(coveredRuleIds).toStrictEqual(bundledRuleIds);
+    for (const ruleId of coveredRuleIds) {
+      expect(
+        coverage
+          .filter((candidate) => candidate.ruleId === ruleId)
+          .map(({ kind }) => kind)
+          .sort(),
+      ).toStrictEqual(["near-miss", "positive"]);
+    }
   });
 
-  it.each(RULE_FIXTURES)("$id", ({ ruleId, shouldMatch, fixture }) => {
-    const assessment = scoreFixture(fixture);
-    const applied = assessment.breakdown?.applied.map(({ ruleId: id }) => id) ?? [];
-    const suppressed = assessment.breakdown?.suppressed.map(({ ruleId: id }) => id) ?? [];
-    if (shouldMatch) {
-      expect(applied, `${ruleId} should contribute in its positive fixture`).toContain(ruleId);
-    } else {
-      expect([...applied, ...suppressed], `${ruleId} should not match its near miss`).not.toContain(
-        ruleId,
-      );
+  it.each(GOLDEN_SCORING_FIXTURES)("$id", (fixture) => {
+    const { input, ruleset } = materializeGolden(fixture.input);
+    const assessment = createHongKongScoringSystem(ruleset).assess(input);
+    const actual = normalizeGoldenExpected(fixture.input, assessment, ruleset);
+    expect(actual).toStrictEqual(fixture.expected);
+    if (fixture.coverage !== null) {
+      const matchedRuleIds = [
+        ...actual.applied.map(([ruleId]) => ruleId),
+        ...actual.suppressed.map(([ruleId]) => ruleId),
+      ];
+      if (fixture.coverage.kind === "positive") {
+        expect(
+          actual.applied.map(([ruleId]) => ruleId),
+          `${fixture.coverage.ruleId} should contribute in its positive fixture`,
+        ).toContain(fixture.coverage.ruleId);
+      } else {
+        expect(
+          matchedRuleIds,
+          `${fixture.coverage.ruleId} should not match its near miss`,
+        ).not.toContain(fixture.coverage.ruleId);
+      }
     }
   });
 });
