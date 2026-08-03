@@ -133,9 +133,10 @@
   lock, unrestricted vertical mouse look, WASD/arrow movement through the penthouse within room bounds,
   an Escape unlock, and an alternate orbit-controlled overhead lens.
 - The seat lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
-  Seated movement is half speed with slight momentum; Space makes a short jump. Directional sprites hide
-  when seated, the centered reticule remains visible, and adaptive Bokeh focuses on the nearest non-overlay
-  object under the aim ray.
+  Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
+  jump apex. Directional sprites hide when seated, the centered reticule remains visible, and adaptive Bokeh
+  focuses on the nearest non-overlay object under the aim ray. Double-tapping W engages a 1.75× sprint until
+  W is released.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The browser shell is a viewport-owned scene rather than a document card. It uses `100dvh` with
   minimal overlay controls so the table remains the primary surface on desktop and mobile.

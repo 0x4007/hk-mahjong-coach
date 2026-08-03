@@ -10,6 +10,15 @@ import { getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
 
 export type SceneView = "seat" | "overhead";
 
+export type MotionLookStatus =
+  "unsupported" | "needs-permission" | "requesting" | "ready" | "denied";
+
+export type TouchMovement = "forward" | "back" | "left" | "right";
+
+export interface MahjongTableSceneOptions {
+  readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
+}
+
 export interface PenthouseSceneAnchors {
   readonly tableRoot: THREE.Object3D;
   readonly playerHand: THREE.Object3D;
@@ -25,6 +34,10 @@ export interface PenthouseSceneAnchors {
 
 export interface MahjongTableMount {
   readonly setView: (view: SceneView) => void;
+  readonly requestMotionLook: () => Promise<MotionLookStatus>;
+  readonly setTouchMovement: (direction: TouchMovement, active: boolean) => void;
+  readonly toggleCrouch: () => boolean;
+  readonly jump: () => void;
   readonly dispose: () => void;
   readonly anchors: PenthouseSceneAnchors;
 }
@@ -192,15 +205,64 @@ const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
 const SEATED_EYE_HEIGHT = 1.45;
 const STANDING_FOV = 90;
 const SEATED_FOV = 68;
-// A ~0.9-unit apex with a ~0.55-second airtime reads as a full, quick jump at this scene scale.
-const JUMP_SPEED = 6.6;
-const GRAVITY = 24;
+// Double both launch and gravity to double the apex while keeping the same quick airtime.
+const JUMP_SPEED = 13.2;
+const GRAVITY = 48;
+const SPRINT_MULTIPLIER = 1.75;
+const DOUBLE_TAP_WINDOW_MS = 300;
 const ROOM_BOUNDS = {
   minX: -6.7,
   maxX: 6.7,
   minZ: -5.05,
   maxZ: 5.05,
 } as const;
+
+const DEGREES_TO_RADIANS = Math.PI / 180;
+const DEVICE_ORIENTATION_ZEE = new THREE.Vector3(0, 0, 1);
+const DEVICE_ORIENTATION_QUARTER = new THREE.Quaternion(
+  -Math.sqrt(0.5),
+  0,
+  0,
+  Math.sqrt(0.5),
+);
+
+interface DeviceOrientationEventPermissionConstructor {
+  readonly requestPermission?: () => Promise<"granted" | "denied">;
+}
+
+const getScreenOrientationAngle = (): number => {
+  const screenOrientation = window.screen.orientation;
+  if (screenOrientation !== undefined && Number.isFinite(screenOrientation.angle)) {
+    return screenOrientation.angle;
+  }
+  const legacyOrientation = (window as unknown as { readonly orientation?: unknown }).orientation;
+  return typeof legacyOrientation === "number" ? legacyOrientation : 0;
+};
+
+const setDeviceOrientationQuaternion = (
+  target: THREE.Quaternion,
+  euler: THREE.Euler,
+  screenQuaternion: THREE.Quaternion,
+  event: DeviceOrientationEvent,
+): boolean => {
+  if (event.alpha === null || event.beta === null || event.gamma === null) {
+    return false;
+  }
+  euler.set(
+    event.beta * DEGREES_TO_RADIANS,
+    event.alpha * DEGREES_TO_RADIANS,
+    -event.gamma * DEGREES_TO_RADIANS,
+    "YXZ",
+  );
+  target.setFromEuler(euler);
+  target.multiply(DEVICE_ORIENTATION_QUARTER);
+  screenQuaternion.setFromAxisAngle(
+    DEVICE_ORIENTATION_ZEE,
+    -getScreenOrientationAngle() * DEGREES_TO_RADIANS,
+  );
+  target.multiply(screenQuaternion);
+  return true;
+};
 
 const createCanvasTexture = (canvas: HTMLCanvasElement): THREE.CanvasTexture => {
   const texture = new THREE.CanvasTexture(canvas);
@@ -1292,6 +1354,7 @@ const disposeObject = (object: THREE.Object3D): void => {
 export const createMahjongTableScene = (
   container: HTMLElement,
   initialView: SceneView = "seat",
+  options: MahjongTableSceneOptions = {},
 ): MahjongTableMount => {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
@@ -1345,6 +1408,135 @@ export const createMahjongTableScene = (
   firstPersonControls.enabled = false;
 
   let activeView = initialView;
+  const isTouchDevice =
+    navigator.maxTouchPoints > 0 ||
+    window.matchMedia("(pointer: coarse)").matches ||
+    "ontouchstart" in window;
+  const orientationConstructor = (
+    window as unknown as {
+      readonly DeviceOrientationEvent?: DeviceOrientationEventPermissionConstructor;
+    }
+  ).DeviceOrientationEvent;
+  const supportsMotionLook =
+    isTouchDevice &&
+    (orientationConstructor !== undefined || "ondeviceorientation" in window);
+  let motionLookStatus: MotionLookStatus = supportsMotionLook
+    ? "needs-permission"
+    : "unsupported";
+  let motionLookEnabled = false;
+  let motionRequest: Promise<MotionLookStatus> | null = null;
+  let orientationListenerAttached = false;
+  let hasMotionReference = false;
+  let motionTargetValid = false;
+  const deviceOrientationEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  const deviceOrientationQuaternion = new THREE.Quaternion();
+  const deviceScreenQuaternion = new THREE.Quaternion();
+  const deviceReferenceQuaternion = new THREE.Quaternion();
+  const cameraReferenceQuaternion = new THREE.Quaternion();
+  const relativeMotionQuaternion = new THREE.Quaternion();
+  const motionTargetQuaternion = new THREE.Quaternion();
+  const motionTargetEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  const setMotionLookStatus = (status: MotionLookStatus): void => {
+    motionLookStatus = status;
+    options.onMotionLookStatusChange?.(status);
+  };
+  setMotionLookStatus(motionLookStatus);
+  const resetMotionCalibration = (): void => {
+    hasMotionReference = false;
+    motionTargetValid = false;
+  };
+  const onDeviceOrientation = (event: DeviceOrientationEvent): void => {
+    if (!motionLookEnabled || activeView !== "seat") {
+      return;
+    }
+    if (
+      !setDeviceOrientationQuaternion(
+        deviceOrientationQuaternion,
+        deviceOrientationEuler,
+        deviceScreenQuaternion,
+        event,
+      )
+    ) {
+      return;
+    }
+    if (!hasMotionReference) {
+      deviceReferenceQuaternion.copy(deviceOrientationQuaternion);
+      cameraReferenceQuaternion.copy(camera.quaternion);
+      hasMotionReference = true;
+      return;
+    }
+    relativeMotionQuaternion
+      .copy(deviceReferenceQuaternion)
+      .invert()
+      .multiply(deviceOrientationQuaternion);
+    motionTargetQuaternion.copy(cameraReferenceQuaternion).multiply(relativeMotionQuaternion);
+    motionTargetEuler.setFromQuaternion(motionTargetQuaternion, "YXZ");
+    motionTargetEuler.x = THREE.MathUtils.clamp(
+      motionTargetEuler.x,
+      -Math.PI / 2 + 0.12,
+      Math.PI / 2 - 0.12,
+    );
+    motionTargetEuler.z = 0;
+    motionTargetQuaternion.setFromEuler(motionTargetEuler);
+    motionTargetValid = true;
+  };
+  const attachOrientationListener = (): void => {
+    if (orientationListenerAttached) {
+      return;
+    }
+    window.addEventListener("deviceorientation", onDeviceOrientation, { passive: true });
+    window.addEventListener("orientationchange", resetMotionCalibration);
+    orientationListenerAttached = true;
+  };
+  const requestMotionLook = (): Promise<MotionLookStatus> => {
+    if (motionRequest !== null) {
+      return motionRequest;
+    }
+    const request = (async (): Promise<MotionLookStatus> => {
+      if (!supportsMotionLook) {
+        setMotionLookStatus("unsupported");
+        return "unsupported";
+      }
+      if (motionLookStatus === "ready") {
+        return "ready";
+      }
+      setMotionLookStatus("requesting");
+      try {
+        const requestPermission = orientationConstructor?.requestPermission;
+        if (requestPermission !== undefined) {
+          const permission = await requestPermission();
+          if (permission !== "granted") {
+            motionLookEnabled = false;
+            setMotionLookStatus("denied");
+            return "denied";
+          }
+        }
+        motionLookEnabled = true;
+        resetMotionCalibration();
+        attachOrientationListener();
+        setMotionLookStatus("ready");
+        return "ready";
+      } catch {
+        motionLookEnabled = false;
+        setMotionLookStatus("denied");
+        return "denied";
+      }
+    })();
+    motionRequest = request;
+    void request.then(
+      () => {
+        if (motionRequest === request) {
+          motionRequest = null;
+        }
+      },
+      () => {
+        if (motionRequest === request) {
+          motionRequest = null;
+        }
+      },
+    );
+    return request;
+  };
   const pressedKeys = new Set<string>();
   let eyeHeight = STANDING_EYE_HEIGHT;
   let isCrouched = false;
@@ -1353,6 +1545,8 @@ export const createMahjongTableScene = (
   let grounded = true;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
+  let isSprinting = false;
+  let lastForwardTapAt = Number.NEGATIVE_INFINITY;
   const movementKeys = new Set([
     "KeyW",
     "KeyA",
@@ -1376,6 +1570,13 @@ export const createMahjongTableScene = (
         }
       } else if (movementKeys.has(event.code)) {
         pressedKeys.add(event.code);
+        if (event.code === "KeyW" && !event.repeat) {
+          const now = window.performance.now();
+          if (now - lastForwardTapAt <= DOUBLE_TAP_WINDOW_MS) {
+            isSprinting = true;
+          }
+          lastForwardTapAt = now;
+        }
       } else if (event.code === "Space" && !event.repeat && grounded) {
         verticalVelocity = JUMP_SPEED;
         grounded = false;
@@ -1384,6 +1585,9 @@ export const createMahjongTableScene = (
   };
   const onKeyUp = (event: KeyboardEvent): void => {
     pressedKeys.delete(event.code);
+    if (event.code === "KeyW") {
+      isSprinting = false;
+    }
   };
   const onWindowBlur = (): void => {
     pressedKeys.clear();
@@ -1392,6 +1596,8 @@ export const createMahjongTableScene = (
     grounded = true;
     forwardVelocity = 0;
     strafeVelocity = 0;
+    isSprinting = false;
+    lastForwardTapAt = Number.NEGATIVE_INFINITY;
   };
   const setControlActive = (active: boolean): void => {
     container.dataset.controlActive = active ? "true" : "false";
@@ -1423,6 +1629,8 @@ export const createMahjongTableScene = (
     grounded = true;
     forwardVelocity = 0;
     strafeVelocity = 0;
+    isSprinting = false;
+    lastForwardTapAt = Number.NEGATIVE_INFINITY;
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
   };
@@ -1538,7 +1746,9 @@ export const createMahjongTableScene = (
       const right =
         (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight") ? 1 : 0) -
         (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft") ? 1 : 0);
-      const currentMoveSpeed = crouching ? moveSpeed * 0.5 : moveSpeed;
+      const sprinting = isSprinting && pressedKeys.has("KeyW") && !crouching;
+      const speedMultiplier = crouching ? 0.5 : sprinting ? SPRINT_MULTIPLIER : 1;
+      const currentMoveSpeed = moveSpeed * speedMultiplier;
       const inputMagnitude = Math.hypot(forward, right);
       const inputScale = inputMagnitude > 1 ? 1 / inputMagnitude : 1;
       const desiredForward = forward * inputScale * currentMoveSpeed;

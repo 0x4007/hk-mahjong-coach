@@ -104,8 +104,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   orbit controls.
 - The first-person lens uses a 90° standing FOV and a smooth 68° seated FOV with 1.8 pointer speed. Shift
   toggles a 1.45 eye-height sit state at half walking speed; directional seat signs hide while seated.
-  Space performs a short, snappy jump, movement eases into and out of momentum, the center reticule remains
-  visible, and the Bokeh pass follows the nearest non-overlay object under its ray.
+  Space performs a quick jump at roughly twice the prior apex while preserving the same airtime. Double-tap
+  W engages a 1.75× sprint until W is released; movement eases into and out of momentum, the center reticule
+  remains visible, and the Bokeh pass follows the nearest non-overlay object under its ray.
 - Pointer-lock state fades the instructional intro/footer overlays so the controlled scene stays clear.
 - The table now owns the full dynamic viewport (`100dvh`) with title, view buttons, status, and control
   hints as unobtrusive scene overlays rather than a scrolling page card.
