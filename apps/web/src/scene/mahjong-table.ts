@@ -208,7 +208,7 @@ const SEATED_FOV = 68;
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
-const SPRINT_MULTIPLIER = 1.75;
+const SPRINT_MULTIPLIER = 3;
 const DOUBLE_TAP_WINDOW_MS = 300;
 const ROOM_BOUNDS = {
   minX: -6.7,
