@@ -79,6 +79,32 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The real process-restart/latest-resumable-game path is not yet composed through a client or server.
 - Persistence is not yet included in its required coverage gate.
 
+## Visual table prototype lane — 2026-08-03
+
+- Isolated worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/visual-table`.
+- Branch: `visual-table-gb9d082b587`, based on `7212f3ac98679ea62aedcd9f1d86b3a587c9b17d`.
+- Added a browser-only Three.js base for the future Milestone 7 table: a four-sided table, stacked
+  walls, face-up human hand, face-down opponent hands, public discards and melds, dice, seat labels,
+  orbit/zoom controls, and a procedural Manhattan night skyline behind a penthouse window.
+- Tile faces and backs are generated locally from the immutable tile catalog; no hidden opponent tile
+  identity is placed in the scene. The scene is deliberately deterministic and does not replace the
+  engine, observation, protocol, persistence, or legal-action surfaces.
+- The tile treatment is intentionally near-black and gold, with only bamboo/green and red/green dragon
+  accents where the symbol needs color. The felt, center inlay, and wood surface now use separated
+  depth layers to avoid WebGL z-fighting.
+- The rendering pass now follows a Mirror's Edge Catalyst-inspired graphic direction: pale geometric
+  architecture, charcoal table forms, hard white light, and red/gold signal accents instead of a
+  multi-color photoreal palette.
+- The canvas resize path now coalesces `ResizeObserver` notifications and ignores unchanged
+  dimensions; the renderer uses the current `PCFShadowMap` setting instead of the deprecated soft-map
+  constant.
+- `three@0.185.1` and matching `@types/three@0.185.3` are the only new runtime/development packages.
+  Online research checked the official Three.js ecosystem and CC0 texture sources; this prototype uses
+  no external asset files so licensing can be reviewed before adding a production asset pack.
+- `pnpm build`, `pnpm smoke`, `pnpm format:check`, `pnpm lint`, and `pnpm typecheck` pass.
+- The connected browser rejected the local URL while its admin security check was unavailable, so
+  rendered-browser acceptance and camera-button smoke evidence remain pending.
+
 ## Next action
 
 Add focused Milestone 5 regressions for deletion, snapshot recovery, export/schema migration, hash

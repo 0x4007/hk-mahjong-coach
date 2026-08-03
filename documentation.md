@@ -107,6 +107,33 @@
   `sha256:219b345c5c8795d1668f7dc975e03cb26c1cc1e7674c7d9fa67bf188eaa7b284`.
 - `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` also pass.
 
+## 2026-08-03 — Procedural Three.js visual table base
+
+- The isolated `visual-table-gb9d082b587` worktree adds the first visible browser slice for the future
+  table milestone. `apps/web/src/scene/mahjong-table.ts` owns the scene graph, camera presets, lights,
+  tile meshes, local canvas textures, public discard rivers, and the Midtown window backdrop; the React
+  wrapper only mounts and disposes it.
+- The scene uses Three.js `0.185.1` directly with Vite. `RoundedBoxGeometry`, `OrbitControls`, and
+  local `CanvasTexture` generation are the only rendering helpers. No downloaded model, HDRI, or tile
+  art is bundled. Poly Haven and ambientCG remain possible future sources for clearly licensed wood,
+  felt, or window materials, but they are not part of this prototype.
+- The static composition is intentionally familiar to a New York social player: warm wood and jade
+  felt, brass inlay, stacked walls, racks, public melds/discards, opponent backs, a night skyline,
+  rooftop water tank, and an Empire-style spire. Camera buttons switch between seat and overhead views;
+  pointer drag and wheel zoom are handled by `OrbitControls`.
+- Tile bodies and backs are near-black with gold linework and lettering. Bamboo and red/green dragons
+  keep restrained semantic accents. Felt, center, inlay, and rail surfaces are offset by explicit depth
+  layers so they do not flicker from coplanar WebGL faces.
+- The visual direction is graphic and high-contrast, inspired by Mirror's Edge Catalyst: a pale
+  architectural skyline, charcoal table, hard white key light, and red/gold signal accents. This is a
+  style reference only; no game assets or textures are copied from that title.
+- The WebGL mount coalesces resize observations and ignores unchanged canvas dimensions, which avoids
+  a resize-notification loop while the view is mounted. Shadows use the current `PCFShadowMap` API.
+- This is a rendering base, not Milestone 7 completion. It has no live WebSocket/game observation,
+  legal-action controls, replay state, or persistence yet. The browser must continue to consume public
+  observations when those surfaces are wired in; opponent hands must remain face-down until an engine
+  event makes a tile public.
+
 ## Commands
 
 ```bash
