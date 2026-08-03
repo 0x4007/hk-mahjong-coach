@@ -117,21 +117,26 @@
   local `CanvasTexture` generation are the only rendering helpers. No downloaded model, HDRI, or tile
   art is bundled. Poly Haven and ambientCG remain possible future sources for clearly licensed wood,
   felt, or window materials, but they are not part of this prototype.
-- The static composition is intentionally familiar to a New York social player: warm wood and jade
-  felt, brass inlay, stacked walls, racks, public melds/discards, opponent backs, a night skyline,
-  rooftop water tank, and an Empire-style spire. Camera buttons switch between seat and overhead views;
-  pointer drag and wheel zoom are handled by `OrbitControls`.
-- Tile bodies and backs are near-black with gold linework and lettering. Bamboo and red/green dragons
-  keep restrained semantic accents. Felt, center, inlay, and rail surfaces are offset by explicit depth
-  layers so they do not flicker from coplanar WebGL faces.
-- The visual direction is graphic and high-contrast, inspired by Mirror's Edge Catalyst: a pale
-  architectural skyline, charcoal table, hard white key light, and red/gold signal accents. This is a
-  style reference only; no game assets or textures are copied from that title.
+- The static composition follows the supplied visual contract: a bright, double-height penthouse shell
+  with broad architectural whites, charcoal recesses, a restrained red floor direction line, pale cyan
+  system seams, floor-to-ceiling glazing, and depth-compressed Midtown geometry. Camera buttons switch
+  between the composed seat and overhead views; only the overhead view remains orbit-controlled.
+- Tile bodies are warm ivory with crisp local face artwork; backs use an original charcoal, red, and cyan
+  line treatment. Playing-field, shell, center, and seam surfaces are offset by explicit depth layers so
+  they do not flicker from coplanar WebGL faces.
+- The visual direction is original architectural futurism informed by the supplied Mirror's Edge-style
+  principles: pale monolithic planes, dark voids, hard white daylight, and sparse red/cyan signals. No
+  game assets, logos, or textures are copied from that title.
 - The WebGL mount coalesces resize observations and ignores unchanged canvas dimensions, which avoids
   a resize-notification loop while the view is mounted. Shadows use the current `PCFShadowMap` API.
-- The seat camera intentionally borrows familiar first-person game conventions: click-to-capture
-  pointer lock, mouse look, WASD/arrow movement, an Escape unlock, and a bounded movement box that
-  keeps the player at the South seat. The alternate overhead lens remains orbit-controlled.
+- The seat camera intentionally borrows familiar first-person game conventions: click-to-capture pointer
+  lock, unrestricted vertical mouse look, WASD/arrow movement through the penthouse within room bounds,
+  an Escape unlock, and an alternate orbit-controlled overhead lens.
+- The seat lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
+  Seated movement is half speed with slight momentum; Space makes a short jump. Directional sprites hide
+  when seated, the centered reticule remains visible, and adaptive Bokeh focuses on the nearest non-overlay
+  object under the aim ray.
+- Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The browser shell is a viewport-owned scene rather than a document card. It uses `100dvh` with
   minimal overlay controls so the table remains the primary surface on desktop and mobile.
 - This is a rendering base, not Milestone 7 completion. It has no live WebSocket/game observation,

@@ -9,13 +9,14 @@
     "Segoe UI",
     sans-serif;
   color: #15191a;
-  background: #e7ecea;
+  background: #e9efed;
   font-synthesis: none;
   --surface: #f5f7f4;
   --surface-strong: #e1e7e4;
   --muted: #52605d;
-  --accent: #e9554d;
-  --accent-warm: #ae813d;
+  --accent: #e94136;
+  --accent-cyan: #73dce8;
+  --accent-warm: #73dce8;
   --radius: 1.5rem;
   --shadow: 0 1.5rem 4rem rgb(21 29 29 / 18%);
 }
@@ -30,8 +31,8 @@ body {
   margin: 0;
   overflow: hidden;
   background:
-    radial-gradient(circle at 88% 4%, rgb(232 105 89 / 19%), transparent 34rem),
-    radial-gradient(circle at 8% 65%, rgb(125 173 168 / 19%), transparent 38rem), #e7ecea;
+    radial-gradient(circle at 88% 4%, rgb(233 65 54 / 13%), transparent 34rem),
+    radial-gradient(circle at 8% 65%, rgb(115 220 232 / 16%), transparent 38rem), #e9efed;
 }
 
 body > a {
@@ -198,7 +199,7 @@ button[aria-pressed="true"] {
   min-height: 100%;
   overflow: hidden;
   border-radius: 0;
-  background: #dbe5e3;
+  background: #d9e7e6;
 }
 
 .scene-canvas,
@@ -215,6 +216,32 @@ button[aria-pressed="true"] {
 
 .scene-canvas canvas:active {
   cursor: none;
+}
+
+.scene-reticule {
+  position: absolute;
+  z-index: 3;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: 1.15rem;
+  height: 1.15rem;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 72%);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgb(12 18 19 / 48%),
+    0 0 1.2rem rgb(115 220 232 / 34%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.scene-reticule span {
+  width: 0.22rem;
+  height: 0.22rem;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 0.45rem rgb(115 220 232 / 72%);
 }
 
 .scene-overlay {
@@ -234,6 +261,15 @@ button[aria-pressed="true"] {
   border-left: 0.35rem solid var(--accent);
   box-shadow: 0 1rem 2.5rem rgb(21 29 29 / 16%);
   backdrop-filter: blur(0.9rem);
+  transition:
+    opacity 180ms ease,
+    visibility 180ms ease;
+}
+
+.scene-frame:has(.scene-canvas[data-control-active="true"]) .scene-overlay-intro,
+.scene-frame:has(.scene-canvas[data-control-active="true"]) .scene-overlay-footer {
+  opacity: 0;
+  visibility: hidden;
 }
 
 .scene-overlay-intro h1 {
@@ -309,6 +345,9 @@ button[aria-pressed="true"] {
   border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 0.7rem;
   backdrop-filter: blur(0.8rem);
+  transition:
+    opacity 180ms ease,
+    visibility 180ms ease;
 }
 
 .scene-overlay-footer p {

@@ -84,23 +84,29 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Isolated worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/visual-table`.
 - Branch: `visual-table-gb9d082b587`, based on `7212f3ac98679ea62aedcd9f1d86b3a587c9b17d`.
 - Added a browser-only Three.js base for the future Milestone 7 table: a four-sided table, stacked
-  walls, face-up human hand, face-down opponent hands, public discards and melds, dice, seat labels,
-  orbit/zoom controls, and a procedural Manhattan night skyline behind a penthouse window.
+  walls, face-up human hand, face-down opponent hands, public discards and melds, dice, named presentation
+  anchors, and a procedural Manhattan skyline behind a double-height penthouse window wall.
 - Tile faces and backs are generated locally from the immutable tile catalog; no hidden opponent tile
   identity is placed in the scene. The scene is deliberately deterministic and does not replace the
   engine, observation, protocol, persistence, or legal-action surfaces.
-- The tile treatment is intentionally near-black and gold, with only bamboo/green and red/green dragon
-  accents where the symbol needs color. The felt, center inlay, and wood surface now use separated
-  depth layers to avoid WebGL z-fighting.
-- The rendering pass now follows a Mirror's Edge Catalyst-inspired graphic direction: pale geometric
-  architecture, charcoal table forms, hard white light, and red/gold signal accents instead of a
-  multi-color photoreal palette.
+- The tile treatment is warm ivory with recognizable local face art and an original charcoal/red/cyan
+  back. The table uses a charcoal playing field, white lacquer shell, red undercut, and cyan system seam;
+  playing-field, center, and shell layers stay separated to avoid WebGL z-fighting.
+- The rendering pass now follows the supplied Mirror's Edge-style contract without copying its assets:
+  broad white architectural planes, dark recessed voids, a sparse red directional line, pale cyan system
+  light, a bright late-afternoon key, original Midtown landmark silhouettes, and limited penthouse props.
 - The canvas resize path now coalesces `ResizeObserver` notifications and ignores unchanged
   dimensions; the renderer uses the current `PCFShadowMap` setting instead of the deprecated soft-map
   constant.
 - The seat camera is now a centered eye-level first-person preset. Clicking the canvas enters browser
-  pointer lock; mouse movement looks around, WASD/arrow keys shift the seat within a bounded table
-  position, Escape releases the pointer, and the overhead button switches back to orbit controls.
+  pointer lock; mouse movement looks around with unrestricted vertical pitch, WASD/arrow keys move through
+  the penthouse within room bounds, Escape releases the pointer, and the overhead button switches back to
+  orbit controls.
+- The first-person lens uses a 90° standing FOV and a smooth 68° seated FOV with 1.8 pointer speed. Shift
+  toggles a 1.45 eye-height sit state at half walking speed; directional seat signs hide while seated.
+  Space performs a short, snappy jump, movement eases into and out of momentum, the center reticule remains
+  visible, and the Bokeh pass follows the nearest non-overlay object under its ray.
+- Pointer-lock state fades the instructional intro/footer overlays so the controlled scene stays clear.
 - The table now owns the full dynamic viewport (`100dvh`) with title, view buttons, status, and control
   hints as unobtrusive scene overlays rather than a scrolling page card.
 - `three@0.185.1` and matching `@types/three@0.185.3` are the only new runtime/development packages.
