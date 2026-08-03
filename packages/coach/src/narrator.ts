@@ -8,6 +8,7 @@ import {
   type CoachNarrationInput,
   type CoachNarrationResult,
   type CoachNarrator,
+  type AnalysisFact,
   type ConceptId,
   type NarratorStatus,
 } from "./types.js";
@@ -72,6 +73,101 @@ const availableConceptsFor = (input: CoachNarrationInput): readonly ConceptId[] 
     }
   }
   return [...concepts].sort();
+};
+
+const FAAN_WORD_VALUES: Readonly<Record<string, number>> = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+};
+
+const citedFaanValues = (
+  citedFactIds: readonly string[],
+  facts: ReadonlyMap<string, AnalysisFact>,
+): ReadonlySet<number> => {
+  const values = new Set<number>();
+  const pending: { key: string; value: unknown }[] = citedFactIds.flatMap((factId) => {
+    const fact = facts.get(factId);
+    return fact === undefined ? [] : [{ key: "", value: fact.data }];
+  });
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) {
+      break;
+    }
+    if (
+      typeof current.value === "number" &&
+      Number.isFinite(current.value) &&
+      /faan/iu.test(current.key)
+    ) {
+      values.add(current.value);
+    } else if (Array.isArray(current.value)) {
+      for (const item of current.value) {
+        pending.push({ key: current.key, value: item });
+      }
+    } else if (isRecord(current.value)) {
+      for (const [key, value] of Object.entries(current.value)) {
+        pending.push({ key, value });
+      }
+    }
+  }
+  return values;
+};
+
+const validateGroundedProse = (
+  prose: string,
+  citedFactIds: readonly string[],
+  facts: ReadonlyMap<string, AnalysisFact>,
+): void => {
+  if (/\byou\s+(?:always|never)\b/iu.test(prose)) {
+    throw new CoachNarratorFailure(
+      "invalid_output",
+      "Narrator used an absolute learner-history claim",
+    );
+  }
+  const citedFacts = citedFactIds.flatMap((factId) => {
+    const fact = facts.get(factId);
+    return fact === undefined ? [] : [fact];
+  });
+  if (
+    /\byou\s+(?:often|usually|repeatedly|tend(?:ed)?\s+to)\b|\byour\s+last\b/iu.test(prose) &&
+    !citedFacts.some(({ kind }) => kind === "learner_pattern")
+  ) {
+    throw new CoachNarratorFailure(
+      "invalid_output",
+      "Narrator made an unsupported learner-history claim",
+    );
+  }
+  if (!/\bfaan\b/iu.test(prose)) {
+    return;
+  }
+  const supportedValues = citedFaanValues(citedFactIds, facts);
+  const hasScoringFact = citedFacts.some(
+    ({ kind }) => kind === "faan_path" || kind === "legal_rule",
+  );
+  if (!hasScoringFact && supportedValues.size === 0) {
+    throw new CoachNarratorFailure("invalid_output", "Narrator made an unsupported scoring claim");
+  }
+  const claimPattern =
+    /\b(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen)\s+faan\b/giu;
+  for (const match of prose.matchAll(claimPattern)) {
+    const token = match[1]?.toLowerCase();
+    const claimed = token === undefined ? undefined : (FAAN_WORD_VALUES[token] ?? Number(token));
+    if (claimed === undefined || !Number.isFinite(claimed) || !supportedValues.has(claimed)) {
+      throw new CoachNarratorFailure("invalid_output", "Narrator cited an unsupported faan value");
+    }
+  }
 };
 
 const calibrationFor = (input: CoachNarrationInput): string => {
@@ -285,11 +381,15 @@ export const validateCoachNarration = (
   for (const factId of result.factIds) {
     validateFact(factId);
   }
-  if (
-    /\b\d+\s*faan\b/iu.test(`${result.headline} ${result.explanation}`) &&
-    ![...facts.values()].some((fact) => fact.kind === "faan_path" || fact.kind === "legal_rule")
-  ) {
-    throw new CoachNarratorFailure("invalid_output", "Narrator made an unsupported scoring claim");
+  validateGroundedProse(
+    [result.headline, result.explanation, result.question ?? "", result.uncertainty ?? ""].join(
+      " ",
+    ),
+    result.factIds,
+    facts,
+  );
+  for (const alternative of result.alternatives) {
+    validateGroundedProse(alternative.tradeoff, alternative.factIds, facts);
   }
   return {
     confidence: result.confidence,
@@ -336,6 +436,8 @@ export class OpenAICoachNarrator implements CoachNarrator {
       observation: input.observation,
       analysis: input.analysis,
       learner: input.learner,
+      hintLevel: input.hintLevel,
+      allowStylisticAlternative: input.allowStylisticAlternative ?? false,
       promptVersion: NARRATOR_PROMPT_VERSION,
       narratorVersion: this.#narratorVersion,
     });
