@@ -68,9 +68,6 @@
 - Adaptive difficulty chooses a fixed ordinary strength from evidence and locks that choice to one
   hand. Only a `hand_ended` or `match_ended` observation may release the lock. Product persistence
   and mode wiring remain part of Milestone 8.
-- Basic bot discard ordering keeps distance primary, then uses the already computed
-  personality-weighted candidate score. This preserves the basic difficulty boundary while allowing
-  fast, value, and balanced policies to diverge deterministically on equal-distance decisions.
 - The fast simulation uses normal `BotPolicy` decisions throughout. To remain a practical 500-hand
   gate, it mixes three full seeded shuffled-wall hands (one for each bundled ruleset) with a seeded
   terminal regression wall where South has a thirteen-sided Thirteen Orphans wait and East has no
@@ -81,31 +78,18 @@
   runner fails on rejection, conservation error, crash, bound excess, or replay mismatch. The full
   10,000-hand and broader release evidence remain Milestone 10 gates.
 - The extended natural-wall gate is prepared in `.github/workflows/natural-simulation.yml` as a
-  manual `workflow_dispatch`. It partitions the requested corpus across up to 20 deterministic
-  shards, runs unchanged normal policies with `natural_shuffle` walls, uploads redacted shard
-  receipts, and verifies one aggregate digest. A one-hand local shard/aggregate smoke passed with
-  aggregate digest
-  `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
-  The interrupted local natural run is not 500-hand acceptance evidence; the first accepted
-  500-hand receipt must come from the remote workflow after the implementation commit is pushed.
-
-## 2026-08-03 — Canonical takeover and Milestone 4 reconciliation
-
-- The canonical continuation lane is
-  `.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54` on branch
-  `implementation-takeover-019fc5b7-g06506cba54`, based at
-  `b3d5946ce9d69efebd361433f00b988ea658a600`.
-- The pre-existing dirty `main` checkout and `natural-simulation-ci-g6bdbe4486d` worktree remain
-  preserved. Canonical integrated the natural lane's workflow plus its shard/common/aggregate
-  helpers. It rejected two unrelated `matchIndexOffset` runner variants because that workflow does
-  not consume them and no focused test covers them.
-- On the corrected canonical candidate, `pnpm test` passes 274 tests. `pnpm test:sim:fast` completes
-  500 hands with zero illegal actions, invariant failures, crashes, command-bound failures, or
-  replay mismatches. Its receipt digest is
-  `sha256:1073e8769314772f57d8880e11fa710d2889730d7f1eff8db0fedebc79533352`,
-  and its hand digest root is
-  `sha256:219b345c5c8795d1668f7dc975e03cb26c1cc1e7674c7d9fa67bf188eaa7b284`.
-- `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` also pass.
+  manual `workflow_dispatch`. It validates the requested corpus once, partitions it across exactly
+  128 deterministic shards while limiting concurrency to 20 free runners, runs unchanged normal
+  policies with `natural_shuffle` walls and distinct shard seed namespaces, serializes overlapping
+  manual runs, uploads redacted shard
+  receipts (including the hidden `.ci` artifact paths), and verifies contiguous global hand coverage
+  plus one aggregate digest. The shard
+  artifact boundary is an explicit allowlist: raw events, physical tile IDs, and decision traces are
+  excluded; the aggregator recomputes each deterministic run digest and rejects extra fields,
+  malformed, duplicate, missing, or failed receipts. `tests/simulation-ci.test.ts` locks the 128-entry
+  matrix, 20-runner cap, seed/offset partitioning, aggregate reproducibility, and tamper rejection.
+  The interrupted local natural run is not acceptance evidence; the first accepted 500-hand receipt
+  must come from the remote workflow after the implementation commit is pushed.
 
 ## Commands
 
@@ -124,8 +108,6 @@ None.
 
 ## Known limitations
 
-- Milestones 0–4 are complete. Milestone 5 is in progress; Milestones 6–10 remain pending.
+- Milestones 0–4 are complete. Milestones 5–10 remain pending.
 - Persistence, protocol, coach, and tile UI package slices exist but have not yet been accepted as
   complete milestones or wired through the placeholder CLI, server, and browser clients.
-- The persistence slice still needs deletion/privacy, recovery/export, migration, restart/resume,
-  and coverage repairs before Milestone 5 can close.

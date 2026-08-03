@@ -54,12 +54,14 @@ export interface BotSimulationOptions {
   wallMode?: SimulationWallMode;
   seedNamespace?: string;
   matchIndexOffset?: number;
+  handIndexOffset?: number;
 }
 
 interface ResolvedBotSimulationOptions {
   wallMode: SimulationWallMode;
   seedNamespace: string;
   matchIndexOffset: number;
+  handIndexOffset: number;
 }
 
 const resolveSimulationOptions = (options: BotSimulationOptions): ResolvedBotSimulationOptions => {
@@ -77,7 +79,11 @@ const resolveSimulationOptions = (options: BotSimulationOptions): ResolvedBotSim
   if (!Number.isSafeInteger(matchIndexOffset) || matchIndexOffset < 0) {
     throw new RangeError("Simulation match index offset must be a non-negative safe integer");
   }
-  return { wallMode, seedNamespace, matchIndexOffset };
+  const handIndexOffset = options.handIndexOffset ?? 0;
+  if (!Number.isSafeInteger(handIndexOffset) || handIndexOffset < 0) {
+    throw new RangeError("Simulation hand index offset must be a non-negative safe integer");
+  }
+  return { wallMode, seedNamespace, matchIndexOffset, handIndexOffset };
 };
 
 const wallProfileFor = (
@@ -196,6 +202,7 @@ export interface BotSimulationSummary {
   wallMode: SimulationWallMode;
   seedNamespace: string;
   matchIndexOffset: number;
+  handIndexOffset: number;
   requestedHands: number;
   completedHands: number;
   matchesStarted: number;
@@ -637,6 +644,7 @@ class SimulationAccumulator implements BotSimulationAccumulator {
   readonly #options: ResolvedBotSimulationOptions;
   readonly #bundledRulesets = RULESET_IDS.map(getBundledRuleset);
   readonly #replaySampleIndices: readonly number[];
+  readonly #replaySampleOffsets: readonly number[];
   readonly #replayIndexSet: ReadonlySet<number>;
   readonly #actionCounts = emptyActionCounts();
   readonly #terminationReasons: Record<TerminationReason, number> = {
@@ -662,8 +670,11 @@ class SimulationAccumulator implements BotSimulationAccumulator {
     this.#requestedHands = requestedHands;
     this.#options = resolveSimulationOptions(options);
     this.#nextMatchIndex = this.#options.matchIndexOffset;
-    this.#replaySampleIndices = replayIndicesFor(requestedHands);
-    this.#replayIndexSet = new Set(this.#replaySampleIndices);
+    this.#replaySampleOffsets = replayIndicesFor(requestedHands);
+    this.#replaySampleIndices = this.#replaySampleOffsets.map(
+      (index) => this.#options.handIndexOffset + index,
+    );
+    this.#replayIndexSet = new Set(this.#replaySampleOffsets);
   }
 
   get complete(): boolean {
@@ -722,7 +733,7 @@ class SimulationAccumulator implements BotSimulationAccumulator {
         );
       }
       previousEventCount = hand.eventCount;
-      const globalHandIndex = this.#completedHands;
+      const globalHandIndex = this.#options.handIndexOffset + this.#completedHands;
       const handDigestPayload = {
         globalHandIndex,
         matchIndex: hand.matchIndex,
@@ -769,7 +780,7 @@ class SimulationAccumulator implements BotSimulationAccumulator {
           (this.#decisionConfigurationCounts[configuration] ?? 0) + count;
       }
 
-      if (this.#replayIndexSet.has(globalHandIndex)) {
+      if (this.#replayIndexSet.has(this.#completedHands)) {
         const eventPrefix = match.events.slice(0, hand.eventCount);
         if (eventPrefix.length !== hand.eventCount) {
           throw new Error("Simulation event prefix is incomplete");
@@ -828,6 +839,7 @@ class SimulationAccumulator implements BotSimulationAccumulator {
       wallMode: this.#options.wallMode,
       seedNamespace: this.#options.seedNamespace,
       matchIndexOffset: this.#options.matchIndexOffset,
+      handIndexOffset: this.#options.handIndexOffset,
       requestedHands: this.#requestedHands,
       completedHands: this.#completedHands,
       matchesStarted: this.#matchesStarted,

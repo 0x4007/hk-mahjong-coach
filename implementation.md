@@ -2,20 +2,14 @@
 
 ## Canonical state
 
-- Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
-- Worktree:
-  `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
-- Branch: `implementation-takeover-019fc5b7-g06506cba54`
+- Repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
+- Branch: `main`
 - Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
-- Implementation lane: this canonical worktree, with one writer.
-- The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
-  Four coherent natural-simulation workflow files were integrated into canonical. The natural
-  lane's two unrelated, inert `matchIndexOffset` runner variants were rejected from canonical
-  because the workflow does not use them and they have no focused regression coverage.
+- Implementation lane: the existing checkout, with one writer and no task worktrees.
 
 ## Current milestone
 
-Milestone 5 — Persistence and replay repairs and acceptance.
+Milestone 5 — Persistence and replay audit.
 
 ## Completed
 
@@ -54,33 +48,27 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Closed the capability boundary: raw physical-tile helpers are internal to analysis, normal bots
   construct their ruleset-bound analyzer internally, negative type tests reject authoritative
   `GameState`, and hidden-state mutation leaves official analysis and bot decisions unchanged.
-- Repaired the basic bot boundary so distance remains primary while personality-weighted analysis
-  breaks otherwise equal choices; a fixed-seed policy regression proves the three personalities are
-  not behaviorally inert.
 - Replaced the former forced four-command simulation with normal policy decisions. The 500-hand fast
   gate uses three real shuffled hands across all bundled rulesets plus 497 seeded terminal regression
   hands, exercises all 12 strength/personality combinations, replays all 500 event prefixes, and
   reports zero illegal actions, invariant violations, crashes, bound failures, or replay mismatches.
-- Passed the Milestone 4 reconciliation gate with 274 tests, the 500-hand receipt digest
-  `sha256:1073e8769314772f57d8880e11fa710d2889730d7f1eff8db0fedebc79533352`,
+- Passed the Milestone 4 reconciliation gate with 278 tests, the 500-hand receipt digest
+  `sha256:6a9d354a58154b33c966915e8dd5b1a6d56a33a02145a299fdb8e332771ee7bb`,
   `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke`.
-- Added the extended natural-wall CI lane: `workflow_dispatch` inputs for hand count, shard count,
-  and seed namespace; up to 20 deterministic shards; redacted receipts; and aggregate digest
-  validation. A focused one-hand natural shard and aggregate smoke passed locally with digest
-  `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
-  The interrupted local 500-hand run remains non-acceptance evidence until the remote workflow
-  completes.
+- Added the extended natural-wall CI lane: a manually dispatchable `workflow_dispatch` with a
+  validated hand count and seed namespace, exactly 128 deterministic matrix shards capped at 20
+  concurrent free runners, distinct shard seed namespaces, global hand offsets, allowlisted redacted
+  receipts, and fail-closed aggregate digest validation. The aggregator recomputes each shard's
+  deterministic run digest and the regression suite rejects extra fields, tampering, and incomplete
+  coverage. A focused one-hand natural shard and aggregate validation smoke passed locally. The
+  interrupted local 500-hand run remains non-acceptance evidence until the remote workflow completes.
 
 ## Blockers
 
-- Full-data deletion and learner reset can retain nullable LLM metadata rows.
-- Corrupt-snapshot fallback is not yet proven through continued play plus export/import.
-- Export/schema migration and migration-ledger continuity lack required coverage.
-- The real process-restart/latest-resumable-game path is not yet composed through a client or server.
-- Persistence is not yet included in its required coverage gate.
+None.
 
 ## Next action
 
-Add focused Milestone 5 regressions for deletion, snapshot recovery, export/schema migration, hash
-tampering, and migration-ledger continuity; make the smallest repository fixes; then prove an exact
-restart/resume path before beginning dependent CLI/server integration.
+Audit the existing Milestone 5 persistence/replay slice against restart/resume, hash verification,
+corrupt-snapshot fallback, nondestructive branching, and export/import acceptance before changing
+its status or beginning dependent CLI/server integration.

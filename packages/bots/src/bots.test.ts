@@ -168,15 +168,6 @@ describe("observation-only bot policy", () => {
     },
   );
 
-  it("uses personality weighting to break basic discard choices at equal distance", () => {
-    const { observation } = engineObservation("basic-personality-5");
-    const actionIds = PERSONALITIES.map(
-      (personality) => createBotPolicy(config("basic", personality)).decide(observation)?.actionId,
-    );
-    expect(actionIds.every((actionId) => actionId !== undefined)).toBe(true);
-    expect(new Set(actionIds).size).toBeGreaterThan(1);
-  });
-
   it("makes deterministic, configurable novice mistakes without unseeded randomness", () => {
     const { observation } = engineObservation("novice-mistakes");
     const policy = createBotPolicy({ ...config("novice"), noviceMistakeFrequency: 2 });

@@ -2,8 +2,9 @@ import { runParallelBotSimulation } from "./simulation-pool.js";
 import {
   SHARD_CONFIG_PATH,
   assignmentFor,
-  errorMessage,
   readSimulationCiConfig,
+  redactSimulationSummary,
+  redactedSimulationError,
   shardSeedNamespace,
   type SimulationShardFailureReceipt,
   type SimulationShardSuccessReceipt,
@@ -20,6 +21,8 @@ const main = async (): Promise<void> => {
     const summary = await runParallelBotSimulation(assignment.assignedHands, {
       wallMode: "natural_shuffle",
       seedNamespace,
+      matchIndexOffset: assignment.globalHandStart,
+      handIndexOffset: assignment.globalHandStart,
     });
     const receipt: SimulationShardSuccessReceipt = {
       schemaVersion: 1,
@@ -30,7 +33,7 @@ const main = async (): Promise<void> => {
       globalHandStart: assignment.globalHandStart,
       assignedHands: assignment.assignedHands,
       seedNamespace,
-      summary,
+      summary: redactSimulationSummary(summary),
     };
     await writeJsonFile(receiptPath, receipt);
     process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
@@ -44,7 +47,7 @@ const main = async (): Promise<void> => {
       globalHandStart: assignment.globalHandStart,
       assignedHands: assignment.assignedHands,
       seedNamespace,
-      error: errorMessage(error),
+      error: redactedSimulationError(error),
     };
     await writeJsonFile(receiptPath, receipt);
     throw error;
@@ -54,6 +57,6 @@ const main = async (): Promise<void> => {
 try {
   await main();
 } catch (error) {
-  process.stderr.write(`${errorMessage(error)}\n`);
+  process.stderr.write(`${redactedSimulationError(error)}\n`);
   process.exitCode = 1;
 }

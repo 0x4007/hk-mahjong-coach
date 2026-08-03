@@ -28,6 +28,9 @@ type SimulationWorkerResponse =
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null;
 
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && Number(value) >= 0;
+
 const isBotSimulationOptions = (value: unknown): value is BotSimulationOptions => {
   if (!isRecord(value)) {
     return false;
@@ -36,7 +39,9 @@ const isBotSimulationOptions = (value: unknown): value is BotSimulationOptions =
     (value.wallMode === undefined ||
       value.wallMode === "mixed" ||
       value.wallMode === "natural_shuffle") &&
-    (value.seedNamespace === undefined || typeof value.seedNamespace === "string")
+    (value.seedNamespace === undefined || typeof value.seedNamespace === "string") &&
+    (value.matchIndexOffset === undefined || isNonNegativeSafeInteger(value.matchIndexOffset)) &&
+    (value.handIndexOffset === undefined || isNonNegativeSafeInteger(value.handIndexOffset))
   );
 };
 
