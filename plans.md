@@ -108,11 +108,29 @@ Evidence recorded 2026-08-03:
   The earlier local 500-hand run was interrupted without a receipt, so remote 500-hand acceptance
   remains pending.
 
-## Milestone 5 — Persistence and replay (`in progress`)
+## Milestone 5 — Persistence and replay (`complete`)
 
 - Implement SQLite migrations and transactional repositories for events, snapshots, decisions,
   mastery, drills, reviews, export/import/reset, replay, and nondestructive branching.
 - Acceptance: restart/resume, hash verification, corruption fallback, and export/import round trip.
+
+Evidence recorded 2026-08-03:
+
+- The persistence slice now has 4 schema migrations with contiguous-ledger validation, immutable
+  historical ruleset/session configuration hashes, event/snapshot journaling, crash-safe restart,
+  replay, corruption recovery, idempotent requests, practice branching, learner evidence, reset,
+  and export/import validation.
+- Process-level restart/resume and abrupt `SIGKILL` recovery both restore the exact state hash;
+  corrupt snapshots fall back to replay and remain playable/exportable; imported reviews require a
+  completed hand; and learner-owned decisions/reviews cannot cross game owners.
+- Accepted decision evidence is tied to the emitted player/action/revision event batch, and a
+  duplicate practice-branch request remains idempotent after the child advances.
+- Focused M5/M3/protocol tests pass (181 tests); the full suite passes 21 files and 328 tests.
+  Coverage passes the configured gates: core/hk-rules/protocol 95% statements and branches,
+  analysis/bots/coach/persistence at least 85% statements (persistence 87.97%, coach 95.30%).
+- Serialized `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`,
+  `pnpm test:coverage`, `pnpm test:sim:fast` (500 hands), `pnpm build`, and `pnpm smoke` pass on
+  the exact dirty takeover SHA.
 
 ## Milestone 6 — CLI and JSONL protocol (`pending`)
 

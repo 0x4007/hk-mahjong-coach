@@ -38,9 +38,9 @@ const bundledDefinitions: Readonly<Record<DrillType, Omit<DrillItem, "id" | "sou
     type: "complete_chow",
     conceptIds: ["meld_recognition"],
     difficulty: 0.2,
-    prompt: "Which tile completes 3 Bamboo and 4 Bamboo as a chow?",
-    choices: ["2 Bamboo", "5 Bamboo", "White Dragon"],
-    answer: "5 Bamboo",
+    prompt: "Which tile completes 1 Bamboo and 2 Bamboo as a chow?",
+    choices: ["3 Bamboo", "4 Bamboo", "White Dragon"],
+    answer: "3 Bamboo",
   },
   identify_meld: {
     type: "identify_meld",

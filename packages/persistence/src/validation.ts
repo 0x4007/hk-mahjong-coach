@@ -12,6 +12,7 @@ import type { GameKey, JsonObject, JsonValue } from "./types.js";
 
 const HASH_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const MAX_PERSISTED_JSON_BYTES = 16 * 1024 * 1024;
+const MAX_PERSISTED_JSON_DEPTH = 256;
 const GAME_EVENT_TYPES = new Set<GameEvent["type"]>([
   "game_created",
   "initial_deal_completed",
@@ -33,6 +34,7 @@ export const persistenceHash = (value: unknown): string => `sha256:${canonicalJs
 const isJsonValue = (
   value: unknown,
   ancestors: WeakSet<object> = new WeakSet(),
+  depth = 0,
 ): value is JsonValue => {
   if (
     value === null ||
@@ -42,15 +44,15 @@ const isJsonValue = (
   ) {
     return typeof value !== "number" || Number.isFinite(value);
   }
-  if (typeof value !== "object" || ancestors.has(value)) {
+  if (typeof value !== "object" || ancestors.has(value) || depth > MAX_PERSISTED_JSON_DEPTH) {
     return false;
   }
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.every((item) => isJsonValue(item, ancestors));
+      return value.every((item) => isJsonValue(item, ancestors, depth + 1));
     }
-    return Object.values(value).every((item) => isJsonValue(item, ancestors));
+    return Object.values(value).every((item) => isJsonValue(item, ancestors, depth + 1));
   } finally {
     ancestors.delete(value);
   }
@@ -142,14 +144,14 @@ export const parsePersistedJson = (text: unknown, label: string): JsonValue => {
     const reason = caught instanceof Error ? caught.message : "invalid JSON";
     throw new PersistenceCorruptionError(`${label} is invalid JSON: ${reason}`);
   }
+  if (!isJsonValue(parsed)) {
+    throw new PersistenceCorruptionError(`${label} is not a JSON value`);
+  }
   try {
     canonicalJson(parsed);
   } catch (caught) {
     const reason = caught instanceof Error ? caught.message : "invalid canonical JSON";
     throw new PersistenceCorruptionError(`${label} is not safe canonical JSON: ${reason}`);
-  }
-  if (!isJsonValue(parsed)) {
-    throw new PersistenceCorruptionError(`${label} is not a JSON value`);
   }
   return parsed;
 };

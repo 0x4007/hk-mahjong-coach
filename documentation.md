@@ -107,6 +107,25 @@
   `sha256:219b345c5c8795d1668f7dc975e03cb26c1cc1e7674c7d9fa67bf188eaa7b284`.
 - `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` also pass.
 
+## 2026-08-03 — Milestone 5 persistence and replay checkpoint
+
+- The scoring corpus is now a literal 75-row fixture table: 34 bundled rules each have a positive
+  and near-miss row, plus seven interaction rows with static expected decompositions, breakdowns,
+  minimum-faan results, and payments.
+- Persistence schema version 4 validates a contiguous migration ledger and stores the exact resolved
+  ruleset definition plus immutable session bot/coach configuration hashes. Snapshots are verified
+  against replayed event-chain and state hashes.
+- Fresh-process restart/resume and abrupt process termination tests restore the exact state. A bad
+  latest snapshot is skipped in favor of replay, and the recovered game can continue and export.
+  Practice branches are immutable and duplicate branch requests remain idempotent after later child
+  activity.
+- Learner-owned decisions and reviews are bound to the owning game. When a request ID is supplied,
+  decision evidence must match the accepted player/action/revision event batch; unrelated legal
+  actions are rejected. Persisted imports apply the same ownership and completed-hand checks.
+- Validation on the exact dirty SHA: 21 test files/328 tests, fresh coverage gates (persistence
+  87.97% statements; coach 95.30%; protocol 100% statements/96.96% branches), 500-hand fast
+  simulation with zero failures, production build, and smoke.
+
 ## Commands
 
 ```bash
@@ -124,8 +143,9 @@ None.
 
 ## Known limitations
 
-- Milestones 0–4 are complete. Milestone 5 is in progress; Milestones 6–10 remain pending.
-- Persistence, protocol, coach, and tile UI package slices exist but have not yet been accepted as
-  complete milestones or wired through the placeholder CLI, server, and browser clients.
-- The persistence slice still needs deletion/privacy, recovery/export, migration, restart/resume,
-  and coverage repairs before Milestone 5 can close.
+- Milestones 0–5 are complete on the canonical takeover checkpoint. Milestones 6–10 remain pending.
+- Persistence, protocol, coach, and tile UI package slices exist, but protocol/coach package tests
+  are not product integration evidence until the CLI, server, and browser compose them.
+- CLI command dispatch, JSONL process hosting, HTTP/WebSocket game composition, persistent coaching,
+  optional provider wiring, browser/E2E accessibility flows, remote natural simulation, and the
+  10,000-hand release gate remain to be implemented and verified.

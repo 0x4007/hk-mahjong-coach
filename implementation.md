@@ -15,7 +15,8 @@
 
 ## Current milestone
 
-Milestone 5 — Persistence and replay repairs and acceptance.
+Milestone 5 is complete on the validated dirty checkpoint; Milestone 6 (CLI and JSONL protocol) is
+the next implementation milestone.
 
 ## Completed
 
@@ -71,16 +72,29 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   The interrupted local 500-hand run remains non-acceptance evidence until the remote workflow
   completes.
 
-## Blockers
+## Milestone 5 evidence
 
-- Full-data deletion and learner reset can retain nullable LLM metadata rows.
-- Corrupt-snapshot fallback is not yet proven through continued play plus export/import.
-- Export/schema migration and migration-ledger continuity lack required coverage.
-- The real process-restart/latest-resumable-game path is not yet composed through a client or server.
-- Persistence is not yet included in its required coverage gate.
+- The full suite passes 21 files and 328 tests. Focused persistence/scoring/protocol coverage passes
+  181 tests.
+- Coverage passes the configured thresholds: core/hk-rules/protocol meet the 95% statement and
+  branch gates; analysis/bots/coach/persistence meet the 85% statement gates. The fresh report
+  records persistence at 87.97% statements and coach at 95.30%.
+- Process restart/resume, abrupt `SIGKILL` recovery, replay hash equality, corrupt-snapshot fallback
+  followed by export, migration-ledger continuity, nondestructive practice branching, learner
+  evidence, reset/delete, and import/export validation all pass focused tests.
+- The exact dirty SHA also passes serialized format, lint, typecheck, full tests, coverage, the
+  500-hand fast simulation, build, and production smoke.
+
+## Blockers and remaining scope
+
+- CLI remains a usage-only placeholder; the server currently exposes health/static content only;
+  the browser remains a placeholder. These are the explicit M6–M10 work items, not M5 failures.
+- The remote natural-wall 500-hand receipt and separate 10,000-hand release simulation remain
+  unrun. No production deployment or browser/E2E acceptance is claimed.
 
 ## Next action
 
-Add focused Milestone 5 regressions for deletion, snapshot recovery, export/schema migration, hash
-tampering, and migration-ledger continuity; make the smallest repository fixes; then prove an exact
-restart/resume path before beginning dependent CLI/server integration.
+Implement the first coherent M6 vertical slice: a real CLI command dispatcher plus JSONL stdio host
+that creates a seeded game, emits schema-validated observations/action requests, accepts only
+emitted action IDs, persists accepted commands, and reports structured rejections without stdout
+contamination. Keep it on this canonical branch and validate it through the real process.
