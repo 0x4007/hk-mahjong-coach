@@ -105,9 +105,38 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The first-person lens uses a 90° standing FOV and a smooth 68° seated FOV with 1.8 pointer speed. Shift
   toggles a 1.45 eye-height sit state at half walking speed; directional seat signs hide while seated.
   Space performs a quick jump at roughly twice the prior apex while preserving the same airtime. Double-tap
-  W engages a 1.75× sprint until W is released; movement eases into and out of momentum, the center reticule
-  remains visible, and the Bokeh pass follows the nearest non-overlay object under its ray.
+  W engages a 3× sprint until all movement keys are released; sprint carries across a held direction
+  transfer such as W→A/D/S, movement eases into and out of momentum, the center reticule remains visible,
+  and the Bokeh pass follows the nearest non-overlay object under its ray.
 - Pointer-lock state fades the instructional intro/footer overlays so the controlled scene stays clear.
+- The scene now resolves `high`, `medium`, or `low` presentation quality from an explicit option or
+  conservative hardware signals. The selected DPR cap, shadow map, and glass mode are applied without
+  changing scene/game state; the composer ends with `OutputPass`, and shader compilation is warmed after
+  the first frame.
+- The penthouse now includes four restrained integrated player stations and a legible static AI-teacher
+  panel, while the skyline and cyan system materials receive only slow, low-amplitude ambient modulation.
+  A warm loading treatment covers the first render and the animation loop pauses while the document is hidden.
+- The procedural backdrop now uses a local PMREM `RoomEnvironment`, six nearer rooftop masses with parapet
+  caps, and a separated final drawn tile in the staged hand so the room, skyline depth, and teaching fixture
+  read clearly without external assets.
+- Mobile browsers are detected from coarse pointer/touch capability or mobile user-agent signals. The
+  mobile panel recommends landscape orientation, exposes an explicit iOS motion-permission button,
+  and reports whether orientation look is ready or denied. Touch movement uses a four-way virtual
+  joystick with diagonal movement and continuous 0–100% speed control: center is stopped, forward
+  outer edge reaches the existing sprint speed, a forward diagonal reaches 75%, and backward/sideways
+  outer edges cap at 50% of sprint with a smooth forward-bias curve between them. A separate touch swipe adjusts the seat
+  camera yaw and pitch at a tuned drag sensitivity. Swiping also works when motion look is enabled;
+  its new camera heading becomes the gyro calibration reference. Crouch and Jump fire on independent
+  touch pointers, so either action can be used while the movement joystick remains held. Mobile text
+  selection and iOS touch callouts are disabled for the entire immersive surface. Crouch toggles the
+  existing seated camera state and Jump uses the existing bounded first-person arc.
+- Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper, fog,
+  skyline visibility, and renderer metrics. Skyline windows are batched with `InstancedMesh`, and the
+  three hero landmarks have distance-based `LOD` silhouettes. The documented screenshot checkpoint uses
+  the existing Playwright CLI at a fixed 1440×900 desktop viewport.
+- The visual preview's Vite and Fastify hosts bind to `0.0.0.0` for same-LAN iPhone testing. This is a
+  deliberate local-preview exception to the spec's loopback default; motion sensors can still require
+  a secure HTTPS origin in Safari.
 - The table now owns the full dynamic viewport (`100dvh`) with title, view buttons, status, and control
   hints as unobtrusive scene overlays rather than a scrolling page card.
 - `three@0.185.1` and matching `@types/three@0.185.3` are the only new runtime/development packages.

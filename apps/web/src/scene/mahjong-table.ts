@@ -4,19 +4,31 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
 
 export type SceneView = "seat" | "overhead";
 
+export type VisualCameraPreset = "table" | "roomReveal" | "skylineReview" | "assetReview";
+
+export type VisualToneMapper = "agx" | "neutral" | "cineon" | "linear";
+
+export type VisualShadowQuality = "off" | "medium" | "high";
+
+export type VisualSkylineLayer = "near" | "hero" | "fillers" | "distant";
+
 export type MotionLookStatus =
   "unsupported" | "needs-permission" | "requesting" | "ready" | "denied";
 
-export type TouchMovement = "forward" | "back" | "left" | "right";
+export type VisualQualityPreset = "high" | "medium" | "low";
 
 export interface MahjongTableSceneOptions {
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
+  readonly onReady?: () => void;
+  readonly quality?: VisualQualityPreset | "auto";
 }
 
 export interface PenthouseSceneAnchors {
@@ -35,11 +47,64 @@ export interface PenthouseSceneAnchors {
 export interface MahjongTableMount {
   readonly setView: (view: SceneView) => void;
   readonly requestMotionLook: () => Promise<MotionLookStatus>;
-  readonly setTouchMovement: (direction: TouchMovement, active: boolean) => void;
+  readonly setTouchMovementVector: (forward: number, right: number, active: boolean) => void;
   readonly toggleCrouch: () => boolean;
   readonly jump: () => void;
+  readonly debug: MahjongTableDebugControls;
   readonly dispose: () => void;
   readonly anchors: PenthouseSceneAnchors;
+}
+
+export interface SceneDebugSnapshot {
+  readonly cameraPreset: VisualCameraPreset | null;
+  readonly fov: number;
+  readonly exposure: number;
+  readonly toneMapper: VisualToneMapper;
+  readonly fogDensity: number;
+  readonly skylineVisible: boolean;
+  readonly skylineLayers: Readonly<Record<VisualSkylineLayer, boolean>>;
+  readonly sunYaw: number;
+  readonly sunElevation: number;
+  readonly sunIntensity: number;
+  readonly environmentIntensity: number;
+  readonly environmentRotation: number;
+  readonly redAccentIntensity: number;
+  readonly cyanEmissiveIntensity: number;
+  readonly shadowQuality: VisualShadowQuality;
+  readonly quality: VisualQualityPreset;
+  readonly dpr: number;
+  readonly dprCap: number;
+  readonly wireframe: boolean;
+  readonly boundsVisible: boolean;
+  readonly fps: number;
+  readonly frameTimeMs: number;
+  readonly drawCalls: number;
+  readonly triangles: number;
+  readonly points: number;
+  readonly lines: number;
+  readonly geometries: number;
+  readonly textures: number;
+}
+
+export interface MahjongTableDebugControls {
+  readonly setCameraPreset: (preset: VisualCameraPreset) => void;
+  readonly setFov: (fov: number) => void;
+  readonly setExposure: (exposure: number) => void;
+  readonly setToneMapper: (toneMapper: VisualToneMapper) => void;
+  readonly setFogDensity: (density: number) => void;
+  readonly setSkylineVisible: (visible: boolean) => void;
+  readonly setSkylineLayerVisible: (layer: VisualSkylineLayer, visible: boolean) => void;
+  readonly setSunDirection: (yaw: number, elevation: number) => void;
+  readonly setSunIntensity: (intensity: number) => void;
+  readonly setEnvironmentIntensity: (intensity: number) => void;
+  readonly setEnvironmentRotation: (rotation: number) => void;
+  readonly setRedAccentIntensity: (intensity: number) => void;
+  readonly setCyanEmissiveIntensity: (intensity: number) => void;
+  readonly setShadowQuality: (quality: VisualShadowQuality) => void;
+  readonly setDprCap: (dprCap: number) => void;
+  readonly setWireframe: (enabled: boolean) => void;
+  readonly setBoundsVisible: (visible: boolean) => void;
+  readonly getSnapshot: () => SceneDebugSnapshot;
 }
 
 interface CameraPreset {
@@ -61,6 +126,32 @@ interface TileTextureCache {
   readonly back: THREE.CanvasTexture;
 }
 
+interface SceneQuality {
+  readonly preset: VisualQualityPreset;
+  readonly dprCap: number;
+  readonly shadows: "off" | "medium" | "high";
+  readonly shadowMapSize: 0 | 1024 | 2048;
+  readonly glassMode: "simple" | "physical";
+  readonly skylineLodBias: number;
+  readonly ambientAnimationRate: number;
+}
+
+interface SceneAmbientResources {
+  readonly cyanMaterials: readonly THREE.MeshStandardMaterial[];
+  readonly redMaterials: readonly THREE.MeshStandardMaterial[];
+  readonly skylineMaterials: readonly THREE.MeshStandardMaterial[];
+}
+
+interface SkylineResources {
+  readonly texture: THREE.CanvasTexture;
+  readonly ambient: SceneAmbientResources;
+}
+
+interface ArchitectureResources {
+  readonly ambient: SceneAmbientResources;
+  readonly teacherTexture: THREE.CanvasTexture;
+}
+
 const TABLE_TOP_Y = 0.78;
 const TABLE_WIDTH = 1.62;
 const TABLE_DEPTH = 1.62;
@@ -71,7 +162,6 @@ const WALL_COUNT = 18;
 const WALL_SPACING = 0.125;
 const TILE_BACK_COLOR = "#1b282c";
 const TILE_FACE_COLOR = "#f2eee3";
-const TILE_EDGE_COLOR = "#c6cfca";
 const TILE_RED = "#d8463d";
 const TILE_GREEN = "#217f69";
 const TILE_BLUE = "#315b86";
@@ -201,6 +291,19 @@ const cameraPresets: Readonly<Record<SceneView, CameraPreset>> = {
   },
 };
 
+const visualCameraPresets: Readonly<Record<VisualCameraPreset, CameraPreset>> = {
+  table: cameraPresets.seat,
+  roomReveal: {
+    position: new THREE.Vector3(6.3, 4.55, 6.8),
+    target: new THREE.Vector3(0, 1.15, -1.45),
+  },
+  skylineReview: {
+    position: new THREE.Vector3(-2.6, 3.25, 4.15),
+    target: new THREE.Vector3(-1.75, 2.55, -6.55),
+  },
+  assetReview: cameraPresets.overhead,
+};
+
 const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
 const SEATED_EYE_HEIGHT = 1.45;
 const STANDING_FOV = 90;
@@ -210,6 +313,8 @@ const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
 const SPRINT_MULTIPLIER = 3;
 const DOUBLE_TAP_WINDOW_MS = 300;
+const SWIPE_LOOK_SENSITIVITY = 0.00594;
+const TOUCH_SIDEWAYS_SPRINT_FRACTION = 0.5;
 const ROOM_BOUNDS = {
   minX: -6.7,
   maxX: 6.7,
@@ -217,22 +322,69 @@ const ROOM_BOUNDS = {
   maxZ: 5.05,
 } as const;
 
+const getTouchSprintCap = (forwardDirection: number): number => {
+  const forwardBias = THREE.MathUtils.clamp(forwardDirection, 0, 1);
+  const curvedForwardBias = forwardBias * forwardBias;
+  return TOUCH_SIDEWAYS_SPRINT_FRACTION + (1 - TOUCH_SIDEWAYS_SPRINT_FRACTION) * curvedForwardBias;
+};
+
+const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "preset">>> = {
+  high: {
+    dprCap: 1.75,
+    shadows: "high",
+    shadowMapSize: 2048,
+    glassMode: "physical",
+    skylineLodBias: 1,
+    ambientAnimationRate: 1,
+  },
+  medium: {
+    dprCap: 1.35,
+    shadows: "medium",
+    shadowMapSize: 1024,
+    glassMode: "simple",
+    skylineLodBias: 0.78,
+    ambientAnimationRate: 0.75,
+  },
+  low: {
+    dprCap: 1,
+    shadows: "off",
+    shadowMapSize: 0,
+    glassMode: "simple",
+    skylineLodBias: 0.56,
+    ambientAnimationRate: 0.45,
+  },
+};
+
+const resolveQuality = (requested: VisualQualityPreset | "auto" | undefined): SceneQuality => {
+  let preset = requested === undefined || requested === "auto" ? undefined : requested;
+  if (preset === undefined) {
+    const deviceMemory = (navigator as Navigator & { readonly deviceMemory?: number }).deviceMemory;
+    const cores = navigator.hardwareConcurrency;
+    preset =
+      deviceMemory !== undefined && deviceMemory <= 4
+        ? "medium"
+        : cores > 0 && cores <= 4
+          ? "medium"
+          : "high";
+  }
+  return { preset, ...QUALITY_PRESETS[preset] };
+};
+
 const DEGREES_TO_RADIANS = Math.PI / 180;
 const DEVICE_ORIENTATION_ZEE = new THREE.Vector3(0, 0, 1);
-const DEVICE_ORIENTATION_QUARTER = new THREE.Quaternion(
-  -Math.sqrt(0.5),
-  0,
-  0,
-  Math.sqrt(0.5),
-);
+const DEVICE_ORIENTATION_QUARTER = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
 
 interface DeviceOrientationEventPermissionConstructor {
   readonly requestPermission?: () => Promise<"granted" | "denied">;
 }
 
 const getScreenOrientationAngle = (): number => {
-  const screenOrientation = window.screen.orientation;
-  if (screenOrientation !== undefined && Number.isFinite(screenOrientation.angle)) {
+  const screenOrientation = (
+    window.screen as unknown as {
+      readonly orientation?: { readonly angle?: unknown };
+    }
+  ).orientation;
+  if (typeof screenOrientation?.angle === "number" && Number.isFinite(screenOrientation.angle)) {
     return screenOrientation.angle;
   }
   const legacyOrientation = (window as unknown as { readonly orientation?: unknown }).orientation;
@@ -460,8 +612,8 @@ const createTile = (cache: TileTextureCache, options: TileOptions): THREE.Group 
   const body = new THREE.Mesh(
     new RoundedBoxGeometry(width, height, depth, 3, Math.min(0.05, depth / 4)),
     new THREE.MeshStandardMaterial({
-      color: TILE_EDGE_COLOR,
-      roughness: 0.55,
+      color: COLORS.tileIvory,
+      roughness: 0.44,
       metalness: 0.03,
     }),
   );
@@ -490,6 +642,67 @@ const createTile = (cache: TileTextureCache, options: TileOptions): THREE.Group 
   back.position.z = -depth / 2 - 0.004;
   back.rotation.y = Math.PI;
   group.add(back);
+  return group;
+};
+
+interface BackTilePlacement {
+  readonly position: THREE.Vector3;
+  readonly rotation: number;
+}
+
+const createBackTileInstances = (
+  cache: TileTextureCache,
+  placements: readonly BackTilePlacement[],
+  width: number,
+  height: number,
+  depth: number,
+): THREE.Group => {
+  const group = new THREE.Group();
+  group.name = "ConcealedTileInstances";
+  if (placements.length === 0) {
+    return group;
+  }
+  const body = new THREE.InstancedMesh(
+    new RoundedBoxGeometry(width, height, depth, 3, Math.min(0.05, depth / 4)),
+    new THREE.MeshStandardMaterial({
+      color: COLORS.tileIvory,
+      roughness: 0.44,
+      metalness: 0.03,
+    }),
+    placements.length,
+  );
+  body.name = "ConcealedTileBodies";
+  body.castShadow = true;
+  body.receiveShadow = true;
+  const back = new THREE.InstancedMesh(
+    new THREE.PlaneGeometry(width * 0.86, height * 0.9),
+    new THREE.MeshStandardMaterial({ map: cache.back, roughness: 0.68, metalness: 0 }),
+    placements.length,
+  );
+  back.name = "ConcealedTileBacks";
+  back.castShadow = true;
+  const axis = new THREE.Vector3(0, 1, 0);
+  const localBackOffset = new THREE.Vector3(0, 0, -depth / 2 - 0.004);
+  const matrix = new THREE.Matrix4();
+  const backMatrix = new THREE.Matrix4();
+  const rotation = new THREE.Quaternion();
+  const backRotation = new THREE.Quaternion();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const backPosition = new THREE.Vector3();
+  placements.forEach((placement, index) => {
+    rotation.setFromAxisAngle(axis, placement.rotation);
+    matrix.compose(placement.position, rotation, scale);
+    body.setMatrixAt(index, matrix);
+    backPosition.copy(localBackOffset).applyQuaternion(rotation).add(placement.position);
+    backRotation.copy(rotation).multiply(new THREE.Quaternion().setFromAxisAngle(axis, Math.PI));
+    backMatrix.compose(backPosition, backRotation, scale);
+    back.setMatrixAt(index, backMatrix);
+  });
+  body.instanceMatrix.needsUpdate = true;
+  back.instanceMatrix.needsUpdate = true;
+  body.computeBoundingSphere();
+  back.computeBoundingSphere();
+  group.add(body, back);
   return group;
 };
 
@@ -606,31 +819,20 @@ const createWall = (cache: TileTextureCache): THREE.Group => {
   wall.name = "WallRoot";
   const start = -((WALL_COUNT - 1) * WALL_SPACING) / 2;
   const wallOffset = TABLE_WIDTH / 2 + 0.19;
+  const placements: BackTilePlacement[] = [];
   for (let index = 0; index < WALL_COUNT; index += 1) {
     const offset = start + index * WALL_SPACING;
     for (let level = 0; level < 2; level += 1) {
-      const tile = createTile(cache, { faceUp: false, width: 0.12, height: 0.15, depth: 0.07 });
-      tile.position.set(offset, TABLE_TOP_Y + 0.09 + level * 0.15, -wallOffset);
-      tile.rotation.y = Math.PI;
-      wall.add(tile);
-      const southTile = createTile(cache, {
-        faceUp: false,
-        width: 0.12,
-        height: 0.15,
-        depth: 0.07,
-      });
-      southTile.position.set(offset, TABLE_TOP_Y + 0.09 + level * 0.15, wallOffset);
-      wall.add(southTile);
-      const eastTile = createTile(cache, { faceUp: false, width: 0.12, height: 0.15, depth: 0.07 });
-      eastTile.position.set(wallOffset, TABLE_TOP_Y + 0.09 + level * 0.15, offset);
-      eastTile.rotation.y = Math.PI / 2;
-      wall.add(eastTile);
-      const westTile = createTile(cache, { faceUp: false, width: 0.12, height: 0.15, depth: 0.07 });
-      westTile.position.set(-wallOffset, TABLE_TOP_Y + 0.09 + level * 0.15, offset);
-      westTile.rotation.y = -Math.PI / 2;
-      wall.add(westTile);
+      const y = TABLE_TOP_Y + 0.09 + level * 0.15;
+      placements.push(
+        { position: new THREE.Vector3(offset, y, -wallOffset), rotation: Math.PI },
+        { position: new THREE.Vector3(offset, y, wallOffset), rotation: 0 },
+        { position: new THREE.Vector3(wallOffset, y, offset), rotation: Math.PI / 2 },
+        { position: new THREE.Vector3(-wallOffset, y, offset), rotation: -Math.PI / 2 },
+      );
     }
   }
+  wall.add(createBackTileInstances(cache, placements, 0.12, 0.15, 0.07));
   return wall;
 };
 
@@ -667,15 +869,25 @@ const addHand = (
   hand.rotation.y = rotation;
   hand.add(createRack(1.48));
   const start = -((tiles.length - 1) * 0.115) / 2;
+  if (!faceUp) {
+    const placements = tiles.map((_, index): BackTilePlacement => ({
+      position: new THREE.Vector3(start + index * 0.115, TABLE_TOP_Y + 0.22, -0.015),
+      rotation: 0,
+    }));
+    hand.add(createBackTileInstances(cache, placements, 0.1, 0.16, 0.065));
+    parent.add(hand);
+    return;
+  }
   tiles.forEach((tile, index) => {
     const tileMesh = createTile(cache, {
-      faceUp,
+      faceUp: true,
       width: 0.1,
       height: 0.16,
       depth: 0.065,
-      ...(faceUp ? { tile } : {}),
+      tile,
     });
-    tileMesh.position.set(start + index * 0.115, TABLE_TOP_Y + 0.22, -0.015);
+    const drawOffset = index === tiles.length - 1 ? 0.075 : 0;
+    tileMesh.position.set(start + index * 0.115 + drawOffset, TABLE_TOP_Y + 0.22, -0.015);
     hand.add(tileMesh);
   });
   parent.add(hand);
@@ -785,27 +997,49 @@ const createBuilding = (
   skyline.add(building);
   const columns = Math.max(2, Math.floor(width / 0.46));
   const rows = Math.max(2, Math.floor(height / 0.48));
+  const windowPositions: [THREE.Vector3[], THREE.Vector3[]] = [[], []];
   for (let column = 0; column < columns; column += 1) {
     for (let row = 0; row < rows; row += 1) {
       if ((column * 3 + row * 5 + Math.round(height)) % 7 < 2) {
         continue;
       }
-      const material =
-        (column * 7 + row * 11 + Math.round(height)) % 13 === 0
-          ? accentWindowMaterial
-          : windowMaterial;
-      const window = new THREE.Mesh(new THREE.PlaneGeometry(0.14, 0.2), material);
-      window.position.set(
+      const position = new THREE.Vector3(
         x - width / 2 + 0.23 + column * ((width - 0.46) / Math.max(1, columns - 1)),
         0.96 + row * 0.44,
         z + depth / 2 + 0.006,
       );
-      skyline.add(window);
+      const materialIndex = (column * 7 + row * 11 + Math.round(height)) % 13 === 0 ? 1 : 0;
+      windowPositions[materialIndex].push(position);
     }
   }
+  const addWindowInstances = (
+    name: string,
+    positions: readonly THREE.Vector3[],
+    material: THREE.MeshStandardMaterial,
+  ): void => {
+    if (positions.length === 0) {
+      return;
+    }
+    const windows = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(0.14, 0.2),
+      material,
+      positions.length,
+    );
+    windows.name = name;
+    const matrix = new THREE.Matrix4();
+    positions.forEach((position, index) => {
+      matrix.makeTranslation(position.x, position.y, position.z);
+      windows.setMatrixAt(index, matrix);
+    });
+    windows.instanceMatrix.needsUpdate = true;
+    windows.computeBoundingSphere();
+    skyline.add(windows);
+  };
+  addWindowInstances("WindowInstances", windowPositions[0], windowMaterial);
+  addWindowInstances("AccentWindowInstances", windowPositions[1], accentWindowMaterial);
 };
 
-const addSkyline = (scene: THREE.Scene): THREE.CanvasTexture => {
+const addSkyline = (scene: THREE.Scene, skylineLodBias = 1): SkylineResources => {
   const skyline = new THREE.Group();
   skyline.name = "SkylineRoot";
   const nearRooftops = new THREE.Group();
@@ -891,7 +1125,17 @@ const addSkyline = (scene: THREE.Scene): THREE.CanvasTexture => {
   );
   empireSpire.position.set(-2.7, 5.55, -6.82);
   empire.add(empireSpire);
-  heroLandmarks.add(empire);
+  const empireLod = new THREE.LOD();
+  empireLod.name = "EmpireStateBuildingLOD";
+  empireLod.addLevel(empire, 0);
+  const empireSilhouette = new THREE.Mesh(
+    new THREE.BoxGeometry(1.08, 4.25, 0.42),
+    new THREE.MeshStandardMaterial({ color: 0x95a8a9, roughness: 0.9 }),
+  );
+  empireSilhouette.position.set(-2.7, 2.84, -6.82);
+  empireSilhouette.name = "EmpireStateBuildingSilhouette";
+  empireLod.addLevel(empireSilhouette, 14 * skylineLodBias);
+  heroLandmarks.add(empireLod);
 
   const vanderbilt = new THREE.Mesh(
     new THREE.ConeGeometry(0.52, 4.35, 4),
@@ -900,7 +1144,17 @@ const addSkyline = (scene: THREE.Scene): THREE.CanvasTexture => {
   vanderbilt.name = "OneVanderbilt";
   vanderbilt.position.set(-0.9, 2.9, -6.94);
   vanderbilt.rotation.y = Math.PI / 4;
-  heroLandmarks.add(vanderbilt);
+  const vanderbiltLod = new THREE.LOD();
+  vanderbiltLod.name = "OneVanderbiltLOD";
+  vanderbiltLod.addLevel(vanderbilt, 0);
+  const vanderbiltSilhouette = new THREE.Mesh(
+    new THREE.ConeGeometry(0.38, 3.8, 4),
+    new THREE.MeshStandardMaterial({ color: 0xa1b8bc, roughness: 0.88 }),
+  );
+  vanderbiltSilhouette.position.set(-0.9, 2.62, -6.94);
+  vanderbiltSilhouette.rotation.y = Math.PI / 4;
+  vanderbiltLod.addLevel(vanderbiltSilhouette, 14 * skylineLodBias);
+  heroLandmarks.add(vanderbiltLod);
 
   const chrysler = new THREE.Group();
   chrysler.name = "ChryslerBuilding";
@@ -927,7 +1181,16 @@ const addSkyline = (scene: THREE.Scene): THREE.CanvasTexture => {
   );
   chryslerSpire.position.set(2.6, 4.62, -6.8);
   chrysler.add(chryslerSpire);
-  heroLandmarks.add(chrysler);
+  const chryslerLod = new THREE.LOD();
+  chryslerLod.name = "ChryslerBuildingLOD";
+  chryslerLod.addLevel(chrysler, 0);
+  const chryslerSilhouette = new THREE.Mesh(
+    new THREE.BoxGeometry(1.02, 3.9, 0.42),
+    new THREE.MeshStandardMaterial({ color: 0x9aabad, roughness: 0.88 }),
+  );
+  chryslerSilhouette.position.set(2.6, 2.67, -6.8);
+  chryslerLod.addLevel(chryslerSilhouette, 14 * skylineLodBias);
+  heroLandmarks.add(chryslerLod);
 
   const slenderTower = new THREE.Mesh(
     new THREE.BoxGeometry(0.55, 4.7, 0.45),
@@ -959,8 +1222,47 @@ const addSkyline = (scene: THREE.Scene): THREE.CanvasTexture => {
   rooftopPlant.position.set(-5.45, 1.02, -6.32);
   nearRooftops.add(rooftopPlant);
 
+  const rooftopMaterial = new THREE.MeshStandardMaterial({
+    color: 0x7f8a8b,
+    roughness: 0.88,
+    metalness: 0.03,
+  });
+  const rooftopCapMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4e5d5f,
+    roughness: 0.8,
+    metalness: 0.08,
+  });
+  const rooftopMasses = [
+    [-6.05, 0.72, 0.72, 0.48, -5.82],
+    [-4.72, 0.48, 0.9, 0.62, -5.76],
+    [-3.18, 0.64, 0.65, 0.52, -5.84],
+    [1.42, 0.52, 0.82, 0.58, -5.8],
+    [3.62, 0.66, 0.7, 0.46, -5.86],
+    [5.62, 0.46, 1.02, 0.64, -5.78],
+  ] as const;
+  for (const [x, height, width, depth, z] of rooftopMasses) {
+    const mass = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), rooftopMaterial);
+    mass.name = "RooftopMass";
+    mass.position.set(x, 0.72 + height / 2, z);
+    nearRooftops.add(mass);
+    const cap = new THREE.Mesh(
+      new THREE.BoxGeometry(width + 0.06, 0.035, depth + 0.06),
+      rooftopCapMaterial,
+    );
+    cap.name = "RooftopParapet";
+    cap.position.set(x, 0.72 + height + 0.018, z);
+    nearRooftops.add(cap);
+  }
+
   scene.add(skyline);
-  return skyTexture;
+  return {
+    texture: skyTexture,
+    ambient: {
+      cyanMaterials: [],
+      redMaterials: [],
+      skylineMaterials: [accentWindowMaterial],
+    },
+  };
 };
 
 const makeLabelTexture = (label: string, accent: string): THREE.CanvasTexture => {
@@ -1023,7 +1325,39 @@ const addDice = (scene: THREE.Scene): void => {
   }
 };
 
-const addArchitecture = (scene: THREE.Scene): void => {
+const makeTeacherPanelTexture = (): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 360;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create the teacher panel texture");
+  }
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(11, 24, 27, 0.92)";
+  roundedRect(context, 8, 8, 496, 344, 26);
+  context.fill();
+  context.fillStyle = "#73dce8";
+  context.font = "700 22px ui-sans-serif, sans-serif";
+  context.fillText("AI TEACHER", 32, 52);
+  context.fillStyle = "#f3f4f0";
+  context.font = "700 31px ui-sans-serif, sans-serif";
+  context.fillText("STAY IN THE HAND", 32, 116);
+  context.fillStyle = "#b9bec0";
+  context.font = "500 20px ui-sans-serif, sans-serif";
+  context.fillText("Observe the discard river.", 32, 160);
+  context.fillText("Your next decision is staged.", 32, 188);
+  context.fillStyle = "#e94136";
+  context.fillRect(32, 230, 448, 5);
+  context.fillStyle = "#b9bec0";
+  context.font = "700 18px ui-monospace, monospace";
+  context.fillText("ROUND 01  /  EAST WIND", 32, 282);
+  context.fillStyle = "#73dce8";
+  context.fillText("READY", 32, 318);
+  return createCanvasTexture(canvas);
+};
+
+const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResources => {
   const environment = new THREE.Group();
   environment.name = "EnvironmentRoot";
   const shell = new THREE.Group();
@@ -1034,7 +1368,9 @@ const addArchitecture = (scene: THREE.Scene): void => {
   furniture.name = "Furniture";
   const accents = new THREE.Group();
   accents.name = "ArchitecturalAccents";
-  environment.add(shell, windows, furniture, accents);
+  const ambientEffects = new THREE.Group();
+  ambientEffects.name = "AmbientEffects";
+  environment.add(shell, windows, furniture, accents, ambientEffects);
 
   const architecturalWhite = createMaterial(COLORS.architecturalWhite, 0.76);
   const whiteLacquer = createMaterial(COLORS.whiteLacquer, 0.3);
@@ -1054,17 +1390,28 @@ const addArchitecture = (scene: THREE.Scene): void => {
     emissive: COLORS.cyan,
     emissiveIntensity: 0.28,
   });
-  const glass = new THREE.MeshPhysicalMaterial({
-    color: COLORS.glass,
-    roughness: 0.055,
-    metalness: 0,
-    transmission: 0.24,
-    transparent: true,
-    opacity: 0.24,
-    ior: 1.45,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
+  const glass =
+    quality.glassMode === "physical"
+      ? new THREE.MeshPhysicalMaterial({
+          color: COLORS.glass,
+          roughness: 0.055,
+          metalness: 0,
+          transmission: 0.24,
+          transparent: true,
+          opacity: 0.24,
+          ior: 1.45,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        })
+      : new THREE.MeshStandardMaterial({
+          color: COLORS.glass,
+          roughness: 0.15,
+          metalness: 0.05,
+          transparent: true,
+          opacity: 0.2,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
 
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(15.2, 11.6), architecturalWhite);
   floor.name = "PenthouseFloor";
@@ -1166,19 +1513,24 @@ const addArchitecture = (scene: THREE.Scene): void => {
   cyanStrip.name = "CyanCeilingStrip";
   cyanStrip.position.set(2.9, 4.57, -4.86);
   accents.add(cyanStrip);
+  const teacherTexture = makeTeacherPanelTexture();
   const teacherPanel = new THREE.Mesh(
     new RoundedBoxGeometry(1.72, 1.18, 0.045, 4, 0.04),
-    new THREE.MeshPhysicalMaterial({
-      color: 0xc7e4e6,
-      roughness: 0.24,
-      transmission: 0.4,
+    new THREE.MeshStandardMaterial({
+      map: teacherTexture,
+      color: 0xffffff,
+      emissive: 0x102a2e,
+      emissiveMap: teacherTexture,
+      emissiveIntensity: 0.18,
+      roughness: 0.42,
       transparent: true,
-      opacity: 0.66,
+      opacity: 0.94,
       side: THREE.DoubleSide,
     }),
   );
   teacherPanel.name = "TeacherPanel";
   teacherPanel.position.set(-4.15, 2.3, -5.35);
+  teacherPanel.userData.dofIgnore = true;
   accents.add(teacherPanel);
   const teacherPanelLine = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.025, 0.05), cyan);
   teacherPanelLine.name = "TeacherPanelStatusLine";
@@ -1222,12 +1574,52 @@ const addArchitecture = (scene: THREE.Scene): void => {
   bar.add(barTop);
   furniture.add(bar);
 
+  const stationMaterial = createMaterial(COLORS.whiteLacquer, 0.42);
+  const stationInset = createMaterial(COLORS.charcoal, 0.72);
+  const stationPlacements = [
+    ["SouthPlayerStation", 0, 0, 2.03, 0],
+    ["NorthPlayerStation", 0, 0, -2.03, Math.PI],
+    ["EastPlayerStation", 2.03, 0, 0, -Math.PI / 2],
+    ["WestPlayerStation", -2.03, 0, 0, Math.PI / 2],
+  ] as const;
+  for (const [name, x, y, z, rotation] of stationPlacements) {
+    const station = new THREE.Group();
+    station.name = name;
+    station.position.set(x, y, z);
+    station.rotation.y = rotation;
+    const seat = new THREE.Mesh(new RoundedBoxGeometry(1.18, 0.18, 0.78, 4, 0.1), stationMaterial);
+    seat.position.y = 0.42;
+    seat.castShadow = true;
+    seat.receiveShadow = true;
+    station.add(seat);
+    const seatInset = new THREE.Mesh(
+      new RoundedBoxGeometry(0.92, 0.035, 0.56, 4, 0.06),
+      stationInset,
+    );
+    seatInset.position.set(0, 0.52, 0.01);
+    seatInset.receiveShadow = true;
+    station.add(seatInset);
+    const back = new THREE.Mesh(new RoundedBoxGeometry(1.18, 0.7, 0.14, 4, 0.07), stationMaterial);
+    back.position.set(0, 0.82, 0.31);
+    back.castShadow = true;
+    station.add(back);
+    furniture.add(station);
+  }
+
   const sculpture = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.075, 12, 32), aluminum);
   sculpture.name = "GeometricSculpture";
   sculpture.position.set(-5.05, 1.4, -1.15);
   sculpture.rotation.set(Math.PI / 2.7, 0.25, 0.18);
   furniture.add(sculpture);
   scene.add(environment);
+  return {
+    ambient: {
+      cyanMaterials: [cyan],
+      redMaterials: [red],
+      skylineMaterials: [],
+    },
+    teacherTexture,
+  };
 };
 
 const createPresentationAnchors = (
@@ -1287,30 +1679,37 @@ const createPresentationAnchors = (
   };
 };
 
-const addLighting = (scene: THREE.Scene): void => {
+const addLighting = (scene: THREE.Scene, quality: SceneQuality): void => {
   RectAreaLightUniformsLib.init();
-  scene.add(new THREE.HemisphereLight(0xf4f7f4, 0x9aa8aa, 2.05));
+  const lightingRoot = new THREE.Group();
+  lightingRoot.name = "LightingRoot";
+  scene.add(lightingRoot);
+  const hemisphere = new THREE.HemisphereLight(0xf4f7f4, 0x9aa8aa, 2.05);
+  lightingRoot.add(hemisphere);
   const key = new THREE.DirectionalLight(0xfff3de, 3.45);
+  key.name = "SunKeyLight";
   key.position.set(-5, 9.5, 6.5);
-  key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.castShadow = quality.shadows !== "off";
+  if (quality.shadowMapSize > 0) {
+    key.shadow.mapSize.set(quality.shadowMapSize, quality.shadowMapSize);
+  }
   key.shadow.camera.left = -6.5;
   key.shadow.camera.right = 6.5;
   key.shadow.camera.top = 6.5;
   key.shadow.camera.bottom = -6.5;
-  scene.add(key);
+  lightingRoot.add(key);
   const windowFill = new THREE.RectAreaLight(0xd8f5ff, 4.2, 9.6, 3.3);
   windowFill.position.set(0, 3.0, -4.8);
   windowFill.lookAt(0, 0.8, 0);
-  scene.add(windowFill);
+  lightingRoot.add(windowFill);
   const ceilingFill = new THREE.RectAreaLight(0xfff5e9, 2.3, 5.5, 2.2);
   ceilingFill.position.set(1.2, 4.35, 0.2);
   ceilingFill.lookAt(0, 0.7, 0);
-  scene.add(ceilingFill);
+  lightingRoot.add(ceilingFill);
 };
 
-const addFloor = (scene: THREE.Scene): void => {
-  addArchitecture(scene);
+const addFloor = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResources => {
+  return addArchitecture(scene, quality);
 };
 
 const isDofIgnored = (object: THREE.Object3D): boolean => {
@@ -1335,6 +1734,26 @@ const setCameraPreset = (
   controls.update();
 };
 
+const TONE_MAPPINGS: Readonly<Record<VisualToneMapper, THREE.ToneMapping>> = {
+  agx: THREE.AgXToneMapping,
+  neutral: THREE.NeutralToneMapping,
+  cineon: THREE.CineonToneMapping,
+  linear: THREE.LinearToneMapping,
+};
+
+const toneMapperName = (toneMapping: THREE.ToneMapping): VisualToneMapper => {
+  if (toneMapping === THREE.NeutralToneMapping) {
+    return "neutral";
+  }
+  if (toneMapping === THREE.CineonToneMapping) {
+    return "cineon";
+  }
+  if (toneMapping === THREE.LinearToneMapping) {
+    return "linear";
+  }
+  return "agx";
+};
+
 const disposeObject = (object: THREE.Object3D): void => {
   object.traverse((child) => {
     const renderable = child as unknown as {
@@ -1356,6 +1775,7 @@ export const createMahjongTableScene = (
   initialView: SceneView = "seat",
   options: MahjongTableSceneOptions = {},
 ): MahjongTableMount => {
+  const quality = resolveQuality(options.quality);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
   scene.fog = new THREE.Fog(COLORS.sky, 10, 34);
@@ -1364,9 +1784,10 @@ export const createMahjongTableScene = (
     antialias: true,
     alpha: false,
     powerPreference: "high-performance",
+    stencil: false,
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
-  renderer.shadowMap.enabled = true;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
+  renderer.shadowMap.enabled = quality.shadows !== "off";
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.AgXToneMapping;
@@ -1377,11 +1798,18 @@ export const createMahjongTableScene = (
   );
   renderer.domElement.setAttribute("tabindex", "0");
   renderer.domElement.dataset.sceneReady = "true";
+  container.dataset.sceneReady = "false";
+  container.dataset.sceneQuality = quality.preset;
   container.dataset.controlActive = "false";
   container.replaceChildren(renderer.domElement);
 
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  const roomEnvironment = new RoomEnvironment();
+  const environmentTexture = pmremGenerator.fromScene(roomEnvironment).texture;
+  scene.environment = environmentTexture;
+
   const composer = new EffectComposer(renderer);
-  composer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+  composer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   composer.addPass(new RenderPass(scene, camera));
   const bokehPass = new BokehPass(scene, camera, {
     focus: 8,
@@ -1389,9 +1817,42 @@ export const createMahjongTableScene = (
     maxblur: 0.0045,
   });
   composer.addPass(bokehPass);
+  composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
   const focusNdc = new THREE.Vector2(0, 0);
   let focusDistance = 8;
+  let skylineRoot: THREE.Object3D | null = null;
+  let debugBoundsRoot: THREE.Group | null = null;
+  let sunLight: THREE.DirectionalLight | null = null;
+  let redMaterials: THREE.MeshStandardMaterial[] = [];
+  let cyanMaterials: THREE.MeshStandardMaterial[] = [];
+  let redMaterialBaseIntensity = new Map<THREE.MeshStandardMaterial, number>();
+  let cyanMaterialBaseIntensity = new Map<THREE.MeshStandardMaterial, number>();
+  let activeDebugPreset: VisualCameraPreset | null = null;
+  let debugFovOverride: number | null = null;
+  let debugFogDensity = 0.018;
+  let debugSunYaw = -0.59;
+  let debugSunElevation = 0.86;
+  let debugSunIntensity = 3.45;
+  let debugEnvironmentIntensity = 1;
+  let debugEnvironmentRotation = 0;
+  let debugRedAccentIntensity = 1;
+  let debugCyanEmissiveIntensity = 1;
+  let debugShadowQuality: VisualShadowQuality = quality.shadows;
+  let debugDprCap = quality.dprCap;
+  let debugWireframe = false;
+  let debugBoundsVisible = false;
+  const debugSkylineLayers: Record<VisualSkylineLayer, boolean> = {
+    near: true,
+    hero: true,
+    fillers: true,
+    distant: true,
+  };
+  let debugFps = 60;
+  let debugFrameTimeMs = 1000 / 60;
+  let previousAnimationTimestamp = 0;
+  const getSunLight = (): THREE.DirectionalLight | null => sunLight;
+  const getDebugBoundsRoot = (): THREE.Group | null => debugBoundsRoot;
 
   const orbitControls = new OrbitControls(camera, renderer.domElement);
   orbitControls.enableDamping = true;
@@ -1412,17 +1873,21 @@ export const createMahjongTableScene = (
     navigator.maxTouchPoints > 0 ||
     window.matchMedia("(pointer: coarse)").matches ||
     "ontouchstart" in window;
+  const preventTouchTextMenu = (event: Event): void => {
+    if (isTouchDevice) {
+      event.preventDefault();
+    }
+  };
+  renderer.domElement.addEventListener("contextmenu", preventTouchTextMenu);
+  renderer.domElement.addEventListener("selectstart", preventTouchTextMenu);
   const orientationConstructor = (
     window as unknown as {
       readonly DeviceOrientationEvent?: DeviceOrientationEventPermissionConstructor;
     }
   ).DeviceOrientationEvent;
   const supportsMotionLook =
-    isTouchDevice &&
-    (orientationConstructor !== undefined || "ondeviceorientation" in window);
-  let motionLookStatus: MotionLookStatus = supportsMotionLook
-    ? "needs-permission"
-    : "unsupported";
+    isTouchDevice && (orientationConstructor !== undefined || "ondeviceorientation" in window);
+  let motionLookStatus: MotionLookStatus = supportsMotionLook ? "needs-permission" : "unsupported";
   let motionLookEnabled = false;
   let motionRequest: Promise<MotionLookStatus> | null = null;
   let orientationListenerAttached = false;
@@ -1436,6 +1901,7 @@ export const createMahjongTableScene = (
   const relativeMotionQuaternion = new THREE.Quaternion();
   const motionTargetQuaternion = new THREE.Quaternion();
   const motionTargetEuler = new THREE.Euler(0, 0, 0, "YXZ");
+  const swipeLookEuler = new THREE.Euler(0, 0, 0, "YXZ");
   const setMotionLookStatus = (status: MotionLookStatus): void => {
     motionLookStatus = status;
     options.onMotionLookStatusChange?.(status);
@@ -1480,6 +1946,65 @@ export const createMahjongTableScene = (
     motionTargetQuaternion.setFromEuler(motionTargetEuler);
     motionTargetValid = true;
   };
+  let swipePointerId: number | null = null;
+  let swipeLastX = 0;
+  let swipeLastY = 0;
+  const syncMotionLookReferenceToCamera = (): void => {
+    cameraReferenceQuaternion.copy(camera.quaternion);
+    if (hasMotionReference) {
+      deviceReferenceQuaternion.copy(deviceOrientationQuaternion);
+    }
+    motionTargetQuaternion.copy(camera.quaternion);
+    motionTargetValid = false;
+  };
+  const onSwipePointerDown = (event: PointerEvent): void => {
+    if (
+      !isTouchDevice ||
+      activeView !== "seat" ||
+      event.pointerType === "mouse" ||
+      swipePointerId !== null
+    ) {
+      return;
+    }
+    event.preventDefault();
+    swipePointerId = event.pointerId;
+    swipeLastX = event.clientX;
+    swipeLastY = event.clientY;
+    renderer.domElement.setPointerCapture(event.pointerId);
+    if (motionLookEnabled) {
+      setControlActive(true);
+    }
+  };
+  const onSwipePointerMove = (event: PointerEvent): void => {
+    if (swipePointerId !== event.pointerId || activeView !== "seat") {
+      return;
+    }
+    event.preventDefault();
+    const deltaX = event.clientX - swipeLastX;
+    const deltaY = event.clientY - swipeLastY;
+    swipeLastX = event.clientX;
+    swipeLastY = event.clientY;
+    swipeLookEuler.setFromQuaternion(camera.quaternion, "YXZ");
+    swipeLookEuler.y -= deltaX * SWIPE_LOOK_SENSITIVITY;
+    swipeLookEuler.x = THREE.MathUtils.clamp(
+      swipeLookEuler.x - deltaY * SWIPE_LOOK_SENSITIVITY,
+      -Math.PI / 2 + 0.12,
+      Math.PI / 2 - 0.12,
+    );
+    swipeLookEuler.z = 0;
+    camera.quaternion.setFromEuler(swipeLookEuler);
+    syncMotionLookReferenceToCamera();
+  };
+  const onSwipePointerEnd = (event: PointerEvent): void => {
+    if (swipePointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+      renderer.domElement.releasePointerCapture(event.pointerId);
+    }
+    swipePointerId = null;
+  };
   const attachOrientationListener = (): void => {
     if (orientationListenerAttached) {
       return;
@@ -1507,6 +2032,7 @@ export const createMahjongTableScene = (
           const permission = await requestPermission();
           if (permission !== "granted") {
             motionLookEnabled = false;
+            setControlActive(false);
             setMotionLookStatus("denied");
             return "denied";
           }
@@ -1515,9 +2041,11 @@ export const createMahjongTableScene = (
         resetMotionCalibration();
         attachOrientationListener();
         setMotionLookStatus("ready");
+        setControlActive(true);
         return "ready";
       } catch {
         motionLookEnabled = false;
+        setControlActive(false);
         setMotionLookStatus("denied");
         return "denied";
       }
@@ -1545,6 +2073,9 @@ export const createMahjongTableScene = (
   let grounded = true;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
+  let touchMovementActive = false;
+  let touchForward = 0;
+  let touchRight = 0;
   let isSprinting = false;
   let lastForwardTapAt = Number.NEGATIVE_INFINITY;
   const movementKeys = new Set([
@@ -1557,9 +2088,19 @@ export const createMahjongTableScene = (
     "ArrowDown",
     "ArrowRight",
   ]);
+  const hasMovementInput = (): boolean => {
+    for (const key of movementKeys) {
+      if (pressedKeys.has(key)) {
+        return true;
+      }
+    }
+    return false;
+  };
   const crouchKeys = new Set(["ShiftLeft", "ShiftRight"]);
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (activeView !== "seat" || !firstPersonControls.isLocked) {
+    const controlsActive =
+      firstPersonControls.isLocked || (isTouchDevice && firstPersonControls.enabled);
+    if (activeView !== "seat" || !controlsActive) {
       return;
     }
     if (movementKeys.has(event.code) || crouchKeys.has(event.code) || event.code === "Space") {
@@ -1585,12 +2126,33 @@ export const createMahjongTableScene = (
   };
   const onKeyUp = (event: KeyboardEvent): void => {
     pressedKeys.delete(event.code);
-    if (event.code === "KeyW") {
+    if (movementKeys.has(event.code) && !hasMovementInput()) {
       isSprinting = false;
     }
   };
+  const setTouchMovementVector = (forward: number, right: number, active: boolean): void => {
+    touchForward = THREE.MathUtils.clamp(forward, -1, 1);
+    touchRight = THREE.MathUtils.clamp(right, -1, 1);
+    touchMovementActive = active;
+  };
+  const toggleCrouch = (): boolean => {
+    if (activeView === "seat") {
+      isCrouched = !isCrouched;
+    }
+    return isCrouched;
+  };
+  const jump = (): void => {
+    if (activeView === "seat" && grounded) {
+      verticalVelocity = JUMP_SPEED;
+      grounded = false;
+    }
+  };
   const onWindowBlur = (): void => {
+    swipePointerId = null;
     pressedKeys.clear();
+    touchMovementActive = false;
+    touchForward = 0;
+    touchRight = 0;
     verticalVelocity = 0;
     jumpOffset = 0;
     grounded = true;
@@ -1606,10 +2168,11 @@ export const createMahjongTableScene = (
     setControlActive(true);
   };
   const onControlsUnlock = (): void => {
+    onWindowBlur();
     setControlActive(false);
   };
   const onCanvasClick = (): void => {
-    if (activeView === "seat" && !firstPersonControls.isLocked) {
+    if (!isTouchDevice && activeView === "seat" && !firstPersonControls.isLocked) {
       firstPersonControls.lock();
     }
   };
@@ -1617,6 +2180,10 @@ export const createMahjongTableScene = (
   window.addEventListener("keyup", onKeyUp);
   window.addEventListener("blur", onWindowBlur);
   renderer.domElement.addEventListener("click", onCanvasClick);
+  renderer.domElement.addEventListener("pointerdown", onSwipePointerDown);
+  renderer.domElement.addEventListener("pointermove", onSwipePointerMove);
+  renderer.domElement.addEventListener("pointerup", onSwipePointerEnd);
+  renderer.domElement.addEventListener("pointercancel", onSwipePointerEnd);
   firstPersonControls.addEventListener("lock", onControlsLock);
   firstPersonControls.addEventListener("unlock", onControlsUnlock);
 
@@ -1633,9 +2200,12 @@ export const createMahjongTableScene = (
     lastForwardTapAt = Number.NEGATIVE_INFINITY;
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
+    resetMotionCalibration();
   };
   const setView = (view: SceneView): void => {
     activeView = view;
+    activeDebugPreset = null;
+    debugFovOverride = null;
     if (view === "seat") {
       orbitControls.enabled = false;
       firstPersonControls.enabled = true;
@@ -1645,15 +2215,221 @@ export const createMahjongTableScene = (
     if (firstPersonControls.isLocked) {
       firstPersonControls.unlock();
     }
+    onWindowBlur();
+    resetMotionCalibration();
     firstPersonControls.enabled = false;
     orbitControls.enabled = true;
     setCameraPreset(camera, orbitControls, view);
   };
+
+  const setDebugCameraPreset = (preset: VisualCameraPreset): void => {
+    activeDebugPreset = preset;
+    activeView = "overhead";
+    firstPersonControls.enabled = false;
+    if (firstPersonControls.isLocked) {
+      firstPersonControls.unlock();
+    }
+    onWindowBlur();
+    orbitControls.enabled = true;
+    const cameraPreset = visualCameraPresets[preset];
+    camera.position.copy(cameraPreset.position);
+    orbitControls.target.copy(cameraPreset.target);
+    orbitControls.update();
+    debugFovOverride = camera.fov;
+    resetMotionCalibration();
+  };
+
+  const setDebugFov = (fov: number): void => {
+    debugFovOverride = THREE.MathUtils.clamp(fov, 30, 100);
+    camera.fov = debugFovOverride;
+    camera.updateProjectionMatrix();
+  };
+
+  const setDebugExposure = (exposure: number): void => {
+    renderer.toneMappingExposure = THREE.MathUtils.clamp(exposure, 0.5, 2.2);
+  };
+
+  const setDebugToneMapper = (toneMapper: VisualToneMapper): void => {
+    renderer.toneMapping = TONE_MAPPINGS[toneMapper];
+  };
+
+  const setDebugFogDensity = (density: number): void => {
+    debugFogDensity = THREE.MathUtils.clamp(density, 0.004, 0.04);
+    const fog = scene.fog;
+    if (fog instanceof THREE.Fog) {
+      fog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
+      fog.near = THREE.MathUtils.clamp(fog.far * 0.3, 4, 12);
+    }
+  };
+
+  const skylineLayerNames: Readonly<Record<VisualSkylineLayer, string>> = {
+    near: "NearRooftops",
+    hero: "HeroLandmarks",
+    fillers: "SkylineFillers",
+    distant: "DistantMatte",
+  };
+
+  const setDebugSkylineLayerVisible = (layer: VisualSkylineLayer, visible: boolean): void => {
+    debugSkylineLayers[layer] = visible;
+    const object = skylineRoot?.getObjectByName(skylineLayerNames[layer]);
+    if (object !== undefined) {
+      object.visible = visible;
+    }
+    if (skylineRoot !== null) {
+      skylineRoot.visible = Object.values(debugSkylineLayers).some(Boolean);
+    }
+  };
+
+  const setDebugSkylineVisible = (visible: boolean): void => {
+    for (const layer of Object.keys(debugSkylineLayers) as VisualSkylineLayer[]) {
+      setDebugSkylineLayerVisible(layer, visible);
+    }
+  };
+
+  const setDebugSunDirection = (yaw: number, elevation: number): void => {
+    debugSunYaw = THREE.MathUtils.clamp(yaw, -Math.PI, Math.PI);
+    debugSunElevation = THREE.MathUtils.clamp(elevation, 0.25, 1.45);
+    const light = getSunLight();
+    if (light !== null) {
+      const horizontal = Math.cos(debugSunElevation) * 10;
+      light.position.set(
+        Math.cos(debugSunYaw) * horizontal,
+        Math.sin(debugSunElevation) * 10,
+        Math.sin(debugSunYaw) * horizontal,
+      );
+      light.lookAt(0, 0.8, 0);
+    }
+  };
+
+  const setDebugSunIntensity = (intensity: number): void => {
+    debugSunIntensity = THREE.MathUtils.clamp(intensity, 0, 6);
+    const light = getSunLight();
+    if (light !== null) {
+      light.intensity = debugSunIntensity;
+    }
+  };
+
+  const setDebugEnvironmentIntensity = (intensity: number): void => {
+    debugEnvironmentIntensity = THREE.MathUtils.clamp(intensity, 0, 2.5);
+    scene.environmentIntensity = debugEnvironmentIntensity;
+  };
+
+  const setDebugEnvironmentRotation = (rotation: number): void => {
+    debugEnvironmentRotation = THREE.MathUtils.clamp(rotation, -Math.PI, Math.PI);
+    scene.environmentRotation.y = debugEnvironmentRotation;
+  };
+
+  const setDebugRedAccentIntensity = (intensity: number): void => {
+    debugRedAccentIntensity = THREE.MathUtils.clamp(intensity, 0, 2.5);
+    for (const material of redMaterials) {
+      material.emissiveIntensity =
+        (redMaterialBaseIntensity.get(material) ?? 0.12) * debugRedAccentIntensity;
+    }
+  };
+
+  const setDebugCyanEmissiveIntensity = (intensity: number): void => {
+    debugCyanEmissiveIntensity = THREE.MathUtils.clamp(intensity, 0, 2.5);
+    for (const material of cyanMaterials) {
+      material.emissiveIntensity =
+        (cyanMaterialBaseIntensity.get(material) ?? 0.28) * debugCyanEmissiveIntensity;
+    }
+  };
+
+  const setDebugShadowQuality = (shadowQuality: VisualShadowQuality): void => {
+    debugShadowQuality = shadowQuality;
+    const size = shadowQuality === "high" ? 2048 : shadowQuality === "medium" ? 1024 : 0;
+    renderer.shadowMap.enabled = size > 0;
+    const light = getSunLight();
+    if (light !== null) {
+      light.castShadow = size > 0;
+      if (size > 0) {
+        light.shadow.mapSize.set(size, size);
+      }
+    }
+    renderer.shadowMap.needsUpdate = true;
+  };
+
+  const setDebugDprCap = (dprCap: number): void => {
+    debugDprCap = THREE.MathUtils.clamp(dprCap, 1, 2);
+    const pixelRatio = Math.min(window.devicePixelRatio, debugDprCap);
+    renderer.setPixelRatio(pixelRatio);
+    composer.setPixelRatio(pixelRatio);
+    const width = Math.max(renderer.domElement.clientWidth, 1);
+    const height = Math.max(renderer.domElement.clientHeight, 1);
+    composer.setSize(width, height);
+  };
+
+  const setMaterialWireframe = (material: THREE.Material, enabled: boolean): void => {
+    const candidate = material as THREE.Material & { wireframe?: boolean };
+    if (candidate.wireframe !== undefined) {
+      candidate.wireframe = enabled;
+    }
+  };
+
+  const setDebugWireframe = (enabled: boolean): void => {
+    debugWireframe = enabled;
+    scene.traverse((object) => {
+      if (!("material" in object)) {
+        return;
+      }
+      const material = (
+        object as THREE.Object3D & {
+          readonly material: THREE.Material | readonly THREE.Material[];
+        }
+      ).material;
+      const materials: readonly THREE.Material[] =
+        material instanceof THREE.Material ? [material] : material;
+      for (const entry of materials) {
+        setMaterialWireframe(entry, enabled);
+      }
+    });
+  };
+
+  const setDebugBoundsVisible = (visible: boolean): void => {
+    debugBoundsVisible = visible;
+    const boundsRoot = getDebugBoundsRoot();
+    if (boundsRoot !== null) {
+      boundsRoot.visible = visible;
+    }
+  };
+
+  const getDebugSnapshot = (): SceneDebugSnapshot => ({
+    cameraPreset: activeDebugPreset,
+    fov: camera.fov,
+    exposure: renderer.toneMappingExposure,
+    toneMapper: toneMapperName(renderer.toneMapping),
+    fogDensity: debugFogDensity,
+    skylineVisible: skylineRoot?.visible ?? true,
+    skylineLayers: { ...debugSkylineLayers },
+    sunYaw: debugSunYaw,
+    sunElevation: debugSunElevation,
+    sunIntensity: debugSunIntensity,
+    environmentIntensity: debugEnvironmentIntensity,
+    environmentRotation: debugEnvironmentRotation,
+    redAccentIntensity: debugRedAccentIntensity,
+    cyanEmissiveIntensity: debugCyanEmissiveIntensity,
+    shadowQuality: debugShadowQuality,
+    quality: quality.preset,
+    dpr: renderer.getPixelRatio(),
+    dprCap: debugDprCap,
+    wireframe: debugWireframe,
+    boundsVisible: debugBoundsVisible,
+    fps: debugFps,
+    frameTimeMs: debugFrameTimeMs,
+    drawCalls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+    points: renderer.info.render.points,
+    lines: renderer.info.render.lines,
+    geometries: renderer.info.memory.geometries,
+    textures: renderer.info.memory.textures,
+  });
   setView(initialView);
 
-  addFloor(scene);
-  addLighting(scene);
-  const skylineTexture = addSkyline(scene);
+  const architectureResources = addFloor(scene, quality);
+  addLighting(scene, quality);
+  const skylineResources = addSkyline(scene, quality.skylineLodBias);
+  skylineRoot = scene.getObjectByName("SkylineRoot") ?? null;
+  const ambientSkylineMaterials = skylineResources.ambient.skylineMaterials;
   const table = createTable();
   scene.add(table);
   const textureCache = createTextureCache();
@@ -1688,6 +2464,70 @@ export const createMahjongTableScene = (
     addLabel(scene, "WEST · BALANCED", new THREE.Vector3(-1.78, 1.38, 0), "#73dce8"),
   ];
 
+  const sunObject = scene.getObjectByName("SunKeyLight");
+  if (sunObject instanceof THREE.DirectionalLight) {
+    sunLight = sunObject;
+    debugSunIntensity = sunLight.intensity;
+    debugSunYaw = Math.atan2(sunLight.position.z, sunLight.position.x);
+    debugSunElevation = Math.atan2(
+      sunLight.position.y,
+      Math.hypot(sunLight.position.x, sunLight.position.z),
+    );
+  }
+  cyanMaterials = [...architectureResources.ambient.cyanMaterials];
+  redMaterials = [...architectureResources.ambient.redMaterials];
+  scene.traverse((object) => {
+    if (!("material" in object)) {
+      return;
+    }
+    const material = (
+      object as THREE.Object3D & {
+        readonly material: THREE.Material | readonly THREE.Material[];
+      }
+    ).material;
+    const materials: readonly THREE.Material[] =
+      material instanceof THREE.Material ? [material] : material;
+    if (object.name === "SystemSeam" || object.name === "TableSystemRing") {
+      for (const entry of materials) {
+        if (entry instanceof THREE.MeshStandardMaterial && !cyanMaterials.includes(entry)) {
+          cyanMaterials.push(entry);
+        }
+      }
+    }
+    if (object.name === "DirectionalAccent") {
+      for (const entry of materials) {
+        if (entry instanceof THREE.MeshStandardMaterial && !redMaterials.includes(entry)) {
+          redMaterials.push(entry);
+        }
+      }
+    }
+  });
+  redMaterialBaseIntensity = new Map(
+    redMaterials.map((material) => [material, material.emissiveIntensity]),
+  );
+  cyanMaterialBaseIntensity = new Map(
+    cyanMaterials.map((material) => [material, material.emissiveIntensity]),
+  );
+
+  debugBoundsRoot = new THREE.Group();
+  debugBoundsRoot.name = "DebugRoot";
+  debugBoundsRoot.visible = false;
+  const debugBoundTargets = [
+    scene.getObjectByName("EnvironmentRoot"),
+    skylineRoot,
+    table,
+    wallRoot,
+  ];
+  for (const target of debugBoundTargets) {
+    if (target === undefined || target === null) {
+      continue;
+    }
+    const helper = new THREE.BoxHelper(target, 0x73dce8);
+    helper.name = `${target.name}Bounds`;
+    debugBoundsRoot.add(helper);
+  }
+  scene.add(debugBoundsRoot);
+
   let previousWidth = 0;
   let previousHeight = 0;
   const resize = (): void => {
@@ -1718,16 +2558,46 @@ export const createMahjongTableScene = (
 
   let animationFrame = 0;
   let disposed = false;
+  let documentVisible = document.visibilityState !== "hidden";
   const timer = new THREE.Timer();
   timer.connect(document);
   const moveSpeed = 3.4;
+  const onVisibilityChange = (): void => {
+    documentVisible = document.visibilityState !== "hidden";
+    if (documentVisible && animationFrame === 0 && !disposed) {
+      animationFrame = window.requestAnimationFrame(animate);
+    }
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
   const animate = (timestamp?: number): void => {
     if (disposed) {
       return;
     }
+    if (!documentVisible) {
+      animationFrame = 0;
+      return;
+    }
     timer.update(timestamp);
     const delta = Math.min(timer.getDelta(), 0.05);
-    const targetFov = activeView === "seat" && isCrouched ? SEATED_FOV : STANDING_FOV;
+    const currentTimestamp = timestamp ?? performance.now();
+    if (previousAnimationTimestamp > 0) {
+      const frameTime = Math.max(0.1, currentTimestamp - previousAnimationTimestamp);
+      debugFrameTimeMs = THREE.MathUtils.lerp(debugFrameTimeMs, frameTime, 0.12);
+      debugFps = 1000 / debugFrameTimeMs;
+    }
+    previousAnimationTimestamp = currentTimestamp;
+    const ambientTime = currentTimestamp * 0.001;
+    const ambientPulse = Math.sin(ambientTime * 0.78) * 0.035 * quality.ambientAnimationRate;
+    for (const material of cyanMaterials) {
+      const baseIntensity = cyanMaterialBaseIntensity.get(material) ?? 0.28;
+      material.emissiveIntensity = (baseIntensity + ambientPulse) * debugCyanEmissiveIntensity;
+    }
+    const skylinePulse = Math.sin(ambientTime * 0.24) * 0.022 * quality.ambientAnimationRate;
+    for (const material of ambientSkylineMaterials) {
+      material.emissiveIntensity = (0.16 + skylinePulse) * debugCyanEmissiveIntensity;
+    }
+    const targetFov =
+      debugFovOverride ?? (activeView === "seat" && isCrouched ? SEATED_FOV : STANDING_FOV);
     const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, 10, delta);
     if (Math.abs(nextFov - camera.fov) > 0.001) {
       camera.fov = nextFov;
@@ -1736,21 +2606,42 @@ export const createMahjongTableScene = (
     for (const label of seatLabels) {
       label.visible = !isCrouched || activeView !== "seat";
     }
-    if (firstPersonControls.enabled && firstPersonControls.isLocked) {
+    const firstPersonActive =
+      firstPersonControls.enabled &&
+      (firstPersonControls.isLocked || (isTouchDevice && activeView === "seat"));
+    if (firstPersonActive) {
+      if (motionLookEnabled && motionTargetValid) {
+        camera.quaternion.slerp(motionTargetQuaternion, 1 - Math.exp(-18 * delta));
+      }
+      camera.updateMatrix();
       const crouching = isCrouched;
       const targetEyeHeight = crouching ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       eyeHeight = THREE.MathUtils.damp(eyeHeight, targetEyeHeight, 14, delta);
-      const forward =
-        (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp") ? 1 : 0) -
-        (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown") ? 1 : 0);
-      const right =
-        (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight") ? 1 : 0) -
-        (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft") ? 1 : 0);
-      const sprinting = isSprinting && pressedKeys.has("KeyW") && !crouching;
-      const speedMultiplier = crouching ? 0.5 : sprinting ? SPRINT_MULTIPLIER : 1;
-      const currentMoveSpeed = moveSpeed * speedMultiplier;
-      const inputMagnitude = Math.hypot(forward, right);
-      const inputScale = inputMagnitude > 1 ? 1 / inputMagnitude : 1;
+      let forward: number;
+      let right: number;
+      let currentMoveSpeed: number;
+      let inputScale = 1;
+      if (touchMovementActive) {
+        const touchMagnitude = Math.min(1, Math.hypot(touchForward, touchRight));
+        const touchDirectionScale = touchMagnitude > 0 ? 1 / touchMagnitude : 0;
+        forward = touchForward * touchDirectionScale;
+        right = touchRight * touchDirectionScale;
+        const sprintCap = getTouchSprintCap(forward);
+        currentMoveSpeed =
+          moveSpeed * (crouching ? 0.5 : 1) * SPRINT_MULTIPLIER * sprintCap * touchMagnitude;
+      } else {
+        forward =
+          (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp") ? 1 : 0) -
+          (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown") ? 1 : 0);
+        right =
+          (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight") ? 1 : 0) -
+          (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft") ? 1 : 0);
+        const inputMagnitude = Math.hypot(forward, right);
+        inputScale = inputMagnitude > 1 ? 1 / inputMagnitude : 1;
+        const sprinting = isSprinting && inputMagnitude > 0 && !crouching;
+        const speedMultiplier = crouching ? 0.5 : sprinting ? SPRINT_MULTIPLIER : 1;
+        currentMoveSpeed = moveSpeed * speedMultiplier;
+      }
       const desiredForward = forward * inputScale * currentMoveSpeed;
       const desiredStrafe = right * inputScale * currentMoveSpeed;
       forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
@@ -1796,13 +2687,56 @@ export const createMahjongTableScene = (
     if (focusUniform !== undefined) {
       focusUniform.value = focusDistance;
     }
+    if (debugBoundsVisible) {
+      const boundsRoot = getDebugBoundsRoot();
+      if (boundsRoot !== null) {
+        for (const helper of boundsRoot.children) {
+          if (helper instanceof THREE.BoxHelper) {
+            helper.update();
+          }
+        }
+      }
+    }
     composer.render();
     animationFrame = window.requestAnimationFrame(animate);
   };
   animate();
+  void renderer
+    .compileAsync(scene, camera)
+    .catch(() => undefined)
+    .finally(() => {
+      if (!disposed) {
+        container.dataset.sceneReady = "true";
+        options.onReady?.();
+      }
+    });
 
   return {
     setView,
+    requestMotionLook,
+    setTouchMovementVector,
+    toggleCrouch,
+    jump,
+    debug: {
+      setCameraPreset: setDebugCameraPreset,
+      setFov: setDebugFov,
+      setExposure: setDebugExposure,
+      setToneMapper: setDebugToneMapper,
+      setFogDensity: setDebugFogDensity,
+      setSkylineVisible: setDebugSkylineVisible,
+      setSkylineLayerVisible: setDebugSkylineLayerVisible,
+      setSunDirection: setDebugSunDirection,
+      setSunIntensity: setDebugSunIntensity,
+      setEnvironmentIntensity: setDebugEnvironmentIntensity,
+      setEnvironmentRotation: setDebugEnvironmentRotation,
+      setRedAccentIntensity: setDebugRedAccentIntensity,
+      setCyanEmissiveIntensity: setDebugCyanEmissiveIntensity,
+      setShadowQuality: setDebugShadowQuality,
+      setDprCap: setDebugDprCap,
+      setWireframe: setDebugWireframe,
+      setBoundsVisible: setDebugBoundsVisible,
+      getSnapshot: getDebugSnapshot,
+    },
     anchors,
     dispose: () => {
       disposed = true;
@@ -1811,10 +2745,21 @@ export const createMahjongTableScene = (
         window.cancelAnimationFrame(resizeFrame);
       }
       observer.disconnect();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onWindowBlur);
+      if (orientationListenerAttached) {
+        window.removeEventListener("deviceorientation", onDeviceOrientation);
+        window.removeEventListener("orientationchange", resetMotionCalibration);
+      }
       renderer.domElement.removeEventListener("click", onCanvasClick);
+      renderer.domElement.removeEventListener("contextmenu", preventTouchTextMenu);
+      renderer.domElement.removeEventListener("selectstart", preventTouchTextMenu);
+      renderer.domElement.removeEventListener("pointerdown", onSwipePointerDown);
+      renderer.domElement.removeEventListener("pointermove", onSwipePointerMove);
+      renderer.domElement.removeEventListener("pointerup", onSwipePointerEnd);
+      renderer.domElement.removeEventListener("pointercancel", onSwipePointerEnd);
       firstPersonControls.removeEventListener("lock", onControlsLock);
       firstPersonControls.removeEventListener("unlock", onControlsUnlock);
       if (firstPersonControls.isLocked) {
@@ -1824,9 +2769,13 @@ export const createMahjongTableScene = (
       orbitControls.dispose();
       timer.dispose();
       disposeObject(scene);
+      environmentTexture.dispose();
+      disposeObject(roomEnvironment);
+      pmremGenerator.dispose();
       bokehPass.dispose();
       composer.dispose();
-      skylineTexture.dispose();
+      skylineResources.texture.dispose();
+      architectureResources.teacherTexture.dispose();
       textureCache.back.dispose();
       for (const texture of textureCache.face.values()) {
         texture.dispose();

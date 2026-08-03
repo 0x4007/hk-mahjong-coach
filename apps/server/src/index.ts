@@ -4,7 +4,7 @@ import { access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const HOST = "127.0.0.1";
+const HOST = "0.0.0.0";
 const PORT = 4173;
 
 export const buildServer = async (): Promise<FastifyInstance> => {
@@ -22,9 +22,8 @@ export const buildServer = async (): Promise<FastifyInstance> => {
     await access(webRoot);
     await server.register(staticFiles, {
       root: webRoot,
-      wildcard: false,
     });
-    server.get("/*", (_request, reply) => reply.sendFile("index.html"));
+    server.setNotFoundHandler((_request, reply) => reply.sendFile("index.html"));
   } catch {
     server.get("/", (_request, reply) =>
       reply
