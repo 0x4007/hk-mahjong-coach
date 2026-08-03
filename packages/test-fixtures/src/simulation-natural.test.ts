@@ -15,4 +15,22 @@ describe("natural shuffled-wall simulation", () => {
       terminal_regression: 0,
     });
   });
+
+  it(
+    "preserves match and global hand offsets in deterministic receipts",
+    { timeout: 120_000 },
+    () => {
+      const summary = runBotSimulation(1, {
+        wallMode: "natural_shuffle",
+        seedNamespace: "test-offsets",
+        matchIndexOffset: 7,
+        handIndexOffset: 11,
+      });
+
+      expect(summary.matchIndexOffset).toBe(7);
+      expect(summary.handIndexOffset).toBe(11);
+      expect(summary.replaySampleIndices).toEqual([11]);
+      expect(summary.replaySamples[0]?.globalHandIndex).toBe(11);
+    },
+  );
 });
