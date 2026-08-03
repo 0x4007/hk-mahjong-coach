@@ -107,12 +107,13 @@ export const isSimulationSummary = (
         (ruleset) => ruleset.id as string,
       )
     : [];
-  let digestMatches = false;
-  try {
-    digestMatches = value.runDigest === simulationSummaryDigest(value);
-  } catch {
-    digestMatches = false;
-  }
+  const digestMatches = (() => {
+    try {
+      return value.runDigest === simulationSummaryDigest(value);
+    } catch {
+      return false;
+    }
+  })();
   return (
     hasExactKeys(value, REDACTED_SIMULATION_SUMMARY_KEYS) &&
     value.schemaVersion === 1 &&

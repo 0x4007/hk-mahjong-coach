@@ -36,5 +36,4 @@ describe("seeded bot simulation", () => {
     } as const;
     expect(runBotSimulation(1, options).runDigest).toBe(runBotSimulation(1, options).runDigest);
   });
-
 });

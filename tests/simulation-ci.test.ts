@@ -212,7 +212,7 @@ describe("natural simulation CI partitioning", () => {
 
   it("pins the remote workflow to one 128-entry matrix and the Free-plan cap", () => {
     expect(workflowSource).toMatch(/workflow_dispatch:/u);
-    const matrixBlock = workflowSource.match(/matrix:\s*\n\s*shard:\s*\[([\s\S]*?)\n\s*\]/u)?.[1];
+    const matrixBlock = /matrix:\s*\n\s*shard:\s*\[([\s\S]*?)\n\s*\]/u.exec(workflowSource)?.[1];
     expect(matrixBlock).toBeDefined();
     const shardIndices = [...(matrixBlock ?? "").matchAll(/^\s*(\d+),?\s*$/gmu)].map((match) =>
       Number(match[1]),
