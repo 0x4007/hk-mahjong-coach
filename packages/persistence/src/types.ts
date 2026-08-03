@@ -1,4 +1,5 @@
 import type {
+  CoreGameRules,
   GameEngine,
   GameEvent,
   GameMode,
@@ -7,8 +8,8 @@ import type {
 } from "@hk-mahjong/core";
 import type Database from "better-sqlite3";
 
-export const PERSISTENCE_SCHEMA_VERSION = 3 as const;
-export const PERSISTENCE_EXPORT_VERSION = 3 as const;
+export const PERSISTENCE_SCHEMA_VERSION = 4 as const;
+export const PERSISTENCE_EXPORT_VERSION = 4 as const;
 export const PERSISTENCE_EXPORT_FORMAT = "hk-mahjong-persistence" as const;
 export const MAIN_BRANCH_ID = "main" as const;
 
@@ -23,6 +24,37 @@ export interface GameKey {
   branchId: string;
 }
 
+export type PersistedBotDifficulty = "novice" | "basic" | "intermediate" | "advanced";
+export type PersistedBotPersonality = "fast" | "value" | "balanced";
+export type PersistedCoachProvider = "templates" | "openai";
+export type PersistedCoachVerbosity = "brief" | "normal" | "detailed";
+
+export interface GameSessionConfigurationV1 {
+  schemaVersion: 1;
+  bots: readonly {
+    playerId: string;
+    difficulty: PersistedBotDifficulty;
+    personality: PersistedBotPersonality;
+  }[];
+  coach: {
+    enabled: boolean;
+    provider: PersistedCoachProvider;
+    verbosity: PersistedCoachVerbosity;
+  };
+}
+
+export interface HistoricalRulesetValidationResult {
+  definition: unknown;
+  hash: string;
+  coreRules: CoreGameRules;
+}
+
+export type HistoricalLegalActions = (
+  state: GameState,
+  playerId: string,
+  rulesetDefinition: JsonObject,
+) => ReturnType<GameEngine["legalActions"]>;
+
 export interface PersistenceRepositoryOptions {
   /** A file path or SQLite's special `:memory:` path. */
   databasePath: string;
@@ -32,6 +64,10 @@ export interface PersistenceRepositoryOptions {
   snapshotEveryEvents?: number;
   /** Reconstructs authoritative state while loading or verifying a game. */
   reducer?: GameEngine["reduce"];
+  /** Recomputes legal actions with the exact historical ruleset used by the persisted game. */
+  legalActions: HistoricalLegalActions;
+  /** Validates and resolves the exact historical ruleset without a mutable registry lookup. */
+  validateRulesetDefinition: (definition: unknown) => HistoricalRulesetValidationResult;
   /** Metadata clock only; game and replay determinism never depend on it. */
   clock?: () => string;
 }
@@ -44,6 +80,12 @@ export interface GameMetadata {
   rulesetHash: string;
   /** The exact resolved definition used to create the game, never a mutable registry lookup. */
   rulesetDefinition: JsonObject;
+  /**
+   * Immutable composition policy needed to resume bot and coach behavior. Historical databases
+   * without this field remain replayable but are not offered by the resumable-game query.
+   */
+  sessionConfiguration: GameSessionConfigurationV1 | null;
+  sessionConfigurationHash: string | null;
   seed: string;
   rngVersion: string;
   mode: GameMode;
@@ -58,6 +100,8 @@ export interface GameBranchMetadata {
   forkEventChainHash: string;
   practice: boolean;
   createdAt: string;
+  /** Durable database-local ordering for the most recently accepted branch command. */
+  activityOrder: number;
   currentRevision: number;
   stateHash: string | null;
   eventChainHash: string;
@@ -110,10 +154,22 @@ export interface LoadedGame {
   recovery: SnapshotRecovery;
 }
 
+export interface LoadedResumableGame extends Omit<LoadedGame, "game"> {
+  game: GameMetadata & {
+    sessionConfiguration: GameSessionConfigurationV1;
+    sessionConfigurationHash: string;
+  };
+}
+
 export interface ReplayResult {
   key: GameKey;
   state: GameState;
   eventCount: number;
+}
+
+export interface AcceptedDecisionEvidenceInput {
+  decision: Omit<DecisionRecordInput, "key" | "requestId">;
+  analysisFacts: readonly Omit<AnalysisFactRecordInput, "decisionId">[];
 }
 
 export interface AppendAcceptedCommandInput {
@@ -128,6 +184,10 @@ export interface AppendAcceptedCommandInput {
    * external boundary value: repository validation freezes its canonical historical identity.
    */
   rulesetDefinition?: unknown;
+  /** Required only when the first command creates a game. */
+  sessionConfiguration?: unknown;
+  /** Optional learner evidence committed atomically with this accepted command. */
+  decisionEvidence?: AcceptedDecisionEvidenceInput;
 }
 
 export interface AppendAcceptedCommandResult {
@@ -394,6 +454,7 @@ export interface PersistenceRepository {
   close(): void;
   appendAcceptedCommand(input: AppendAcceptedCommandInput): AppendAcceptedCommandResult;
   loadGame(key: GameKey): LoadedGame;
+  loadLatestResumableGame(learnerId: string | null): LoadedResumableGame | null;
   loadGameAtRevision(key: GameKey, revision: number): LoadedGame;
   replayToTerminal(key: GameKey): ReplayResult;
   forkPracticeBranch(input: ForkPracticeBranchInput): ForkPracticeBranchResult;

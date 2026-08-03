@@ -1,7 +1,10 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 const fromRoot = (path: string): string => fileURLToPath(new URL(path, import.meta.url));
+const coverageRun = process.argv.some(
+  (argument) => argument === "--coverage" || argument.startsWith("--coverage."),
+);
 
 export default defineConfig({
   resolve: {
@@ -20,10 +23,21 @@ export default defineConfig({
   },
   test: {
     include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "tests/**/*.test.ts"],
+    // Precise V8 instrumentation turns one synchronous natural hand into a multi-minute workload
+    // and distorts wall-clock measurements. Ordinary tests and dedicated workflows retain those
+    // real integration/performance proofs without instrumenting them.
+    exclude: coverageRun
+      ? [
+          ...configDefaults.exclude,
+          "packages/test-fixtures/src/simulation-natural.test.ts",
+          "tests/persistence-performance.test.ts",
+        ]
+      : configDefaults.exclude,
+    testTimeout: 30_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "json-summary", "html"],
-      include: ["packages/{core,hk-rules,protocol,analysis,bots}/src/**/*.ts"],
+      include: ["packages/{core,hk-rules,protocol,analysis,bots,coach,persistence}/src/**/*.ts"],
       thresholds: {
         "packages/core/src/**/*.ts": {
           statements: 95,
@@ -47,6 +61,12 @@ export default defineConfig({
           statements: 85,
         },
         "packages/bots/src/**/*.ts": {
+          statements: 85,
+        },
+        "packages/coach/src/**/*.ts": {
+          statements: 85,
+        },
+        "packages/persistence/src/**/*.ts": {
           statements: 85,
         },
       },

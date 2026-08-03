@@ -166,6 +166,9 @@ export const deriveLearnerPatterns = (
   if (!Number.isSafeInteger(minimumSampleSize) || minimumSampleSize < 4) {
     throw new RangeError("Learner patterns require a minimum sample size of at least four");
   }
+  if (new Set(decisions.map(({ learnerId }) => learnerId)).size > 1) {
+    throw new RangeError("Learner patterns must be derived from one learner");
+  }
   const byConcept = new Map<ConceptId, CoachingDecisionRecord[]>();
   for (const decision of decisions) {
     for (const conceptId of decision.conceptIds) {

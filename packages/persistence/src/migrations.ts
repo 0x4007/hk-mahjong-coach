@@ -262,6 +262,15 @@ export const PERSISTENCE_MIGRATIONS: readonly PersistenceMigration[] = [
       WHERE result_branch_id IS NULL;
     `,
   },
+  {
+    version: 4,
+    sql: `
+      ALTER TABLE games ADD COLUMN session_config_json TEXT;
+      ALTER TABLE games ADD COLUMN session_config_hash TEXT;
+      ALTER TABLE game_branches
+        ADD COLUMN activity_order INTEGER NOT NULL DEFAULT 0 CHECK (activity_order >= 0);
+    `,
+  },
 ];
 
 export const migratePersistence = (database: Database.Database, appliedAt: string): void => {
@@ -283,6 +292,17 @@ export const migratePersistence = (database: Database.Database, appliedAt: strin
   }
 
   const applied = new Set(appliedRows.map(({ version }) => version));
+  let sawMissingMigration = false;
+  for (const { version } of PERSISTENCE_MIGRATIONS) {
+    if (!applied.has(version)) {
+      sawMissingMigration = true;
+    } else if (sawMissingMigration) {
+      throw new PersistenceCorruptionError(
+        "Database contains a non-contiguous persistence migration ledger",
+      );
+    }
+  }
+
   for (const migration of PERSISTENCE_MIGRATIONS) {
     if (applied.has(migration.version)) {
       continue;
