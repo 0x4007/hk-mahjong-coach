@@ -64,7 +64,7 @@ export const runParallelBotSimulation = async (
   const idleWorkers = new Set<Worker>();
   const activeMatches = new Map<Worker, number>();
   const completedMatches = new Map<number, BotSimulationMatchLedger>();
-  let nextMatchToSchedule = 0;
+  let nextMatchToSchedule = accumulator.nextMatchIndex;
   let settled = false;
 
   const terminateWorkers = async (): Promise<void> => {

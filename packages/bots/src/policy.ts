@@ -49,7 +49,6 @@ const basicDiscardOrder = (
   right: DiscardCandidateAnalysis,
 ): number =>
   left.distanceAfterDiscard - right.distanceAfterDiscard ||
-  right.totalScore - left.totalScore ||
   right.visibleImprovingCopies - left.visibleImprovingCopies ||
   compareTileInstances(left.tileId, right.tileId) ||
   compareCodePoints(left.actionId, right.actionId);

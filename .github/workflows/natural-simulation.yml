@@ -4,15 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       hands:
-        description: "Total fully natural shuffled-wall hands"
+        description: "Total fully natural shuffled-wall hands (128-10000)"
         required: true
-        default: "500"
-        type: string
-      shards:
-        description: "Deterministic shards (1-20; Free plan runs at most 20 concurrently)"
-        required: true
-        default: "20"
-        type: string
+        default: 500
+        type: number
       seed_namespace:
         description: "Stable seed namespace for this gate"
         required: true
@@ -27,123 +22,280 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: validate natural simulation inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      hands: ${{ steps.validate.outputs.hands }}
+      seed_namespace: ${{ steps.validate.outputs.seed_namespace }}
+    steps:
+      - name: Validate dispatch inputs once
+        id: validate
+        env:
+          REQUESTED_HANDS: ${{ inputs.hands }}
+          REQUESTED_SEED_NAMESPACE: ${{ inputs.seed_namespace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_HANDS" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "hands must be a canonical decimal integer" >&2
+            exit 1
+          fi
+          # Bound the string before Bash arithmetic so an oversized decimal cannot wrap.
+          if (( ${#REQUESTED_HANDS} > 5 )); then
+            echo "hands must be from 128 through 10000" >&2
+            exit 1
+          fi
+          if (( REQUESTED_HANDS < 128 || REQUESTED_HANDS > 10000 )); then
+            echo "hands must be from 128 through 10000" >&2
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_SEED_NAMESPACE" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$ ]]; then
+            echo "seed_namespace must be 1 through 80 ASCII letters, digits, '.', '_', ':', or '-'" >&2
+            exit 1
+          fi
+          printf 'hands=%s\n' "$REQUESTED_HANDS" >> "$GITHUB_OUTPUT"
+          printf 'seed_namespace=%s\n' "$REQUESTED_SEED_NAMESPACE" >> "$GITHUB_OUTPUT"
+
   shard:
     name: natural shard ${{ matrix.shard }}
+    needs: validate
+    if: ${{ needs.validate.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      # The matrix has 128 entries; this cap respects the configured free-runner concurrency.
       max-parallel: 20
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        shard:
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            73,
+            74,
+            75,
+            76,
+            77,
+            78,
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85,
+            86,
+            87,
+            88,
+            89,
+            90,
+            91,
+            92,
+            93,
+            94,
+            95,
+            96,
+            97,
+            98,
+            99,
+            100,
+            101,
+            102,
+            103,
+            104,
+            105,
+            106,
+            107,
+            108,
+            109,
+            110,
+            111,
+            112,
+            113,
+            114,
+            115,
+            116,
+            117,
+            118,
+            119,
+            120,
+            121,
+            122,
+            123,
+            124,
+            125,
+            126,
+            127,
+          ]
     steps:
-      - name: Select active shard
-        id: select
-        env:
-          REQUESTED_SHARDS: ${{ inputs.shards }}
-          MATRIX_SHARD: ${{ matrix.shard }}
-        run: |
-          case "$REQUESTED_SHARDS" in
-            ''|*[!0-9]*)
-              echo "shards must be a decimal integer" >&2
-              exit 1
-              ;;
-          esac
-          if [ "$REQUESTED_SHARDS" -lt 1 ] || [ "$REQUESTED_SHARDS" -gt 20 ]; then
-            echo "shards must be from 1 through 20" >&2
-            exit 1
-          fi
-          if [ "$MATRIX_SHARD" -lt "$REQUESTED_SHARDS" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v4
-        if: ${{ steps.select.outputs.enabled == 'true' }}
       - uses: pnpm/action-setup@v4
-        if: ${{ steps.select.outputs.enabled == 'true' }}
         with:
           version: 11.18.0
       - uses: actions/setup-node@v4
-        if: ${{ steps.select.outputs.enabled == 'true' }}
         with:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-        if: ${{ steps.select.outputs.enabled == 'true' }}
       - run: pnpm build:packages
-        if: ${{ steps.select.outputs.enabled == 'true' }}
       - name: Write deterministic shard config
-        if: ${{ steps.select.outputs.enabled == 'true' }}
         run: |
           mkdir -p .ci
           cat > .ci/simulation-shard.json <<'JSON'
           {
             "schemaVersion": 1,
-            "totalHands": ${{ toJSON(inputs.hands) }},
-            "shardCount": ${{ toJSON(inputs.shards) }},
-            "shardIndex": ${{ toJSON(matrix.shard) }},
-            "seedNamespace": ${{ toJSON(inputs.seed_namespace) }}
+            "totalHands": ${{ toJSON(needs.validate.outputs.hands) }},
+            "shardCount": 128,
+            "shardIndex": ${{ matrix.shard }},
+            "seedNamespace": ${{ toJSON(needs.validate.outputs.seed_namespace) }}
           }
           JSON
       - name: Run natural shard
-        if: ${{ steps.select.outputs.enabled == 'true' }}
         run: pnpm exec tsx scripts/simulation-ci-shard.ts
       - name: Upload redacted shard receipt
-        if: ${{ always() && steps.select.outputs.enabled == 'true' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: natural-simulation-shard-${{ matrix.shard }}
           path: .ci/simulation-shard-${{ matrix.shard }}.json
-          if-no-files-found: ignore
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 7
 
   aggregate:
     name: aggregate natural gate
     if: always()
-    needs: shard
+    needs: [validate, shard]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Require input validation
+        if: ${{ needs.validate.result != 'success' }}
+        run: |
+          echo "Natural simulation input validation failed; no shard matrix was run." >&2
+          exit 1
       - uses: actions/checkout@v4
+        if: ${{ needs.validate.result == 'success' }}
       - uses: pnpm/action-setup@v4
+        if: ${{ needs.validate.result == 'success' }}
         with:
           version: 11.18.0
       - uses: actions/setup-node@v4
+        if: ${{ needs.validate.result == 'success' }}
         with:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+        if: ${{ needs.validate.result == 'success' }}
       - run: pnpm build:packages
+        if: ${{ needs.validate.result == 'success' }}
       - name: Download shard receipts
+        if: ${{ needs.validate.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           pattern: natural-simulation-shard-*
           path: .ci/receipts
           merge-multiple: true
       - name: Write aggregate config
+        if: ${{ needs.validate.result == 'success' }}
         run: |
           mkdir -p .ci
-          cat > .ci/simulation-aggregate.json <<'JSON'
+          cat > .ci/simulation-aggregate-config.json <<'JSON'
           {
             "schemaVersion": 1,
-            "totalHands": ${{ toJSON(inputs.hands) }},
-            "shardCount": ${{ toJSON(inputs.shards) }},
-            "seedNamespace": ${{ toJSON(inputs.seed_namespace) }}
+            "totalHands": ${{ toJSON(needs.validate.outputs.hands) }},
+            "shardCount": 128,
+            "seedNamespace": ${{ toJSON(needs.validate.outputs.seed_namespace) }}
           }
           JSON
-      - name: Verify all shard receipts
+      - name: Verify all 128 shard receipts
+        id: aggregate
+        if: ${{ needs.validate.result == 'success' }}
         run: pnpm exec tsx scripts/simulation-ci-aggregate.ts
       - name: Upload aggregate receipt
-        if: always()
+        if: ${{ steps.aggregate.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: natural-simulation-aggregate
-          path: .ci/simulation-aggregate.json
-          if-no-files-found: ignore
+          path: .ci/simulation-aggregate-receipt.json
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 7
       - name: Require all shard jobs to pass
-        if: ${{ needs.shard.result != 'success' }}
+        if: ${{ always() && needs.shard.result != 'success' }}
         run: |
-          echo "One or more natural simulation shard jobs failed."
+          echo "One or more of the 128 natural simulation shard jobs failed or was skipped." >&2
           exit 1
