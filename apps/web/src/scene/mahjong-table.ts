@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
 
@@ -155,8 +156,8 @@ const PUBLIC_DISCARDS: readonly TileTypeId[] = [
 
 const cameraPresets: Readonly<Record<SceneView, CameraPreset>> = {
   seat: {
-    position: new THREE.Vector3(10.8, 8.2, 14.2),
-    target: new THREE.Vector3(0, 1.45, 0),
+    position: new THREE.Vector3(0, 5.55, 11.6),
+    target: new THREE.Vector3(0, 1.65, 0),
   },
   overhead: {
     position: new THREE.Vector3(0, 16.5, 0.2),
@@ -864,7 +865,7 @@ export const createMahjongTableScene = (
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.night);
   scene.fog = new THREE.Fog(COLORS.night, 24, 46);
-  const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
+  const camera = new THREE.PerspectiveCamera(46, 1, 0.1, 100);
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
@@ -880,18 +881,82 @@ export const createMahjongTableScene = (
     "aria-label",
     "Interactive three-dimensional Hong Kong mahjong table",
   );
+  renderer.domElement.setAttribute("tabindex", "0");
   renderer.domElement.dataset.sceneReady = "true";
   container.replaceChildren(renderer.domElement);
 
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.minDistance = 8;
-  controls.maxDistance = 28;
-  controls.maxPolarAngle = Math.PI / 2.05;
-  controls.minPolarAngle = Math.PI / 5.5;
-  controls.enablePan = false;
-  setCameraPreset(camera, controls, initialView);
+  const orbitControls = new OrbitControls(camera, renderer.domElement);
+  orbitControls.enableDamping = true;
+  orbitControls.dampingFactor = 0.08;
+  orbitControls.minDistance = 8;
+  orbitControls.maxDistance = 28;
+  orbitControls.maxPolarAngle = Math.PI / 2.05;
+  orbitControls.minPolarAngle = Math.PI / 5.5;
+  orbitControls.enablePan = false;
+  const firstPersonControls = new PointerLockControls(camera, renderer.domElement);
+  firstPersonControls.pointerSpeed = 0.72;
+  firstPersonControls.minPolarAngle = 1.08;
+  firstPersonControls.maxPolarAngle = 2.05;
+  firstPersonControls.enabled = false;
+
+  let activeView = initialView;
+  const pressedKeys = new Set<string>();
+  const movementKeys = new Set([
+    "KeyW",
+    "KeyA",
+    "KeyS",
+    "KeyD",
+    "ArrowUp",
+    "ArrowLeft",
+    "ArrowDown",
+    "ArrowRight",
+  ]);
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (activeView !== "seat" || !firstPersonControls.isLocked) {
+      return;
+    }
+    if (movementKeys.has(event.code)) {
+      event.preventDefault();
+      pressedKeys.add(event.code);
+    }
+  };
+  const onKeyUp = (event: KeyboardEvent): void => {
+    pressedKeys.delete(event.code);
+  };
+  const onWindowBlur = (): void => {
+    pressedKeys.clear();
+  };
+  const onCanvasClick = (): void => {
+    if (activeView === "seat" && !firstPersonControls.isLocked) {
+      firstPersonControls.lock();
+    }
+  };
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", onWindowBlur);
+  renderer.domElement.addEventListener("click", onCanvasClick);
+
+  const setFirstPersonPreset = (): void => {
+    const preset = cameraPresets.seat;
+    camera.position.copy(preset.position);
+    camera.lookAt(preset.target);
+  };
+  const setView = (view: SceneView): void => {
+    activeView = view;
+    if (view === "seat") {
+      orbitControls.enabled = false;
+      firstPersonControls.enabled = true;
+      setFirstPersonPreset();
+      return;
+    }
+    if (firstPersonControls.isLocked) {
+      firstPersonControls.unlock();
+    }
+    firstPersonControls.enabled = false;
+    orbitControls.enabled = true;
+    setCameraPreset(camera, orbitControls, view);
+  };
+  setView(initialView);
 
   addFloor(scene);
   addLighting(scene);
@@ -955,18 +1020,41 @@ export const createMahjongTableScene = (
 
   let animationFrame = 0;
   let disposed = false;
-  const animate = (): void => {
+  const timer = new THREE.Timer();
+  timer.connect(document);
+  const moveSpeed = 3.4;
+  const animate = (timestamp?: number): void => {
     if (disposed) {
       return;
     }
-    controls.update();
+    timer.update(timestamp);
+    const delta = Math.min(timer.getDelta(), 0.05);
+    if (firstPersonControls.enabled && firstPersonControls.isLocked) {
+      const forward =
+        (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp") ? 1 : 0) -
+        (pressedKeys.has("KeyS") || pressedKeys.has("ArrowDown") ? 1 : 0);
+      const right =
+        (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight") ? 1 : 0) -
+        (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft") ? 1 : 0);
+      if (forward !== 0) {
+        firstPersonControls.moveForward(forward * moveSpeed * delta);
+      }
+      if (right !== 0) {
+        firstPersonControls.moveRight(right * moveSpeed * delta);
+      }
+      camera.position.x = THREE.MathUtils.clamp(camera.position.x, -4.4, 4.4);
+      camera.position.y = cameraPresets.seat.position.y;
+      camera.position.z = THREE.MathUtils.clamp(camera.position.z, 8.2, 13.2);
+    } else {
+      orbitControls.update();
+    }
     renderer.render(scene, camera);
     animationFrame = window.requestAnimationFrame(animate);
   };
   animate();
 
   return {
-    setView: (view) => setCameraPreset(camera, controls, view),
+    setView,
     dispose: () => {
       disposed = true;
       window.cancelAnimationFrame(animationFrame);
@@ -974,7 +1062,16 @@ export const createMahjongTableScene = (
         window.cancelAnimationFrame(resizeFrame);
       }
       observer.disconnect();
-      controls.dispose();
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
+      renderer.domElement.removeEventListener("click", onCanvasClick);
+      if (firstPersonControls.isLocked) {
+        firstPersonControls.unlock();
+      }
+      firstPersonControls.dispose();
+      orbitControls.dispose();
+      timer.dispose();
       disposeObject(scene);
       skylineTexture.dispose();
       textureCache.back.dispose();

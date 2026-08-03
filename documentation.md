@@ -129,6 +129,11 @@
   style reference only; no game assets or textures are copied from that title.
 - The WebGL mount coalesces resize observations and ignores unchanged canvas dimensions, which avoids
   a resize-notification loop while the view is mounted. Shadows use the current `PCFShadowMap` API.
+- The seat camera intentionally borrows familiar first-person game conventions: click-to-capture
+  pointer lock, mouse look, WASD/arrow movement, an Escape unlock, and a bounded movement box that
+  keeps the player at the South seat. The alternate overhead lens remains orbit-controlled.
+- The browser shell is a viewport-owned scene rather than a document card. It uses `100dvh` with
+  minimal overlay controls so the table remains the primary surface on desktop and mobile.
 - This is a rendering base, not Milestone 7 completion. It has no live WebSocket/game observation,
   legal-action controls, replay state, or persistence yet. The browser must continue to consume public
   observations when those surfaces are wired in; opponent hands must remain face-down until an engine

@@ -8,36 +8,29 @@ import type { SceneView } from "./scene/mahjong-table.js";
 const App = (): React.JSX.Element => {
   const [view, setView] = React.useState<SceneView>("seat");
   return (
-    <main id="main">
-      <header className="intro">
-        <p>Hong Kong Old Style · NYC Social Teaching Profile v1</p>
-        <h1>Pull up a chair above Midtown.</h1>
-        <p>
-          A first-person table for learning to read Hong Kong mahjong: warm felt, ivory tiles, and
-          the Manhattan skyline after dark.
-        </p>
-      </header>
-      <section className="scene-card" aria-labelledby="table-heading">
-        <header className="scene-card-header">
-          <div>
-            <p className="eyebrow">Milestone 7 · visual table base</p>
-            <h2 id="table-heading">The social table is set.</h2>
-          </div>
-          <div className="scene-actions" role="group" aria-label="Camera view">
-            <button aria-pressed={view === "seat"} onClick={() => setView("seat")} type="button">
-              Seat view
-            </button>
-            <button
-              aria-pressed={view === "overhead"}
-              onClick={() => setView("overhead")}
-              type="button"
-            >
-              Overhead
-            </button>
-          </div>
-        </header>
+    <main id="main" className="immersive-shell">
+      <section className="scene-card immersive-scene" aria-labelledby="table-heading">
         <div className="scene-frame">
           <MahjongTableScene view={view} />
+          <header className="scene-overlay scene-overlay-intro">
+            <p className="eyebrow">Hong Kong Old Style · NYC Social Table</p>
+            <h1 id="table-heading">Stay in the hand.</h1>
+            <p>Click the table to look around. Use WASD or the arrow keys to shift your seat.</p>
+          </header>
+          <div className="scene-overlay scene-overlay-controls">
+            <div className="scene-actions" role="group" aria-label="Camera view">
+              <button aria-pressed={view === "seat"} onClick={() => setView("seat")} type="button">
+                Seat view
+              </button>
+              <button
+                aria-pressed={view === "overhead"}
+                onClick={() => setView("overhead")}
+                type="button"
+              >
+                Overhead
+              </button>
+            </div>
+          </div>
           <div className="scene-hud" aria-label="Scene details">
             <span>
               <i aria-hidden="true" /> Live 3D preview
@@ -45,14 +38,11 @@ const App = (): React.JSX.Element => {
             <span>Round 1 · East</span>
             <span>8:42 PM · Midtown</span>
           </div>
+          <footer className="scene-card-footer scene-overlay scene-overlay-footer">
+            <p>Mouse look · WASD move · Esc releases the pointer</p>
+            <span className="scene-credit">Procedural geometry · no external assets</span>
+          </footer>
         </div>
-        <footer className="scene-card-footer">
-          <p>
-            Drag to orbit · scroll to zoom · opponents stay face-down until the engine makes their
-            tiles public.
-          </p>
-          <span className="scene-credit">Procedural geometry · no external assets</span>
-        </footer>
       </section>
     </main>
   );

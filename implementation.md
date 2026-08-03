@@ -98,6 +98,11 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The canvas resize path now coalesces `ResizeObserver` notifications and ignores unchanged
   dimensions; the renderer uses the current `PCFShadowMap` setting instead of the deprecated soft-map
   constant.
+- The seat camera is now a centered eye-level first-person preset. Clicking the canvas enters browser
+  pointer lock; mouse movement looks around, WASD/arrow keys shift the seat within a bounded table
+  position, Escape releases the pointer, and the overhead button switches back to orbit controls.
+- The table now owns the full dynamic viewport (`100dvh`) with title, view buttons, status, and control
+  hints as unobtrusive scene overlays rather than a scrolling page card.
 - `three@0.185.1` and matching `@types/three@0.185.3` are the only new runtime/development packages.
   Online research checked the official Three.js ecosystem and CC0 texture sources; this prototype uses
   no external asset files so licensing can be reviewed before adding a production asset pack.
