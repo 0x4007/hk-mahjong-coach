@@ -141,7 +141,7 @@
 - The scene remains presentation-only for movement/camera; legal actions and game truth stay in the
   DOM observation overlay and authoritative session engine. WebGL is intentionally skipped in
   automation browsers whose SwiftShader renderer stalls; headed browsers mount the full scene.
-- Validation on this dirty state: 340 unit/integration tests, 338 coverage tests, isolated seeded
+- Validation on the clean canonical candidate: 340 unit/integration tests, 338 coverage tests, isolated seeded
   Playwright acceptance, `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`,
   `pnpm smoke`, and `pnpm verify` pass.
 

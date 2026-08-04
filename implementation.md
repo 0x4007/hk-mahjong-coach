@@ -6,6 +6,7 @@
 - Worktree:
   `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
 - Branch: `implementation-takeover-019fc5b7-g06506cba54`
+- Current clean head: `a07748053c0ab59c434bb34470fda2f6016f0322` (`test: exercise scripted jsonl hand`).
 - Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
 - Implementation lane: this canonical worktree, with one writer.
 - The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
@@ -82,8 +83,8 @@ remote natural-wall receipt and live provider attestation remain external eviden
 - Process restart/resume, abrupt `SIGKILL` recovery, replay hash equality, corrupt-snapshot fallback
   followed by export, migration-ledger continuity, nondestructive practice branching, learner
   evidence, reset/delete, and import/export validation all pass focused tests.
-- The exact dirty SHA also passes serialized format, lint, typecheck, full tests, coverage, the
-  500-hand fast simulation, build, and production smoke.
+- The exact clean candidate SHA also passes serialized format, lint, typecheck, full tests, coverage,
+  the 500-hand fast simulation, build, and production smoke.
 
 ## Milestones 6–9 evidence
 
@@ -113,6 +114,8 @@ remote natural-wall receipt and live provider attestation remain external eviden
 - The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
+- GitHub Actions verify run `30876124786` is green for the current head. The workflow annotation
+  only reports the hosted runner's Node 20 action deprecation warning.
 
 ## Blockers and remaining scope
 

@@ -215,7 +215,7 @@ Evidence recorded 2026-08-04:
 - The release simulation completes 10,000 hands across 2,500 matches with zero illegal actions,
   invariant violations, crashes, command-bound failures, or replay mismatches. Receipt run digest:
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
-- `pnpm verify`, production start, and the smoke test pass on the exact dirty canonical state.
+- `pnpm verify`, production start, and the smoke test pass on the exact clean canonical candidate.
 - The remote natural-wall receipt and live production provider/no-key attestation remain external
   evidence gates.
 - The seeded rooms are named deterministic seeds with teaching focus metadata rather than bespoke
