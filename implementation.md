@@ -120,7 +120,7 @@ evidence.
 - The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
-- GitHub Actions verify run `30876688289` is green for the current candidate. The workflow annotation
+- GitHub Actions verify run `30878077706` is green for the implementation candidate. The workflow annotation
   only reports the hosted runner's Node 20 action deprecation warning.
 
 ## Blockers and remaining scope
