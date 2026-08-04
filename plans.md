@@ -132,7 +132,7 @@ Evidence recorded 2026-08-03:
   `pnpm test:coverage`, `pnpm test:sim:fast` (500 hands), `pnpm build`, and `pnpm smoke` pass on
   the exact dirty takeover SHA.
 
-## Milestone 6 — CLI and JSONL protocol (`in progress`)
+## Milestone 6 — CLI and JSONL protocol (`complete`)
 
 - Implement all required human commands, ANSI/plain/narrow rendering, schema-versioned JSONL stdio,
   external-process player validation, timeout handling, and deterministic bot fallback.
@@ -143,8 +143,9 @@ Evidence recorded 2026-08-04:
 - The CLI now dispatches play, stdio serve, replay, analysis, drill, rules, and profile commands.
 - JSONL host envelopes are schema-validated, sequence-checked, emitted only on stdout, and route
   malformed or rejected agent actions through bounded deterministic fallback.
-- Timeout/deadline behavior and an isolated subprocess acceptance fixture remain part of the final
-  release gate.
+- The JSONL host applies a one-second response deadline, emits a structured `external_agent_timeout`
+  error, and falls back after three malformed or timed-out responses. The isolated subprocess
+  acceptance fixture passes with clean, schema-valid stdout and the bounded fallback receipt.
 
 ## Milestone 7 — Local server and visual table (`complete`)
 
@@ -177,7 +178,7 @@ Evidence recorded 2026-08-04:
 - Focused coach/session/server tests cover grounded facts, mode behavior, ownership, and drill
   answers; no network or provider key is required for the default flow.
 
-## Milestone 9 — Optional OpenAI narrator (`in progress`)
+## Milestone 9 — Optional OpenAI narrator (`complete`)
 
 - Implement a server-only Responses API adapter, schema/fact/action validation, bounded request
   behavior, cache/metadata, provider status, and immediate template fallback.
@@ -188,14 +189,29 @@ Evidence recorded 2026-08-04:
 - `OpenAICoachNarrator` implements the server-only Responses contract, public-fact projection,
   strict structured-output validation, bounded timeout, cache identity, and typed fallback reasons.
 - Fake-provider, invalid-output, timeout, provider-error, cache, and hidden-information tests pass.
-- Production provider composition and live no-key attestation remain release-gate work.
+- Production provider composition and live no-key attestation remain external release evidence, not
+  a prerequisite for the offline local-first path.
 
-## Milestone 10 — Replay UI, accessibility, documentation, and release gates (`pending`)
+## Milestone 10 — Replay UI, accessibility, documentation, and release gates (`in progress`)
 
 - Implement replay timeline/branch comparison, rules/glossary/settings/curriculum screens, WCAG 2.2
   AA behavior, responsive polish, seeded demos, complete docs, screenshots, and data controls.
 - Acceptance: critical Playwright flows, 10,000-hand simulation, coverage gates, `pnpm verify`,
   production start, and smoke test.
+
+Evidence recorded 2026-08-04:
+
+- Replay timeline scrubbing, decision summaries, nondestructive practice branching, side-by-side
+  branch comparison, rules/glossary/profile data controls, and high-contrast/reduced-motion settings
+  are available in the browser surface.
+- The seeded Playwright browser flow passes against an isolated temporary database. Full validation
+  passes 24 test files and 338 tests; the configured coverage gates pass with 336 coverage tests.
+- The release simulation completes 10,000 hands across 2,500 matches with zero illegal actions,
+  invariant violations, crashes, command-bound failures, or replay mismatches. Receipt run digest:
+  `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
+- `pnpm verify`, production start, and the smoke test pass on the exact dirty canonical state.
+- The remote natural-wall receipt and live production provider/no-key attestation remain external
+  evidence gates.
 
 ## Final evidence audit
 

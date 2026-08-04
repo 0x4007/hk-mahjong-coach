@@ -278,6 +278,18 @@ export const replayResponseSchema = z
     game: gameKeySchema,
     viewerPlayerId: playerIdSchema,
     events: z.array(publicGameEventSchema),
+    decisions: z.array(
+      z
+        .object({
+          id: decisionIdSchema,
+          handId: handIdSchema,
+          revision: revisionSchema,
+          actionId: identifierSchema,
+          recommendedActionId: identifierSchema.nullable(),
+          quality: z.number(),
+        })
+        .strict(),
+    ),
     terminalObservation: playerObservationSchema,
     omniscientAvailable: z.boolean(),
   })

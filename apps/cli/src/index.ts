@@ -217,6 +217,12 @@ const runHuman = async (options: PlayOptions): Promise<void> => {
 
 let hostOutputSequence = 0;
 
+// Keep the external-player boundary bounded even when the caller never writes a response. The
+// value is intentionally advertised in `hello` and on every action request so an agent can make
+// its own scheduling decision without guessing the host policy.
+const JSONL_ACTION_TIMEOUT_MS = 1_000;
+const JSONL_MALFORMED_RESPONSE_LIMIT = 3;
+
 const emitJsonl = (
   type: string,
   payload: unknown,
@@ -232,12 +238,86 @@ const emitJsonl = (
   process.stdout.write(serializeJsonlEnvelope(envelope));
 };
 
+type JsonlReadResult =
+  | { readonly kind: "line"; readonly line: string }
+  | { readonly kind: "timeout" }
+  | { readonly kind: "closed" };
+
+/**
+ * Readline's async iterator cannot cancel a pending `next()` call. A small event-backed queue
+ * lets the JSONL host race a line against its deadline without leaking stale reads after a
+ * timeout, while still preserving lines that arrive between requests.
+ */
+const createTimedLineReader = (input: ReturnType<typeof createInterface>) => {
+  const queued: string[] = [];
+  let closed = false;
+  let pending: ((result: JsonlReadResult) => void) | null = null;
+
+  const onLine = (line: string): void => {
+    if (pending !== null) {
+      const resolve = pending;
+      pending = null;
+      resolve({ kind: "line", line });
+      return;
+    }
+    queued.push(line);
+  };
+  const onClose = (): void => {
+    closed = true;
+    if (pending !== null) {
+      const resolve = pending;
+      pending = null;
+      resolve({ kind: "closed" });
+    }
+  };
+  input.on("line", onLine);
+  input.on("close", onClose);
+
+  const read = (timeoutMs: number): Promise<JsonlReadResult> => {
+    const queuedLine = queued.shift();
+    if (queuedLine !== undefined) {
+      return Promise.resolve({ kind: "line", line: queuedLine });
+    }
+    if (closed) {
+      return Promise.resolve({ kind: "closed" });
+    }
+    return new Promise<JsonlReadResult>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        pending = null;
+        resolve({ kind: "timeout" });
+      }, timeoutMs);
+      pending = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+    });
+  };
+
+  const dispose = (): void => {
+    input.off("line", onLine);
+    input.off("close", onClose);
+    pending = null;
+    queued.length = 0;
+  };
+
+  return { read, dispose };
+};
+
 const runJsonl = async (options: PlayOptions): Promise<void> => {
   const controller = new SessionController({ databasePath: DEFAULT_DATABASE_PATH });
   const created = controller.create(sessionInput(options));
   let observation = created.observation;
   const hostSequence = new ProtocolSequenceValidator();
-  emitJsonl("hello", { seat: options.playerId, actionTimeoutMs: 0, malformedResponseLimit: 3 });
+  emitJsonl("hello", {
+    seat: options.playerId,
+    actionTimeoutMs: JSONL_ACTION_TIMEOUT_MS,
+    malformedResponseLimit: JSONL_MALFORMED_RESPONSE_LIMIT,
+  });
   emitJsonl(
     "game_started",
     { observation },
@@ -251,6 +331,7 @@ const runJsonl = async (options: PlayOptions): Promise<void> => {
       return;
     }
     const requestId = `cli-request:${observation.gameId}:${String(observation.revision)}`;
+    const deadline = new Date(Date.now() + JSONL_ACTION_TIMEOUT_MS).toISOString();
     emitJsonl(
       "action_request",
       {
@@ -258,7 +339,7 @@ const runJsonl = async (options: PlayOptions): Promise<void> => {
         branchId: observation.branchId,
         expectedRevision: observation.revision,
         requestId,
-        deadline: null,
+        deadline,
         legalActions: observation.legalActions,
       },
       { gameId: observation.gameId, branchId: observation.branchId, requestId },
@@ -267,6 +348,7 @@ const runJsonl = async (options: PlayOptions): Promise<void> => {
   emitActionRequest();
   let malformedResponses = 0;
   const input = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
+  const lineReader = createTimedLineReader(input);
   const submitFallback = (): void => {
     const fallback = observation.legalActions[0];
     if (fallback === undefined) {
@@ -313,12 +395,39 @@ const runJsonl = async (options: PlayOptions): Promise<void> => {
       message: error instanceof Error ? error.message : "Malformed agent message",
       details: { malformedResponses },
     });
-    if (malformedResponses >= 3) {
+    if (malformedResponses >= JSONL_MALFORMED_RESPONSE_LIMIT) {
       submitFallback();
     }
   };
   try {
-    for await (const line of input) {
+    for (;;) {
+      const next = await lineReader.read(JSONL_ACTION_TIMEOUT_MS);
+      if (next.kind === "closed") {
+        break;
+      }
+      if (next.kind === "timeout") {
+        malformedResponses += 1;
+        emitJsonl(
+          "error",
+          {
+            code: "external_agent_timeout",
+            message: `External agent did not respond within ${String(JSONL_ACTION_TIMEOUT_MS)}ms`,
+            details: {
+              timeoutMs: JSONL_ACTION_TIMEOUT_MS,
+              malformedResponses,
+              fallback: malformedResponses >= JSONL_MALFORMED_RESPONSE_LIMIT,
+            },
+          },
+          { gameId: observation.gameId, branchId: observation.branchId },
+        );
+        if (malformedResponses >= JSONL_MALFORMED_RESPONSE_LIMIT) {
+          submitFallback();
+        } else {
+          emitActionRequest();
+        }
+        continue;
+      }
+      const line = next.line;
       if (line.trim().length === 0) {
         continue;
       }
@@ -425,6 +534,7 @@ const runJsonl = async (options: PlayOptions): Promise<void> => {
       emitActionRequest();
     }
   } finally {
+    lineReader.dispose();
     input.close();
     controller.close();
   }

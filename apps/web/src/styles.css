@@ -703,6 +703,31 @@ button[aria-pressed="true"] {
   outline-offset: 0.25rem;
 }
 
+html[data-contrast="high"] {
+  --surface: #ffffff;
+  --surface-strong: #d7e1de;
+  --muted: #1d2927;
+  --accent: #a51f18;
+  --accent-cyan: #006b72;
+  color: #000000;
+}
+
+html[data-contrast="high"] .scene-overlay,
+html[data-contrast="high"] .home-setup-card,
+html[data-contrast="high"] .game-action-dock {
+  border-width: 2px;
+  backdrop-filter: none;
+}
+
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  scroll-behavior: auto !important;
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1138,6 +1163,29 @@ button:disabled {
   line-height: 1.4;
 }
 
+.orientation-lesson {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.65rem;
+  color: #eef4f1;
+  background: rgb(115 220 232 / 10%);
+  border: 1px solid rgb(115 220 232 / 28%);
+  border-radius: 0.45rem;
+}
+
+.orientation-lesson p {
+  color: #c3d4d1;
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.orientation-tiles {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+  min-height: 3.6rem;
+}
+
 .home-setup-card .primary-button {
   color: #15191a;
   background: var(--accent-cyan);
@@ -1182,6 +1230,17 @@ body:has(.app-main) {
   color: var(--muted);
 }
 
+.profile-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.danger-button {
+  color: #8f2e2b;
+  border: 1px solid rgb(143 46 43 / 30%);
+}
+
 .profile-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
@@ -1215,6 +1274,102 @@ body:has(.app-main) {
 .timeline span {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+.replay-scrubber {
+  display: grid;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.replay-scrubber output {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.replay-scrubber input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.replay-selected-event {
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-strong);
+  border-left: 0.25rem solid var(--accent);
+  border-radius: 0.45rem;
+  font-size: 0.8rem;
+}
+
+.timeline-event {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.4rem;
+  text-align: left;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.timeline-event:hover,
+.timeline-event.selected {
+  color: #15191a;
+  background: var(--surface-strong);
+  border-color: rgb(21 25 26 / 12%);
+  transform: none;
+}
+
+.replay-decisions,
+.replay-comparison {
+  display: grid;
+  gap: 0.65rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgb(21 25 26 / 12%);
+}
+
+.replay-decisions h3,
+.replay-comparison h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.replay-decision {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem;
+  background: var(--surface-strong);
+  border-radius: 0.5rem;
+}
+
+.replay-decision > div,
+.comparison-grid article {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.replay-decision span,
+.comparison-grid span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.comparison-grid article {
+  padding: 0.7rem;
+  background: var(--surface-strong);
+  border-radius: 0.5rem;
 }
 
 .error {
@@ -1269,6 +1424,11 @@ body:has(.app-main) {
 
   .home-scene-hud {
     bottom: 1rem;
+  }
+
+  .replay-decision {
+    align-items: start;
+    flex-direction: column;
   }
 }
 

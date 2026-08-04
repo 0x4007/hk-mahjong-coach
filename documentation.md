@@ -141,8 +141,22 @@
 - The scene remains presentation-only for movement/camera; legal actions and game truth stay in the
   DOM observation overlay and authoritative session engine. WebGL is intentionally skipped in
   automation browsers whose SwiftShader renderer stalls; headed browsers mount the full scene.
-- Validation on this dirty state: 336 unit/integration tests, isolated seeded Playwright acceptance,
-  `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` pass.
+- Validation on this dirty state: 338 unit/integration tests, 336 coverage tests, isolated seeded
+  Playwright acceptance, `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`,
+  `pnpm smoke`, and `pnpm verify` pass.
+
+## 2026-08-04 — Release simulation and local acceptance receipt
+
+- The isolated CLI JSONL subprocess fixture proves schema-valid stdout, sequence monotonicity, the
+  one-second action deadline, structured `external_agent_timeout`, and deterministic fallback after
+  three timeouts.
+- The release simulation completes 10,000 hands and 2,500 matches with zero illegal actions,
+  invariant violations, crashes, command-bound failures, or replay mismatches. Run digest:
+  `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
+- Replay scrubbing, decision summaries, practice branch comparison, accessibility preferences, and
+  local export/reset controls are wired into the browser. The first-person Three.js penthouse scene
+  remains the presentation layer; the redacted observation and session controller remain
+  authoritative.
 
 ## Commands
 
@@ -164,7 +178,6 @@ pnpm start
 
 ## Known limitations
 
-- Milestones 0–5 are complete; M6 and M9 still need dedicated timeout/provider release evidence,
-  while M7–M8 are composed local slices. M10 remains the release-hardening milestone.
-- The remote natural-wall receipt, 10,000-hand simulation, full `pnpm verify`, accessibility/replay
-  polish, screenshots, and production deployment attestation remain open.
+- Milestones 0–10 are locally validated as a working prototype. The remote natural-wall receipt and
+  live production provider/no-key attestation remain outside this checkout; screenshots and headed
+  WebGL capture are optional visual evidence rather than correctness gates.

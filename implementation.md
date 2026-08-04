@@ -15,8 +15,8 @@
 
 ## Current milestone
 
-Milestones 6–9 are implemented as local vertical slices. Milestone 10 release hardening and the
-remaining external/release evidence are still open.
+Milestones 6–9 are complete as local vertical slices. Milestone 10 release hardening is validated
+locally; the remote natural-wall receipt and live provider attestation remain external evidence.
 
 ## Completed
 
@@ -74,8 +74,8 @@ remaining external/release evidence are still open.
 
 ## Milestone 5 evidence
 
-- The full suite passes 21 files and 328 tests. Focused persistence/scoring/protocol coverage passes
-  181 tests.
+- The full suite passes 24 files and 338 tests. The configured coverage run passes with 336 tests.
+  Focused persistence/scoring/protocol coverage passes 181 tests.
 - Coverage passes the configured thresholds: core/hk-rules/protocol meet the 95% statement and
   branch gates; analysis/bots/coach/persistence meet the 85% statement gates. The fresh report
   records persistence at 87.97% statements and coach at 95.30%.
@@ -89,7 +89,8 @@ remaining external/release evidence are still open.
 
 - The CLI dispatches human, JSONL stdio, replay, analysis, drill, rules, and profile commands. The
   JSONL host validates envelopes and action IDs, keeps stdout machine-clean, reports structured
-  rejections, and applies a bounded deterministic fallback after malformed responses.
+  rejections, applies a one-second deadline, and reaches a bounded deterministic fallback after
+  three malformed or timed-out responses. The isolated subprocess regression passes.
 - The Fastify server composes the session controller behind validated HTTP/WebSocket routes. The
   browser now renders the existing first-person Three.js penthouse table over the local game flow,
   with keyboard-safe legal actions, save/resume, replay, hints, drills, profile, and rules views.
@@ -99,20 +100,23 @@ remaining external/release evidence are still open.
   families are wired through the session and web surfaces. The optional Responses narrator is
   server-only, validates grounded structured output, caches by prompt identity, and falls back to
   templates on provider errors or timeouts.
-- `pnpm test` passes 336 tests; the seeded Playwright browser flow passes against the isolated
+- `pnpm test` passes 338 tests; the seeded Playwright browser flow passes against the isolated
   temporary-database fixture; `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and
   `pnpm smoke` pass on this dirty canonical state.
+- The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
+  zero failures. Its run digest is
+  `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
 
 ## Blockers and remaining scope
 
-- JSONL timeout/deadline handling still needs a dedicated isolated subprocess acceptance fixture.
-- Production provider composition/no-key attestation, the remote natural-wall receipt, and the
-  separate 10,000-hand release simulation remain unrun.
-- Milestone 10 replay branch comparison, accessibility polish, screenshots, and the full `pnpm
-verify` release gate remain open. This is a working local prototype, not a production claim.
+- The remote natural-wall receipt and live production provider/no-key attestation are not available
+  in this local checkout. They are the only remaining release evidence called out by the plan.
+- The browser scene uses procedural Three.js geometry and semantic DOM controls; headed WebGL proof
+  is browser-dependent, while automation intentionally skips the renderer on SwiftShader.
+- This is a validated local prototype, not a production deployment claim.
 
 ## Next action
 
-Run the remaining Milestone 10 release checks on the exact canonical SHA, beginning with the isolated
-CLI JSONL acceptance and then the full verification/simulation gates. Preserve the dirty worktree
-until that evidence is recorded.
+The local Milestone 10 checks are complete on the exact canonical SHA. Preserve the remote/release
+evidence boundary and do not claim deployment readiness without the natural-wall receipt and live
+provider attestation.

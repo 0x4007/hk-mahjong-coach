@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { tileTypeFromInstanceId, type TileTypeId } from "@hk-mahjong/core";
 import {
   actionResponseSchema,
+  branchResponseSchema,
   createGameResponseSchema,
   curriculumResponseSchema,
   drillAnswerResponseSchema,
@@ -85,6 +86,14 @@ interface ReplayData {
   game: { gameId: string; branchId: string };
   viewerPlayerId: string;
   events: { eventId: string; revision: number; type: string }[];
+  decisions: {
+    id: string;
+    handId: string;
+    revision: number;
+    actionId: string;
+    recommendedActionId: string | null;
+    quality: number;
+  }[];
   terminalObservation: PlayerObservationDto;
   omniscientAvailable: boolean;
 }
@@ -466,6 +475,17 @@ const Home = ({
                 {selectedRuleset.capFaan}.
               </p>
             ) : null}
+            {mode === "learn" ? (
+              <aside className="orientation-lesson" aria-label="Tile orientation lesson">
+                <p className="eyebrow">Tile orientation</p>
+                <p>Dots are circles, Bamboo is a suit of sticks, and Characters show 萬.</p>
+                <div className="orientation-tiles">
+                  <TileFace tile="dots.5" />
+                  <TileFace tile="bamboo.5" />
+                  <TileFace tile="characters.5" />
+                </div>
+              </aside>
+            ) : null}
             <div className="home-setup-actions">
               <button
                 className="primary-button"
@@ -503,10 +523,16 @@ const Home = ({
 const ProfileView = ({
   profile,
   curriculum,
+  onPatch,
+  onExport,
+  onReset,
   onNavigate,
 }: {
   profile: ProfileData | null;
   curriculum: CurriculumData | null;
+  onPatch: (patch: { highContrast?: boolean; reducedMotion?: boolean }) => void;
+  onExport: () => void;
+  onReset: () => void;
   onNavigate: (view: "home" | "profile" | "drills" | "rules") => void;
 }): React.JSX.Element => (
   <>
@@ -519,6 +545,28 @@ const ProfileView = ({
           ? "Offline templates are active."
           : "Optional provider is available on the server."}
       </p>
+      <div className="profile-controls" aria-label="Accessibility and data controls">
+        <button
+          className="action-button"
+          onClick={() => onPatch({ highContrast: !(profile?.highContrast ?? false) })}
+          type="button"
+        >
+          {profile?.highContrast ? "Disable high contrast" : "Enable high contrast"}
+        </button>
+        <button
+          className="action-button"
+          onClick={() => onPatch({ reducedMotion: !(profile?.reducedMotion ?? false) })}
+          type="button"
+        >
+          {profile?.reducedMotion ? "Use normal motion" : "Reduce motion"}
+        </button>
+        <button className="action-button" onClick={onExport} type="button">
+          Export local data
+        </button>
+        <button className="action-button danger-button" onClick={onReset} type="button">
+          Reset learner progress
+        </button>
+      </div>
       <div className="profile-grid">
         <article className="score-card">
           <strong>Curriculum stage {curriculum?.current.stage ?? 0}</strong>
@@ -615,45 +663,129 @@ const RulesView = ({
 
 const ReplayView = ({
   replay,
+  comparison,
+  onBranch,
   onBack,
 }: {
   replay: ReplayData | null;
+  comparison: { parent: ReplayData; branch: ReplayData } | null;
+  onBranch: (decision: ReplayData["decisions"][number]) => void;
   onBack: () => void;
-}): React.JSX.Element => (
-  <section className="content-card" aria-labelledby="replay-heading">
-    <div className="panel-heading">
-      <div>
-        <p className="eyebrow">Deterministic event log</p>
-        <h2 id="replay-heading">Replay timeline</h2>
+}): React.JSX.Element => {
+  const [cursor, setCursor] = useState(0);
+  useEffect(() => {
+    setCursor(replay?.events.length ?? 0);
+  }, [replay?.game.gameId, replay?.game.branchId, replay?.events.length]);
+  const selectedEvent = replay?.events[cursor - 1] ?? null;
+  const visibleDecisions = (replay?.decisions ?? []).filter(
+    (decision) => decision.revision <= cursor,
+  );
+  return (
+    <section className="content-card" aria-labelledby="replay-heading">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Deterministic event log</p>
+          <h2 id="replay-heading">Replay timeline</h2>
+        </div>
+        <button className="action-button" onClick={onBack} type="button">
+          Back to table
+        </button>
       </div>
-      <button className="action-button" onClick={onBack} type="button">
-        Back to table
-      </button>
-    </div>
-    {replay === null ? (
-      <p>Loading replay…</p>
-    ) : (
-      <>
-        <p>
-          {replay.events.length} public events · terminal revision{" "}
-          {replay.terminalObservation.revision}
-        </p>
-        <ol className="timeline">
-          {replay.events.map((event) => (
-            <li key={event.eventId}>
-              <span>#{event.revision}</span> {event.type.replaceAll("_", " ")}
-            </li>
-          ))}
-        </ol>
-        <p>
-          {replay.omniscientAvailable
-            ? "Post-hand review may include an explicitly labeled omniscient view."
-            : "Live replay remains observation-redacted."}
-        </p>
-      </>
-    )}
-  </section>
-);
+      {replay === null ? (
+        <p>Loading replay…</p>
+      ) : (
+        <>
+          <p>
+            {replay.events.length} public events · terminal revision{" "}
+            {replay.terminalObservation.revision} · branch {replay.game.branchId}
+          </p>
+          <label className="replay-scrubber" htmlFor="replay-position">
+            Event position <output>{cursor}</output>
+            <input
+              id="replay-position"
+              max={replay.events.length}
+              min={0}
+              onChange={(event) => setCursor(Number(event.target.value))}
+              type="range"
+              value={cursor}
+            />
+          </label>
+          {selectedEvent ? (
+            <p className="replay-selected-event" role="status">
+              At revision {selectedEvent.revision}: {selectedEvent.type.replaceAll("_", " ")}.
+            </p>
+          ) : null}
+          <ol className="timeline" aria-label="Replay events">
+            {replay.events.map((event) => (
+              <li key={event.eventId}>
+                <button
+                  className={
+                    event.revision === cursor ? "timeline-event selected" : "timeline-event"
+                  }
+                  onClick={() => setCursor(event.revision)}
+                  type="button"
+                >
+                  <span>#{event.revision}</span> {event.type.replaceAll("_", " ")}
+                </button>
+              </li>
+            ))}
+          </ol>
+          {visibleDecisions.length > 0 ? (
+            <section className="replay-decisions" aria-labelledby="replay-decisions-heading">
+              <div>
+                <p className="eyebrow">Decision comparison</p>
+                <h3 id="replay-decisions-heading">Practice another line</h3>
+              </div>
+              {visibleDecisions.map((decision) => (
+                <article className="replay-decision" key={decision.id}>
+                  <div>
+                    <strong>Revision {decision.revision}</strong>
+                    <span>
+                      selected {decision.actionId}
+                      {decision.recommendedActionId === null
+                        ? ""
+                        : ` · recommended ${decision.recommendedActionId}`}
+                    </span>
+                  </div>
+                  <button
+                    className="action-button"
+                    onClick={() => onBranch(decision)}
+                    type="button"
+                  >
+                    Branch and compare
+                  </button>
+                </article>
+              ))}
+            </section>
+          ) : null}
+          {comparison ? (
+            <section className="replay-comparison" aria-labelledby="replay-comparison-heading">
+              <p className="eyebrow">Side-by-side branch result</p>
+              <h3 id="replay-comparison-heading">Parent vs practice branch</h3>
+              <div className="comparison-grid">
+                <article>
+                  <strong>{comparison.parent.game.branchId}</strong>
+                  <span>{comparison.parent.events.length} public events</span>
+                  <span>Revision {comparison.parent.terminalObservation.revision}</span>
+                </article>
+                <article>
+                  <strong>{comparison.branch.game.branchId}</strong>
+                  <span>{comparison.branch.events.length} public events</span>
+                  <span>Revision {comparison.branch.terminalObservation.revision}</span>
+                </article>
+              </div>
+            </section>
+          ) : null}
+          <p>
+            {replay.omniscientAvailable
+              ? "Post-hand review may include an explicitly labeled omniscient view."
+              : "Live replay remains observation-redacted."}
+          </p>
+        </>
+      )}
+    </section>
+  );
+};
 
 const App = (): React.JSX.Element => {
   const [rulesets, setRulesets] = useState<RulesetSummary[]>([]);
@@ -669,6 +801,10 @@ const App = (): React.JSX.Element => {
   const [curriculum, setCurriculum] = useState<CurriculumData | null>(null);
   const [drillSession, setDrillSession] = useState<DrillSession | null>(null);
   const [replay, setReplay] = useState<ReplayData | null>(null);
+  const [comparison, setComparison] = useState<{
+    parent: ReplayData;
+    branch: ReplayData;
+  } | null>(null);
   const [hasSavedGame, setHasSavedGame] = useState(false);
 
   const loadProfile = useCallback(async (): Promise<void> => {
@@ -691,6 +827,11 @@ const App = (): React.JSX.Element => {
       );
     setHasSavedGame(window.localStorage.getItem(SAVED_GAME_KEY) !== null);
   }, [loadProfile]);
+
+  useEffect(() => {
+    document.documentElement.dataset.contrast = profile?.highContrast ? "high" : "normal";
+    document.documentElement.dataset.motion = profile?.reducedMotion ? "reduced" : "full";
+  }, [profile?.highContrast, profile?.reducedMotion]);
 
   useEffect(() => {
     if (observation === null) return;
@@ -826,6 +967,7 @@ const App = (): React.JSX.Element => {
   const openReplay = async (): Promise<void> => {
     if (observation === null) return;
     setView("replay");
+    setComparison(null);
     try {
       const value = await readJson(
         await fetch(
@@ -835,6 +977,96 @@ const App = (): React.JSX.Element => {
       setReplay(replayResponseSchema.parse(value));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Replay unavailable");
+    }
+  };
+
+  const branchFromDecision = async (decision: ReplayData["decisions"][number]): Promise<void> => {
+    if (observation === null || replay === null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const branchId = `practice:${decision.id.replaceAll(":", "-")}`;
+      const branch = branchResponseSchema.parse(
+        await readJson(
+          await fetch(`/api/games/${encodeURIComponent(observation.gameId)}/branches`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              playerId: observation.viewer.playerId,
+              parentBranchId: replay.game.branchId,
+              branchId,
+              decisionId: decision.id,
+              expectedRevision: decision.revision,
+              requestId: `web-branch:${decision.id}`,
+            }),
+          }),
+        ),
+      );
+      const [parentValue, branchValue] = await Promise.all([
+        fetch(
+          `/api/games/${encodeURIComponent(observation.gameId)}/replay?playerId=${encodeURIComponent(observation.viewer.playerId)}&branchId=${encodeURIComponent(replay.game.branchId)}`,
+        ).then(readJson),
+        fetch(
+          `/api/games/${encodeURIComponent(observation.gameId)}/replay?playerId=${encodeURIComponent(observation.viewer.playerId)}&branchId=${encodeURIComponent(branch.game.branchId)}`,
+        ).then(readJson),
+      ]);
+      const parentReplay = replayResponseSchema.parse(parentValue);
+      const branchReplay = replayResponseSchema.parse(branchValue);
+      setObservation(branch.observation);
+      setReplay(branchReplay);
+      setComparison({ parent: parentReplay, branch: branchReplay });
+      setView("replay");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Practice branch unavailable");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const patchProfile = async (patch: {
+    highContrast?: boolean;
+    reducedMotion?: boolean;
+  }): Promise<void> => {
+    try {
+      const value = await readJson(
+        await fetch("/api/profile", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(patch),
+        }),
+      );
+      setProfile(profileSchema.parse(value));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Profile update failed");
+    }
+  };
+
+  const exportProfile = async (): Promise<void> => {
+    try {
+      const value = await readJson(await fetch("/api/export"));
+      const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], {
+        type: "application/json",
+      });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "hk-mahjong-coach-export.json";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Data export failed");
+    }
+  };
+
+  const resetProfile = async (): Promise<void> => {
+    try {
+      await readJson(
+        await fetch("/api/profile/reset", {
+          method: "POST",
+        }),
+      );
+      await loadProfile();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Learner reset failed");
     }
   };
 
@@ -884,7 +1116,16 @@ const App = (): React.JSX.Element => {
 
   let content: React.JSX.Element;
   if (view === "profile")
-    content = <ProfileView profile={profile} curriculum={curriculum} onNavigate={onNavigate} />;
+    content = (
+      <ProfileView
+        profile={profile}
+        curriculum={curriculum}
+        onExport={() => void exportProfile()}
+        onNavigate={onNavigate}
+        onPatch={(patch) => void patchProfile(patch)}
+        onReset={() => void resetProfile()}
+      />
+    );
   else if (view === "drills")
     content = (
       <DrillsView
@@ -895,7 +1136,14 @@ const App = (): React.JSX.Element => {
     );
   else if (view === "rules") content = <RulesView rulesets={rulesets} onNavigate={onNavigate} />;
   else if (view === "replay")
-    content = <ReplayView replay={replay} onBack={() => setView("home")} />;
+    content = (
+      <ReplayView
+        comparison={comparison}
+        onBack={() => setView("home")}
+        onBranch={(decision) => void branchFromDecision(decision)}
+        replay={replay}
+      />
+    );
   else if (observation !== null)
     content = (
       <Table

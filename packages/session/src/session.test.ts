@@ -130,6 +130,56 @@ describe("session composition boundary", () => {
     }
   });
 
+  it("branches from a persisted decision revision after bot activity advances the parent", () => {
+    const path = databasePath();
+    const controller = new SessionController({ databasePath: path });
+    try {
+      const created = controller.create({
+        mode: "guided",
+        rulesetId: "hk_nyc_social_v1",
+        matchLength: "one_wind",
+        seed: "session-historical-branch",
+        learnerId: "learner-branch",
+        humanPlayerId: "player-0",
+        humanDisplayName: "Learner",
+        preferredSeat: "east",
+        opponents: DEFAULT_OPPONENTS,
+      });
+      const action = created.observation.legalActions[0];
+      if (action === undefined) throw new Error("Expected a legal opening action");
+      const accepted = controller.submit({
+        gameId: created.game.gameId,
+        branchId: created.game.branchId,
+        playerId: "player-0",
+        expectedRevision: created.observation.revision,
+        requestId: "session-historical-branch-action",
+        actionId: action.id,
+      });
+      expect(accepted.accepted).toBe(true);
+      const decision = controller
+        .exportData({ includeLlmMetadata: false })
+        .data.decisions.find(({ key }) => key.gameId === created.game.gameId);
+      if (decision === undefined) throw new Error("Expected persisted decision evidence");
+      const current = controller.observation(created.game.gameId, "player-0");
+      expect(current.revision).toBeGreaterThan(decision.revision);
+      const branch = controller.branch({
+        gameId: created.game.gameId,
+        parentBranchId: "main",
+        branchId: "practice:historical-decision",
+        decisionId: decision.id,
+        expectedRevision: decision.revision,
+        requestId: "session-historical-branch-create",
+        playerId: "player-0",
+      });
+      expect(branch.observation.revision).toBe(decision.revision + 1);
+      expect(branch.observation.practiceBranch).toBe(true);
+    } finally {
+      controller.close();
+      rmSync(path, { force: true });
+      rmSync(join(path, ".."), { recursive: true, force: true });
+    }
+  });
+
   it("updates decision mastery and resumes a persisted drill session", () => {
     const path = databasePath();
     const first = new SessionController({ databasePath: path });

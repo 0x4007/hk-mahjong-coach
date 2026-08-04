@@ -648,6 +648,25 @@ export class SessionController {
     const game = this.requireGame(gameId, branchId);
     const repository = this.repositoryFor();
     const loaded = repository.loadGame({ gameId, branchId });
+    const decisions = repository
+      .exportData({ includeLlmMetadata: false })
+      .data.decisions.filter(
+        (decision) => decision.key.gameId === gameId && decision.key.branchId === branchId,
+      )
+      .map((decision) => {
+        const recommendedActionId = decision.data.recommendedActionId;
+        return {
+          id: decision.id,
+          handId: decision.handId,
+          revision: decision.revision,
+          actionId: decision.actionId,
+          recommendedActionId: typeof recommendedActionId === "string" ? recommendedActionId : null,
+          quality:
+            typeof decision.quality === "number" && Number.isFinite(decision.quality)
+              ? decision.quality
+              : 0,
+        };
+      });
     const events = projectPublicEventStream(
       repository.listHistory({ gameId, branchId }).map(({ event }) => event),
     );
@@ -655,6 +674,7 @@ export class SessionController {
       game: { gameId, branchId },
       viewerPlayerId: playerId,
       events: events.map((event) => publicGameEventSchema.parse(event)),
+      decisions,
       terminalObservation: protocolObservation(game.engine.observation(loaded.state, playerId)),
       omniscientAvailable:
         loaded.state.mode === "sandbox" ||
@@ -672,7 +692,9 @@ export class SessionController {
 
   public branch(input: SessionBranchInput): SessionBranchResult {
     const parent = this.requireGame(input.gameId, input.parentBranchId);
-    const result = parent.engine.decide(parent.state, {
+    const repository = this.repositoryFor();
+    const source = repository.loadGameAtRevision(parent.key, input.expectedRevision);
+    const result = parent.engine.decide(source.state, {
       type: "create_practice_branch",
       gameId: input.gameId,
       branchId: input.branchId,
@@ -689,7 +711,6 @@ export class SessionController {
     if (marker?.type !== "practice_branch_created") {
       throw new Error("Practice branch creation did not produce its provenance marker");
     }
-    const repository = this.repositoryFor();
     const fork = repository.forkPracticeBranch({
       parent: parent.key,
       event: marker,
