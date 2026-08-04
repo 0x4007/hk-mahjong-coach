@@ -41,6 +41,7 @@ jobs:
         id: select
         env:
           REQUESTED_SHARDS: ${{ inputs.shards }}
+          MATRIX_SHARD: ${{ matrix.shard }}
         run: |
           case "$REQUESTED_SHARDS" in
             ''|*[!0-9]*)
@@ -52,7 +53,7 @@ jobs:
             echo "shards must be from 1 through 20" >&2
             exit 1
           fi
-          if [ "${{ matrix.shard }}" -lt "$REQUESTED_SHARDS" ]; then
+          if [ "$MATRIX_SHARD" -lt "$REQUESTED_SHARDS" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
