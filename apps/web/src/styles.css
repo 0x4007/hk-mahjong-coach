@@ -423,9 +423,61 @@ button[aria-pressed="true"] {
   text-transform: uppercase;
 }
 
-.scene-debug-heading span {
+.scene-debug-panel .scene-debug-toggle {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.45rem 0;
+  color: #eef4f1;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 0;
+  font: inherit;
+  text-align: left;
+}
+
+.scene-debug-panel .scene-debug-toggle:hover {
+  color: #eef4f1;
+  background: transparent;
+  transform: none;
+}
+
+.scene-debug-panel .scene-debug-focus-quick-action {
+  color: #081113;
+  background: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+}
+
+.scene-debug-panel .scene-debug-focus-quick-action:hover {
+  color: #081113;
+  background: #a7f4f6;
+}
+
+.scene-debug-status {
+  margin-left: auto;
   color: var(--accent-cyan);
   font-size: 0.58rem;
+}
+
+.scene-debug-chevron {
+  flex: 0 0 auto;
+  color: var(--accent-cyan);
+  font-size: 0.9rem;
+  line-height: 1;
+  transition: transform 180ms ease;
+}
+
+.scene-debug-toggle[aria-expanded="true"] .scene-debug-chevron {
+  transform: rotate(180deg);
+}
+
+.scene-debug-panel > #scene-debug-controls {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.scene-debug-panel > #scene-debug-controls[hidden] {
+  display: none;
 }
 
 .scene-debug-panel label {
@@ -468,6 +520,59 @@ button[aria-pressed="true"] {
   padding: 0.45rem 0.55rem 0.55rem;
   border: 1px solid rgb(255 255 255 / 14%);
   border-radius: 0.42rem;
+}
+
+.scene-debug-room-meta {
+  display: grid;
+  gap: 0.12rem;
+  color: #ffffff;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.scene-debug-room-meta span {
+  overflow: hidden;
+  color: #9cb2ae;
+  font-family: ui-monospace, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-debug-seed-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.35rem;
+}
+
+.scene-debug-seed-form label {
+  grid-column: 1 / -1;
+}
+
+.scene-debug-seed-form input {
+  min-width: 0;
+  padding: 0.36rem 0.42rem;
+  color: #eef4f1;
+  background: #1a292c;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 0.35rem;
+  font: inherit;
+}
+
+.scene-debug-panel button {
+  padding: 0.48rem 0.62rem;
+  color: #eef4f1;
+  background: #1a292c;
+  border: 1px solid rgb(115 220 232 / 32%);
+  border-radius: 0.35rem;
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scene-debug-panel button:hover {
+  color: #081113;
+  background: var(--accent-cyan);
 }
 
 .scene-debug-panel legend {

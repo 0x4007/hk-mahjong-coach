@@ -119,8 +119,11 @@
   sources for clearly licensed wood, felt, or window materials, but they are not part of this prototype.
 - The static composition follows the supplied visual contract: a bright, double-height penthouse shell
   with broad architectural whites, charcoal recesses, a restrained red floor direction line, pale cyan
-  system seams, floor-to-ceiling glazing, and depth-compressed Midtown geometry. Camera buttons switch
-  between the composed seat and overhead views; only the overhead view remains orbit-controlled.
+  system seams, floor-to-ceiling glazing, and depth-compressed Midtown geometry. The shipping seat view
+  starts as a fixed 45° composition, then supports click-to-lock first-person look and movement so the
+  preview remains usable; the debug-only overhead view and visual panel remain behind `?debug=1`.
+- The play space uses a larger 17.2 m × 13.4 m shell and matching first-person bounds, preserving the
+  4.5–5.5 m double-height feel while giving the player more room around the table.
 - Tile bodies are warm ivory with crisp local face artwork; backs use an original charcoal, red, and cyan
   line treatment. Playing-field, shell, center, and seam surfaces are offset by explicit depth layers so
   they do not flicker from coplanar WebGL faces.
@@ -129,60 +132,115 @@
   game assets, logos, or textures are copied from that title.
 - The WebGL mount coalesces resize observations and ignores unchanged canvas dimensions, which avoids
   a resize-notification loop while the view is mounted. Shadows use the current `PCFShadowMap` API.
-- The seat camera intentionally borrows familiar first-person game conventions: click-to-capture pointer
-  lock, unrestricted vertical mouse look, WASD/arrow movement through the penthouse within room bounds,
-  an Escape unlock, and an alternate orbit-controlled overhead lens.
-- The seat lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
+- The interactive seat view uses familiar first-person conventions: click-to-capture pointer lock,
+  unrestricted vertical mouse look, WASD/arrow movement through the penthouse, an Escape unlock, and
+  touch look/movement on mobile. Debug mode adds the orbit-controlled overhead lens and visual panel. The
+  shipping loop keeps the composed initial camera while its gaze focus follows the visible center-ray surface;
+  a tight five-ray neighborhood lets a nearby visible tile win when the reticule falls into a narrow gap,
+  without jumping through an opaque object. Accommodation eases toward near focus in roughly 0.4 seconds
+  and relaxes toward far focus in roughly 0.65 seconds, so the effect reads as eye focus rather than a
+  cinematic snap. Lateral sprint direction changes add a restrained roll kick to suggest shifting weight,
+  while movement speed drives a small damped vertical viewport bob that settles when the player stops.
+- First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
+  controller. The first collision slice supplies simplified static colliders for the world floor and table body;
+  render meshes remain visual-only, and tile/furniture dynamics are intentionally not inferred from every mesh.
+  Rapier loads asynchronously from its inlined WASM; if initialization fails, the previous bounded movement path
+  remains available and the scene marks `data-physics-ready="fallback"`.
+- Collision coverage now expands beyond the table: the environment, generated room fixtures, glass, walls,
+  furniture, and gateway are converted from meaningful render meshes into coarse world-space AABB colliders.
+  Streamed city buildings, props, and skybridges contribute explicit rotated boxes as chunks enter the 3×3
+  lookahead window; Rapier rebuilds that dynamic set when new chunks are appended, while floors and decorative
+  strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle a physics
+  body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does not change
+  its collision layout.
+- During local development, the visual scene stores a validated v1 snapshot in room-scoped
+  `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
+  seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
+  is presentation state only and never includes authoritative game state or concealed tile data. Snapshots
+  below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
+  drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
+  writes the safe snapshot before the next HMR reload.
+- The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
-  jump apex. Directional sprites hide when seated, the centered reticule remains visible, and adaptive Bokeh
-  focuses on the nearest non-overlay object under the aim ray. Double-tapping W engages a 3× sprint that
-  remains active while any movement key is held, so W→A/D/S direction transfers preserve sprint speed.
+  jump apex. Double-tapping W engages a 3× sprint that remains active while any movement key is held, so
+  W→A/D/S direction transfers preserve sprint speed.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
-- The scene resolves an explicit or conservative auto-selected `high`/`medium`/`low` presentation
-  preset for DPR, shadows, and glass; it uses the required `OutputPass`, warms shaders after the first
-  frame, pauses rendering when the document is hidden, and exposes a warm loading treatment during setup.
+- The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
+  memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
+  8 logical cores, keeping DPR, shadows, and post-processing bounded on unknown or software-WebGL devices;
+  high remains an explicit debug choice. Bokeh is on by default only in high and can be toggled in debug;
+  GTAO remains an explicit reduced-resolution opt-in. Focus follows the nearest non-overlay gaze surface,
+  with a stable far fallback and a tight tile-neighborhood assist. The pass uses a restrained 17 mm eye
+  approximation with a 1 arcminute central acuity threshold: bright rooms settle near a 2.5 mm pupil,
+  ordinary indoor light near 4 mm, and dark rooms expand toward 6.5 mm. That pupil drives the aperture and
+  hyperfocal distance, so close tiles can soften while the room and skyline stay legible. Shader readiness
+  uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
+  the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
+  warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
+  intensity for visual tuning, with a 0–25× DoF-intensity slider; 1× is the restrained baseline and higher
+  values are available for stronger cinematic bokeh experiments. The practical blur envelope uses a smooth
+  eased falloff: with the reference pupil, near-zero focus is full strength, 2.5 m is roughly one quarter,
+  and 6 m is effectively sharp; pupil dilation scales that cutoff in low light.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
   cyan system and skyline window materials modulate only with a subtle ambient pulse.
 - The skyline adds a local PMREM room environment, six depth-compressed near-rooftop masses, and a visible
   separated draw tile in the static human hand; no external assets or hidden opponent identities are introduced.
-- Touch-capable devices now get a mobile instruction panel that asks iPhone users to rotate to
-  landscape, requests iOS motion permission from a user gesture, and calibrates gyroscope/device
-  orientation look against the current seat camera. The same first-person movement path accepts a
-  four-way virtual joystick with diagonal movement and continuous 0–100% speed control from the
-  center to its outer edge: forward reaches sprint speed, forward diagonal reaches 75%, and
-  backward/sideways cap at 50% of sprint with a smooth forward-bias curve. A separate swipe on the scene changes seat camera yaw and
-  pitch without requiring the phone to move, at tuned drag sensitivity. Swiping establishes a new
-  gyro camera reference when motion look is enabled. Crouch and Jump use independent touch pointers,
-  so they can be activated while the joystick is held. Text selection and iOS touch callouts are
-  disabled across the mobile immersive surface. Desktop pointer-lock controls remain unchanged.
+- Touch first-person controls, motion look, and the virtual joystick remain available in the interactive
+  mobile preview. The surface asks iPhone users to rotate to landscape while preserving the fixed initial
+  table composition.
 - Development mode accepts `?debug=1` and adds a visual panel for the table/room/skyline/asset camera
-  presets, FOV, exposure, tone mapper, fog density, skyline visibility, and live renderer metrics.
-  Repeated skyline windows are batched with `InstancedMesh`, and the Empire State, One Vanderbilt, and
-  Chrysler silhouettes use distance-based `LOD` fallbacks.
+  presets, adaptive/high/medium/low quality mode, Bokeh/GTAO, physical/simple glass, motion feel, FOV,
+  exposure, tone mapper, fog density, skyline visibility, lighting, DPR, and live renderer metrics. The
+  quality selector applies its DPR, shadow, post-effect, glass, ambient-animation, and skyline-LOD defaults
+  immediately; each individual control can then be overridden without remounting the app. Repeated skyline
+  windows are batched with `InstancedMesh`, and the Empire State, One Vanderbilt, and Chrysler silhouettes
+  use distance-based `LOD` fallbacks. Every debug control is persisted in validated v1 `localStorage`,
+  including the all-skyline and per-layer visibility switches, and `Reset debug defaults` restores the
+  device-appropriate defaults and rewrites the stored preferences.
+- The `Focus calibration` debug preset places a clean, wide second-level hallway in the same walkable map, with
+  one-metre floor markers from `0` to `2H` and staggered small targets at close, halfway, hyperfocal, and
+  double-hyperfocal distances. Its H marker uses the 4 mm reference pupil (about 13.8 m). A continuous ramp
+  connects the ground terrain to the elevated deck, whose floor extends well behind and beside the starting target;
+  the streamed city remains visible and active while the first-person player walks through the lab.
+- The debug panel header is an accessible disclosure control. It opens by default on desktop and starts
+  collapsed for coarse-pointer/mobile devices, preserving a compact scene view; expanding it reveals the
+  same scrollable controls without changing their runtime state.
+- The cyan gateway opens a seeded city beyond the penthouse. City blocks derive their zone palette, buildings,
+  windows, skybridges, beacons, props, and orthogonal paths from `roomSeed + chunkX + chunkZ`; the same seed
+  therefore recreates the same walkable neighborhoods without storing a world-sized map. The first 3×3 lookahead
+  window is generated immediately, which lets the generated city appear through the penthouse glazing when the
+  static skyline layers are hidden. Boundary chunks clip shared ground and paths around the penthouse footprint
+  and reject any building, window, bridge, prop, or beacon that would enter it, so city geometry cannot draw
+  through the room. Exploration then appends newly encountered chunks to the resident map; it never unloads or
+  regenerates a prior coordinate. Base geometry/materials remain shared and repeated forms use `InstancedMesh`,
+  keeping the append-only world bounded by the explicit play-space limits. The streamed areas are South courtyard,
+  West tea garden, East practice court, and North skybridge; the debug HUD reports the active area and loaded count.
 - For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
   directory, then run:
 
   ```bash
   mkdir -p artifacts/visual
-  pnpm exec playwright screenshot --browser=chromium --viewport-size="1440,900" --wait-for-timeout=2000 "http://127.0.0.1:5173/?debug=1" artifacts/visual/penthouse-1440.png
+  pnpm exec playwright screenshot --browser=chromium --ignore-https-errors --viewport-size="1440,900" --wait-for-timeout=2000 "https://127.0.0.1:5173/?debug=1" artifacts/visual/penthouse-1440.png
   ```
 
 - The Vite development server and Fastify server bind to `0.0.0.0` so a phone on the same LAN can
   open the preview. Run `pnpm dev`, then use the host Mac's LAN address on port `5173` (for example,
-  `http://192.168.x.x:5173`). Safari may require an HTTPS origin before it grants motion permission.
+  `https://192.168.x.x:5173`). The Vite preview creates a local self-signed certificate in the ignored
+  `.data/dev-cert/` directory on first start; accept that certificate in the phone browser before
+  requesting motion permission. The Fastify API remains an HTTP-only local proxy target behind Vite.
 - The browser shell is a viewport-owned scene rather than a document card. It uses `100dvh` with
   minimal overlay controls so the table remains the primary surface on desktop and mobile.
-- Rendered-browser acceptance was verified with a fresh `agent-browser` session at
-  `http://127.0.0.1:5173/`: the shipping scene reached `document.readyState === "complete"`, exposed
-  `data-scene-ready="true"`, and produced a 1440×900 screenshot. After reload, the browser console and
-  page-error queues were empty. The harness reports roughly 26–39 FPS at this viewport, so native-browser
-  performance sign-off against the 60 FPS target remains a separate check. Pointer-lock interaction is
-  not testable in this harness because the browser refuses the Pointer Lock API; no browser security
-  control was bypassed.
+- Rendered-browser acceptance used headed Chromium at 1440×900 and a touch-capable viewport. The page
+  exposed `data-scene-ready="true"` and `data-physics-ready="true"`; the joystick moved from Penthouse
+  through South courtyard, East practice court, and North skybridge while the debug HUD grew beyond the initial
+  9 chunks instead of evicting them. A reload preserved the hidden skyline/debug settings, and reset returned
+  the defaults. The connected in-app browser's local-page policy was unavailable during this run, and headless
+  Chromium can stall on its software WebGL/GPU path; no browser security control was bypassed.
 - This is a rendering base, not Milestone 7 completion. It has no live WebSocket/game observation,
-  legal-action controls, replay state, or persistence yet. The browser must continue to consume public
-  observations when those surfaces are wired in; opponent hands must remain face-down until an engine
-  event makes a tile public.
+  legal-action controls, or replay-backed game persistence yet; the session snapshot above only keeps
+  the local presentation transform seamless during development. The browser must continue to consume
+  public observations when those surfaces are wired in; opponent hands must remain face-down until an
+  engine event makes a tile public.
 
 ## Commands
 

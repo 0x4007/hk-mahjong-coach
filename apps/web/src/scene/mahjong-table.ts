@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
@@ -8,11 +9,50 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
+import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
+
+import {
+  createMahjongPhysics,
+  type MahjongPhysicsRuntime,
+  type PhysicsBox,
+  type PhysicsVector,
+} from "./mahjong-physics.js";
+
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    // Ask the React wrapper to replace only the mounted Three.js scene. The
+    // surrounding app state and browser session stay intact during iteration.
+    window.dispatchEvent(new Event(MAHJONG_TABLE_HMR_EVENT));
+  });
+}
+
+export const MAHJONG_TABLE_HMR_EVENT = "mahjong-table:scene-hmr";
 
 export type SceneView = "seat" | "overhead";
 
-export type VisualCameraPreset = "table" | "roomReveal" | "skylineReview" | "assetReview";
+export const VISUAL_SCENE_STATE_VERSION = 1 as const;
+
+type VisualSceneVector3 = readonly [number, number, number];
+type VisualSceneQuaternion = readonly [number, number, number, number];
+
+/**
+ * The browser-only presentation state that is safe to carry across a Vite
+ * scene remount. It deliberately contains no game state or hidden tile data.
+ */
+export interface VisualSceneState {
+  readonly version: typeof VISUAL_SCENE_STATE_VERSION;
+  readonly roomSeed: string;
+  readonly view: SceneView;
+  readonly activeDebugPreset: VisualCameraPreset | null;
+  readonly cameraPosition: VisualSceneVector3;
+  readonly cameraQuaternion: VisualSceneQuaternion;
+  readonly orbitTarget: VisualSceneVector3;
+  readonly cameraFov: number;
+  readonly isCrouched: boolean;
+}
+
+export type VisualCameraPreset =
+  "table" | "roomReveal" | "skylineReview" | "assetReview" | "focusCalibration";
 
 export type VisualToneMapper = "agx" | "neutral" | "cineon" | "linear";
 
@@ -24,11 +64,330 @@ export type MotionLookStatus =
   "unsupported" | "needs-permission" | "requesting" | "ready" | "denied";
 
 export type VisualQualityPreset = "high" | "medium" | "low";
+export type VisualQualityMode = "adaptive" | VisualQualityPreset;
+export type VisualGlassMode = "simple" | "physical";
+export type VisualFocusTarget = "tile" | "surface" | "fallback";
+
+export interface VisualBokehParameters {
+  readonly hyperfocalDistance: number;
+  readonly intensity: number;
+  readonly aperture: number;
+  readonly maxBlur: number;
+}
+
+export const DEFAULT_ROOM_SEED = "room-01";
+
+export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
+  const normalized = seed?.trim().replace(/\s+/gu, "-").slice(0, 48) ?? "";
+  return normalized.length > 0 ? normalized : DEFAULT_ROOM_SEED;
+};
+
+const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
+const VISUAL_SCENE_FALL_RESET_Y = -2;
+const WORLD_BOUNDS = {
+  minX: -60,
+  maxX: 60,
+  minZ: -52,
+  maxZ: 52,
+} as const;
+
+const isVisualScenePositionRecoverable = (position: VisualSceneVector3): boolean => {
+  const [x, y, z] = position;
+  return (
+    x >= WORLD_BOUNDS.minX &&
+    x <= WORLD_BOUNDS.maxX &&
+    y >= VISUAL_SCENE_FALL_RESET_Y &&
+    z >= WORLD_BOUNDS.minZ &&
+    z <= WORLD_BOUNDS.maxZ
+  );
+};
+
+export const getVisualSceneStateStorageKey = (roomSeed: string): string =>
+  `${VISUAL_SCENE_STATE_STORAGE_PREFIX}${encodeURIComponent(normalizeVisualRoomSeed(roomSeed))}`;
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const isVector3 = (value: unknown): value is VisualSceneVector3 =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  value.every((entry: unknown) => isFiniteNumber(entry));
+
+const isQuaternion = (value: unknown): value is VisualSceneQuaternion => {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 4 ||
+    !value.every((entry: unknown) => isFiniteNumber(entry))
+  ) {
+    return false;
+  }
+  const [x, y, z, w] = value;
+  if (x === undefined || y === undefined || z === undefined || w === undefined) {
+    return false;
+  }
+  return Math.hypot(x, y, z, w) > 0.0001;
+};
+
+const isSceneView = (value: unknown): value is SceneView =>
+  value === "seat" || value === "overhead";
+
+const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
+  value === "table" ||
+  value === "roomReveal" ||
+  value === "skylineReview" ||
+  value === "assetReview" ||
+  value === "focusCalibration";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Parse and validate one versioned scene snapshot from browser storage. */
+export const parseVisualSceneState = (
+  serialized: string | null,
+  roomSeed: string,
+): VisualSceneState | null => {
+  if (serialized === null) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const normalizedRoomSeed = normalizeVisualRoomSeed(roomSeed);
+  const activeDebugPreset = parsed.activeDebugPreset;
+  const cameraFov = parsed.cameraFov;
+  if (
+    parsed.version !== VISUAL_SCENE_STATE_VERSION ||
+    parsed.roomSeed !== normalizedRoomSeed ||
+    !isSceneView(parsed.view) ||
+    !(activeDebugPreset === null || isVisualCameraPreset(activeDebugPreset)) ||
+    !isVector3(parsed.cameraPosition) ||
+    !isVisualScenePositionRecoverable(parsed.cameraPosition) ||
+    !isQuaternion(parsed.cameraQuaternion) ||
+    !isVector3(parsed.orbitTarget) ||
+    !isFiniteNumber(cameraFov) ||
+    cameraFov < 30 ||
+    cameraFov > 100 ||
+    typeof parsed.isCrouched !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    version: VISUAL_SCENE_STATE_VERSION,
+    roomSeed: normalizedRoomSeed,
+    view: parsed.view,
+    activeDebugPreset,
+    cameraPosition: parsed.cameraPosition,
+    cameraQuaternion: parsed.cameraQuaternion,
+    orbitTarget: parsed.orbitTarget,
+    cameraFov,
+    isCrouched: parsed.isCrouched,
+  };
+};
+
+export const serializeVisualSceneState = (state: VisualSceneState): string => JSON.stringify(state);
+
+export const readVisualSceneState = (
+  storage: Storage | null | undefined,
+  roomSeed: string,
+): VisualSceneState | null => {
+  if (storage === null || storage === undefined) {
+    return null;
+  }
+  try {
+    return parseVisualSceneState(
+      storage.getItem(getVisualSceneStateStorageKey(roomSeed)),
+      roomSeed,
+    );
+  } catch {
+    return null;
+  }
+};
+
+export const writeVisualSceneState = (
+  storage: Storage | null | undefined,
+  state: VisualSceneState,
+): boolean => {
+  if (storage === null || storage === undefined) {
+    return false;
+  }
+  try {
+    storage.setItem(
+      getVisualSceneStateStorageKey(state.roomSeed),
+      serializeVisualSceneState(state),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const VISUAL_SCENE_STATE_SAVE_INTERVAL_MS = 250;
+
+const getVisualSceneStateStorage = (): Storage | null => {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
+
+export const VISUAL_DEBUG_PREFERENCES_VERSION = 1 as const;
+export const VISUAL_DEBUG_PREFERENCES_STORAGE_KEY = "hk-mahjong-coach:visual-debug-preferences:v1";
+
+/** Values controlled by the development visual panel and safe to persist. */
+export interface VisualDebugPreferences {
+  readonly version: typeof VISUAL_DEBUG_PREFERENCES_VERSION;
+  readonly cameraPreset: VisualCameraPreset | null;
+  readonly fov: number;
+  readonly exposure: number;
+  readonly toneMapper: VisualToneMapper;
+  readonly fogDensity: number;
+  readonly skylineVisible: boolean;
+  readonly skylineLayers: Readonly<Record<VisualSkylineLayer, boolean>>;
+  readonly sunYaw: number;
+  readonly sunElevation: number;
+  readonly sunIntensity: number;
+  readonly environmentIntensity: number;
+  readonly environmentRotation: number;
+  readonly redAccentIntensity: number;
+  readonly cyanEmissiveIntensity: number;
+  readonly shadowQuality: VisualShadowQuality;
+  readonly qualityMode: VisualQualityMode;
+  readonly glassMode: VisualGlassMode;
+  readonly ambientAnimationRate: number;
+  readonly dprCap: number;
+  readonly wireframe: boolean;
+  readonly boundsVisible: boolean;
+  readonly bokehEnabled: boolean;
+  readonly bokehStrength: number;
+  readonly ambientOcclusionEnabled: boolean;
+  readonly autoExposureEnabled: boolean;
+  readonly cameraShiftEnabled: boolean;
+  readonly cameraBobEnabled: boolean;
+}
+
+const getVisualDebugPreferencesStorage = (): Storage | null => {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
+const isVisualQualityMode = (value: unknown): value is VisualQualityMode =>
+  value === "adaptive" || value === "high" || value === "medium" || value === "low";
+
+const isVisualToneMapper = (value: unknown): value is VisualToneMapper =>
+  value === "agx" || value === "neutral" || value === "cineon" || value === "linear";
+
+const isVisualShadowQuality = (value: unknown): value is VisualShadowQuality =>
+  value === "off" || value === "medium" || value === "high";
+
+const isVisualGlassMode = (value: unknown): value is VisualGlassMode =>
+  value === "simple" || value === "physical";
+
+const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+
+const isBoundedNumber = (value: unknown, min: number, max: number): value is number =>
+  isFiniteNumber(value) && value >= min && value <= max;
+
+const isSkylineLayerPreferences = (
+  value: unknown,
+): value is Readonly<Record<VisualSkylineLayer, boolean>> => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return ["near", "hero", "fillers", "distant"].every((layer) => isBoolean(value[layer]));
+};
+
+const isVisualDebugPreferences = (value: unknown): value is VisualDebugPreferences => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    value.version === VISUAL_DEBUG_PREFERENCES_VERSION &&
+    (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
+    isBoundedNumber(value.fov, 30, 100) &&
+    isBoundedNumber(value.exposure, 0.5, 2.2) &&
+    isVisualToneMapper(value.toneMapper) &&
+    isBoundedNumber(value.fogDensity, 0.004, 0.04) &&
+    isBoolean(value.skylineVisible) &&
+    isSkylineLayerPreferences(value.skylineLayers) &&
+    isBoundedNumber(value.sunYaw, -Math.PI, Math.PI) &&
+    isBoundedNumber(value.sunElevation, 0.25, 1.45) &&
+    isBoundedNumber(value.sunIntensity, 0, 6) &&
+    isBoundedNumber(value.environmentIntensity, 0, 2.5) &&
+    isBoundedNumber(value.environmentRotation, -Math.PI, Math.PI) &&
+    isBoundedNumber(value.redAccentIntensity, 0, 2.5) &&
+    isBoundedNumber(value.cyanEmissiveIntensity, 0, 2.5) &&
+    isVisualShadowQuality(value.shadowQuality) &&
+    isVisualQualityMode(value.qualityMode) &&
+    isVisualGlassMode(value.glassMode) &&
+    isBoundedNumber(value.ambientAnimationRate, 0, 2) &&
+    isBoundedNumber(value.dprCap, 1, 2) &&
+    isBoolean(value.wireframe) &&
+    isBoolean(value.boundsVisible) &&
+    isBoolean(value.bokehEnabled) &&
+    isBoundedNumber(value.bokehStrength, 0, DEBUG_BOKEH_STRENGTH_MAX) &&
+    isBoolean(value.ambientOcclusionEnabled) &&
+    isBoolean(value.autoExposureEnabled) &&
+    isBoolean(value.cameraShiftEnabled) &&
+    isBoolean(value.cameraBobEnabled)
+  );
+};
+
+export const readVisualDebugPreferences = (
+  storage: Storage | null | undefined,
+): VisualDebugPreferences | null => {
+  if (storage === null || storage === undefined) {
+    return null;
+  }
+  try {
+    const serialized = storage.getItem(VISUAL_DEBUG_PREFERENCES_STORAGE_KEY);
+    if (serialized === null) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(serialized) as unknown;
+    return isVisualDebugPreferences(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+export const writeVisualDebugPreferences = (
+  storage: Storage | null | undefined,
+  preferences: VisualDebugPreferences,
+): boolean => {
+  if (storage === null || storage === undefined) {
+    return false;
+  }
+  try {
+    storage.setItem(VISUAL_DEBUG_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 export interface MahjongTableSceneOptions {
+  readonly debug?: boolean;
+  readonly onExplorationAreaChange?: (area: string) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
   readonly onReady?: () => void;
   readonly quality?: VisualQualityPreset | "auto";
+  readonly roomSeed?: string;
 }
 
 export interface PenthouseSceneAnchors {
@@ -47,6 +406,7 @@ export interface PenthouseSceneAnchors {
 export interface MahjongTableMount {
   readonly setView: (view: SceneView) => void;
   readonly requestMotionLook: () => Promise<MotionLookStatus>;
+  readonly setMotionLookEnabled: (enabled: boolean) => void;
   readonly setTouchMovementVector: (forward: number, right: number, active: boolean) => void;
   readonly toggleCrouch: () => boolean;
   readonly jump: () => void;
@@ -56,6 +416,11 @@ export interface MahjongTableMount {
 }
 
 export interface SceneDebugSnapshot {
+  readonly roomSeed: string;
+  readonly roomVariant: string;
+  readonly explorationArea: string;
+  readonly loadedExplorationChunks: number;
+  readonly qualityMode: VisualQualityMode;
   readonly cameraPreset: VisualCameraPreset | null;
   readonly fov: number;
   readonly exposure: number;
@@ -72,10 +437,22 @@ export interface SceneDebugSnapshot {
   readonly cyanEmissiveIntensity: number;
   readonly shadowQuality: VisualShadowQuality;
   readonly quality: VisualQualityPreset;
+  readonly glassMode: VisualGlassMode;
+  readonly ambientAnimationRate: number;
   readonly dpr: number;
   readonly dprCap: number;
   readonly wireframe: boolean;
   readonly boundsVisible: boolean;
+  readonly bokehEnabled: boolean;
+  readonly focusDistance: number;
+  readonly focusTarget: VisualFocusTarget;
+  readonly pupilDiameterMm: number;
+  readonly bokehIntensity: number;
+  readonly bokehStrength: number;
+  readonly ambientOcclusionEnabled: boolean;
+  readonly autoExposureEnabled: boolean;
+  readonly cameraShiftEnabled: boolean;
+  readonly cameraBobEnabled: boolean;
   readonly fps: number;
   readonly frameTimeMs: number;
   readonly drawCalls: number;
@@ -87,6 +464,7 @@ export interface SceneDebugSnapshot {
 }
 
 export interface MahjongTableDebugControls {
+  readonly setQualityMode: (mode: VisualQualityMode) => void;
   readonly setCameraPreset: (preset: VisualCameraPreset) => void;
   readonly setFov: (fov: number) => void;
   readonly setExposure: (exposure: number) => void;
@@ -102,8 +480,17 @@ export interface MahjongTableDebugControls {
   readonly setCyanEmissiveIntensity: (intensity: number) => void;
   readonly setShadowQuality: (quality: VisualShadowQuality) => void;
   readonly setDprCap: (dprCap: number) => void;
+  readonly setBokehEnabled: (enabled: boolean) => void;
+  readonly setBokehIntensity: (intensity: number) => void;
+  readonly setAmbientOcclusionEnabled: (enabled: boolean) => void;
+  readonly setAutoExposureEnabled: (enabled: boolean) => void;
+  readonly setAmbientAnimationRate: (rate: number) => void;
+  readonly setGlassMode: (mode: VisualGlassMode) => void;
+  readonly setCameraShiftEnabled: (enabled: boolean) => void;
+  readonly setCameraBobEnabled: (enabled: boolean) => void;
   readonly setWireframe: (enabled: boolean) => void;
   readonly setBoundsVisible: (visible: boolean) => void;
+  readonly resetDefaults: () => void;
   readonly getSnapshot: () => SceneDebugSnapshot;
 }
 
@@ -124,6 +511,11 @@ interface TileOptions {
 interface TileTextureCache {
   readonly face: Map<TileTypeId, THREE.CanvasTexture>;
   readonly back: THREE.CanvasTexture;
+  readonly bodyGeometry: Map<string, RoundedBoxGeometry>;
+  readonly faceGeometry: Map<string, THREE.PlaneGeometry>;
+  readonly bodyMaterial: Map<string, THREE.MeshStandardMaterial>;
+  readonly faceMaterial: Map<string, THREE.MeshStandardMaterial>;
+  readonly backMaterial: Map<string, THREE.MeshStandardMaterial>;
 }
 
 interface SceneQuality {
@@ -131,7 +523,8 @@ interface SceneQuality {
   readonly dprCap: number;
   readonly shadows: "off" | "medium" | "high";
   readonly shadowMapSize: 0 | 1024 | 2048;
-  readonly glassMode: "simple" | "physical";
+  readonly ambientOcclusion: boolean;
+  readonly glassMode: VisualGlassMode;
   readonly skylineLodBias: number;
   readonly ambientAnimationRate: number;
 }
@@ -150,6 +543,9 @@ interface SkylineResources {
 interface ArchitectureResources {
   readonly ambient: SceneAmbientResources;
   readonly teacherTexture: THREE.CanvasTexture;
+  readonly glassSurfaces: readonly THREE.Mesh[];
+  readonly simpleGlassMaterial: THREE.MeshStandardMaterial;
+  readonly physicalGlassMaterial: THREE.MeshPhysicalMaterial;
 }
 
 const TABLE_TOP_Y = 0.78;
@@ -291,7 +687,7 @@ const cameraPresets: Readonly<Record<SceneView, CameraPreset>> = {
   },
 };
 
-const visualCameraPresets: Readonly<Record<VisualCameraPreset, CameraPreset>> = {
+const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, CameraPreset>> => ({
   table: cameraPresets.seat,
   roomReveal: {
     position: new THREE.Vector3(6.3, 4.55, 6.8),
@@ -302,25 +698,303 @@ const visualCameraPresets: Readonly<Record<VisualCameraPreset, CameraPreset>> = 
     target: new THREE.Vector3(-1.75, 2.55, -6.55),
   },
   assetReview: cameraPresets.overhead,
-};
+  focusCalibration: {
+    position: new THREE.Vector3(
+      FOCUS_CALIBRATION_START_X,
+      FOCUS_CALIBRATION_DECK_HEIGHT + STANDING_EYE_HEIGHT,
+      0,
+    ),
+    target: new THREE.Vector3(
+      FOCUS_CALIBRATION_START_X + FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE / 2,
+      FOCUS_CALIBRATION_DECK_HEIGHT + STANDING_EYE_HEIGHT,
+      0,
+    ),
+  },
+});
 
 const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
 const SEATED_EYE_HEIGHT = 1.45;
-const STANDING_FOV = 90;
-const SEATED_FOV = 68;
+const TABLE_CAMERA_FOV = 45;
+const DEBUG_STANDING_FOV = 90;
+const DEBUG_SEATED_FOV = 68;
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
 const SPRINT_MULTIPLIER = 3;
+const PLAYER_COLLIDER_RADIUS = 0.26;
+const PLAYER_COLLIDER_HALF_HEIGHT = 0.6;
+const PLAYER_COLLIDER_CENTER_HEIGHT = PLAYER_COLLIDER_HALF_HEIGHT + PLAYER_COLLIDER_RADIUS;
 const DOUBLE_TAP_WINDOW_MS = 300;
 const SWIPE_LOOK_SENSITIVITY = 0.00594;
 const TOUCH_SIDEWAYS_SPRINT_FRACTION = 0.5;
-const ROOM_BOUNDS = {
-  minX: -6.7,
-  maxX: 6.7,
-  minZ: -5.05,
-  maxZ: 5.05,
+const CAMERA_SHIFT_WALK = THREE.MathUtils.degToRad(0.9);
+const CAMERA_SHIFT_SPRINT = THREE.MathUtils.degToRad(1.8);
+const CAMERA_SHIFT_TARGET_DAMPING = 4;
+const CAMERA_SHIFT_DAMPING = 6;
+const CAMERA_BOB_AMPLITUDE = 0.025;
+const CAMERA_BOB_DAMPING = 12;
+const CAMERA_BOB_MIN_FREQUENCY = 8.5;
+const CAMERA_BOB_MAX_FREQUENCY = 14;
+const CAMERA_DIRECTION_MEMORY_SECONDS = 0.24;
+// Approximate the central human eye rather than a portrait lens: 17 mm focal
+// length, a 1 arcminute circle of confusion, and a 4 mm reference pupil. The
+// scene is authored in metre-like units, so photographic distances map
+// directly to the table and room scale below.
+const HUMAN_EYE_FOCAL_LENGTH_MM = 17;
+const HUMAN_EYE_CIRCLE_OF_CONFUSION_MM =
+  HUMAN_EYE_FOCAL_LENGTH_MM * Math.tan((1 / 60) * (Math.PI / 180));
+const HUMAN_EYE_REFERENCE_PUPIL_MM = 4;
+const HUMAN_EYE_BRIGHT_PUPIL_MM = 2.5;
+const HUMAN_EYE_DARK_PUPIL_MM = 6.5;
+const HUMAN_EYE_BRIGHT_LUMINANCE = 1.45;
+const HUMAN_EYE_DARK_LUMINANCE = 0.35;
+const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
+  (HUMAN_EYE_FOCAL_LENGTH_MM * HUMAN_EYE_FOCAL_LENGTH_MM) /
+    ((HUMAN_EYE_FOCAL_LENGTH_MM / HUMAN_EYE_REFERENCE_PUPIL_MM) *
+      HUMAN_EYE_CIRCLE_OF_CONFUSION_MM) /
+    1000 +
+  HUMAN_EYE_FOCAL_LENGTH_MM / 1000;
+// These values keep ordinary table views legible while still allowing a close
+// tile to separate from the room. They are deliberately much gentler than a
+// cinematic portrait treatment.
+const BOKEH_BASE_APERTURE = 0.00095;
+const BOKEH_BASE_MAX_BLUR = 0.003;
+const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
+/** Debug-only multiplier cap; 1× remains the restrained human-eye baseline. */
+export const DEBUG_BOKEH_STRENGTH_MAX = 25;
+// Practical calibration points from the focus-lab pass: at the reference 4 mm
+// pupil, 6 m reads as effectively sharp and 2.5 m retains roughly one quarter
+// of the close-focus blur. Other pupil sizes scale this cutoff with dilation.
+const BOKEH_PRACTICAL_HYPERFOCAL_DISTANCE = 6;
+const BOKEH_DISTANCE_FALLOFF_POWER = 2.94;
+// 95% convergence is approximately 0.4 s near and 0.65 s far. The slower
+// far-to-near transition avoids a distracting camera snap when gaze leaves a
+// tile, while the reverse transition follows the eye's slower relaxation.
+const BOKEH_NEAR_ACCOMMODATION_DAMPING = 7;
+const BOKEH_FAR_ACCOMMODATION_DAMPING = 4.5;
+const BOKEH_PUPIL_ADAPTATION_DAMPING = 2.4;
+const BOKEH_TILE_SAMPLE_OFFSET = 0.028;
+const FOCUS_CALIBRATION_START_X = 9.2;
+const FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE = HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE;
+const FOCUS_CALIBRATION_LENGTH = FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE * 2;
+const FOCUS_CALIBRATION_ENTRY_MARGIN = 1.6;
+const FOCUS_CALIBRATION_HALL_WIDTH = 6.4;
+const FOCUS_CALIBRATION_PLATFORM_WIDTH = 16;
+const FOCUS_CALIBRATION_BACK_EXTENSION = 12;
+const FOCUS_CALIBRATION_DECK_HEIGHT = 7.5;
+const FOCUS_CALIBRATION_RAMP_RUN = 24;
+const FOCUS_CALIBRATION_RAMP_WIDTH = 8;
+const FOCUS_CALIBRATION_RAMP_TOP_Z = FOCUS_CALIBRATION_PLATFORM_WIDTH / 2;
+const EXPLORATION_CHUNK_SIZE = 8;
+const EXPLORATION_CHUNK_RADIUS = 1;
+
+/**
+ * The room is larger than one streamed block, so the first city blocks at
+ * the gateway straddle it. Keep this exclusion slightly outside the visible
+ * shell; city geometry may touch the gateway, but it must never be authored
+ * under the penthouse floor or through its walls.
+ */
+export const EXPLORATION_PENTHOUSE_BOUNDS = {
+  minX: -8.72,
+  maxX: 8.72,
+  minZ: -6.98,
+  maxZ: 6.98,
 } as const;
+
+export interface ExplorationRect {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+/** Return true when a horizontal city rectangle does not enter the room. */
+export const isExplorationRectOutsidePenthouse = (rect: ExplorationRect): boolean =>
+  rect.maxX <= EXPLORATION_PENTHOUSE_BOUNDS.minX ||
+  rect.minX >= EXPLORATION_PENTHOUSE_BOUNDS.maxX ||
+  rect.maxZ <= EXPLORATION_PENTHOUSE_BOUNDS.minZ ||
+  rect.minZ >= EXPLORATION_PENTHOUSE_BOUNDS.maxZ;
+
+const isExplorationRectOutsideFocusCalibrationRamp = (rect: ExplorationRect): boolean =>
+  rect.maxX <= FOCUS_CALIBRATION_START_X - FOCUS_CALIBRATION_RAMP_WIDTH / 2 ||
+  rect.minX >= FOCUS_CALIBRATION_START_X + FOCUS_CALIBRATION_RAMP_WIDTH / 2 ||
+  rect.maxZ <= FOCUS_CALIBRATION_RAMP_TOP_Z ||
+  rect.minZ >= FOCUS_CALIBRATION_RAMP_TOP_Z + FOCUS_CALIBRATION_RAMP_RUN;
+
+/**
+ * Subtract the penthouse rectangle from one city rectangle. The result is at
+ * most four rectangles and is used for shared-geometry ground/path meshes so
+ * a boundary chunk remains walkable without putting a mesh through the room.
+ */
+export const clipExplorationRectAroundPenthouse = (
+  rect: ExplorationRect,
+): readonly ExplorationRect[] => {
+  if (isExplorationRectOutsidePenthouse(rect)) {
+    return [rect];
+  }
+
+  const clipped: ExplorationRect[] = [];
+  const add = (minX: number, maxX: number, minZ: number, maxZ: number): void => {
+    if (maxX <= minX || maxZ <= minZ) {
+      return;
+    }
+    clipped.push({ minX, maxX, minZ, maxZ });
+  };
+
+  if (rect.minX < EXPLORATION_PENTHOUSE_BOUNDS.minX) {
+    add(rect.minX, Math.min(rect.maxX, EXPLORATION_PENTHOUSE_BOUNDS.minX), rect.minZ, rect.maxZ);
+  }
+  if (rect.maxX > EXPLORATION_PENTHOUSE_BOUNDS.maxX) {
+    add(Math.max(rect.minX, EXPLORATION_PENTHOUSE_BOUNDS.maxX), rect.maxX, rect.minZ, rect.maxZ);
+  }
+
+  const overlapMinX = Math.max(rect.minX, EXPLORATION_PENTHOUSE_BOUNDS.minX);
+  const overlapMaxX = Math.min(rect.maxX, EXPLORATION_PENTHOUSE_BOUNDS.maxX);
+  if (overlapMaxX > overlapMinX) {
+    if (rect.minZ < EXPLORATION_PENTHOUSE_BOUNDS.minZ) {
+      add(
+        overlapMinX,
+        overlapMaxX,
+        rect.minZ,
+        Math.min(rect.maxZ, EXPLORATION_PENTHOUSE_BOUNDS.minZ),
+      );
+    }
+    if (rect.maxZ > EXPLORATION_PENTHOUSE_BOUNDS.maxZ) {
+      add(
+        overlapMinX,
+        overlapMaxX,
+        Math.max(rect.minZ, EXPLORATION_PENTHOUSE_BOUNDS.maxZ),
+        rect.maxZ,
+      );
+    }
+  }
+  return clipped;
+};
+
+const PHYSICS_COLLISION_ROOT_NAMES: ReadonlySet<string> = new Set([
+  "EnvironmentRoot",
+  "GeneratedRoomRoot",
+  "ExplorationGateway",
+  "FocusCalibrationRoot",
+]);
+
+// These are presentation-only details. Keeping them out of the collision set
+// prevents a thin light strip or floor inlay from becoming a tiny bump while
+// still allowing the surrounding walls, furniture, glass, and fixtures to be
+// represented by coarse boxes.
+const PHYSICS_IGNORED_OBJECT_NAMES: ReadonlySet<string> = new Set([
+  "PenthouseFloor",
+  "MahjongZoneInset",
+  "GeneratedFloorPanel",
+  "RedDirectionalLine",
+  "CyanCeilingStrip",
+  "TeacherPanelStatusLine",
+  "PendantLightStrip",
+  "GeneratedLightBar",
+  "FocusCalibrationRamp",
+]);
+
+const PHYSICS_MINIMUM_HALF_EXTENT = 0.025;
+
+const isPhysicsIgnored = (object: THREE.Object3D): boolean => {
+  let current: THREE.Object3D | null = object;
+  while (current !== null) {
+    if (current.userData.physicsIgnore === true) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return PHYSICS_IGNORED_OBJECT_NAMES.has(object.name);
+};
+
+/**
+ * Builds deliberately coarse AABB colliders from selected render roots. The
+ * renderer remains the source of geometry, while the physics world receives
+ * one inexpensive box per meaningful mesh instead of every triangle. Roots
+ * such as the table, tiles, skyline, and streamed chunks are excluded here so
+ * they can use their own explicit or dynamic collider descriptions.
+ */
+export const collectScenePhysicsBoxes = (
+  scene: THREE.Object3D,
+  collidableRootNames: ReadonlySet<string> = PHYSICS_COLLISION_ROOT_NAMES,
+): readonly PhysicsBox[] => {
+  scene.updateMatrixWorld(true);
+  const boxes: PhysicsBox[] = [];
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  for (const root of scene.children) {
+    if (!collidableRootNames.has(root.name)) {
+      continue;
+    }
+    root.traverse((object) => {
+      if (
+        !(object instanceof THREE.Mesh) ||
+        object instanceof THREE.InstancedMesh ||
+        !object.visible ||
+        isPhysicsIgnored(object)
+      ) {
+        return;
+      }
+      const bounds = new THREE.Box3().setFromObject(object);
+      if (bounds.isEmpty()) {
+        return;
+      }
+      bounds.getSize(size);
+      bounds.getCenter(center);
+      if (
+        ![size.x, size.y, size.z, center.x, center.y, center.z].every((value) =>
+          Number.isFinite(value),
+        ) ||
+        (size.x < 0.05 && size.y < 0.05 && size.z < 0.05)
+      ) {
+        return;
+      }
+      boxes.push({
+        center: { x: center.x, y: center.y, z: center.z },
+        halfExtents: {
+          x: Math.max(size.x / 2, PHYSICS_MINIMUM_HALF_EXTENT),
+          y: Math.max(size.y / 2, PHYSICS_MINIMUM_HALF_EXTENT),
+          z: Math.max(size.z / 2, PHYSICS_MINIMUM_HALF_EXTENT),
+        },
+      });
+    });
+  }
+  return boxes;
+};
+
+const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => {
+  const focusRamp = scene.getObjectByName("FocusCalibrationRamp");
+  const focusRampPhysicsBoxes: readonly PhysicsBox[] =
+    focusRamp?.visible === true
+      ? [
+          {
+            center: {
+              x: FOCUS_CALIBRATION_START_X + FOCUS_CALIBRATION_RAMP_RUN / 2,
+              y: FOCUS_CALIBRATION_DECK_HEIGHT / 2,
+              z: FOCUS_CALIBRATION_RAMP_TOP_Z,
+            },
+            halfExtents: {
+              x: FOCUS_CALIBRATION_RAMP_RUN / 2,
+              y: 0.09,
+              z: FOCUS_CALIBRATION_RAMP_WIDTH / 2,
+            },
+            rotationZ: -Math.atan2(FOCUS_CALIBRATION_DECK_HEIGHT, FOCUS_CALIBRATION_RAMP_RUN),
+          },
+        ]
+      : [];
+  return [
+    {
+      center: { x: 0, y: -0.1, z: 0 },
+      halfExtents: { x: WORLD_BOUNDS.maxX, y: 0.1, z: WORLD_BOUNDS.maxZ },
+    },
+    {
+      center: { x: 0, y: 0.39, z: 0 },
+      halfExtents: { x: 0.92, y: 0.39, z: 0.92 },
+    },
+    ...focusRampPhysicsBoxes,
+    ...collectScenePhysicsBoxes(scene),
+  ];
+};
 
 const getTouchSprintCap = (forwardDirection: number): number => {
   const forwardBias = THREE.MathUtils.clamp(forwardDirection, 0, 1);
@@ -328,11 +1002,61 @@ const getTouchSprintCap = (forwardDirection: number): number => {
   return TOUCH_SIDEWAYS_SPRINT_FRACTION + (1 - TOUCH_SIDEWAYS_SPRINT_FRACTION) * curvedForwardBias;
 };
 
+const clampUnit = (value: number): number => THREE.MathUtils.clamp(value, 0, 1);
+
+/** Map the scene's normalized luminance estimate to a virtual pupil diameter. */
+export const resolveHumanEyePupilDiameter = (luminance: number): number => {
+  const safeLuminance = Number.isFinite(luminance) ? luminance : 1;
+  const lowLightMix = clampUnit(
+    (HUMAN_EYE_BRIGHT_LUMINANCE - safeLuminance) /
+      (HUMAN_EYE_BRIGHT_LUMINANCE - HUMAN_EYE_DARK_LUMINANCE),
+  );
+  const easedLowLightMix = lowLightMix * lowLightMix * (3 - 2 * lowLightMix);
+  return THREE.MathUtils.lerp(HUMAN_EYE_BRIGHT_PUPIL_MM, HUMAN_EYE_DARK_PUPIL_MM, easedLowLightMix);
+};
+
+/** Use different accommodation timing for near and far gaze changes. */
+export const resolveFocusAccommodationDamping = (
+  currentDistance: number,
+  targetDistance: number,
+): number =>
+  targetDistance < currentDistance
+    ? BOKEH_NEAR_ACCOMMODATION_DAMPING
+    : BOKEH_FAR_ACCOMMODATION_DAMPING;
+
+/** Resolve restrained scene-space bokeh from eye focus and pupil size. */
+export const resolveHumanEyeBokeh = (
+  focusDistance: number,
+  pupilDiameterMm: number,
+): VisualBokehParameters => {
+  const safeFocusDistance = Number.isFinite(focusDistance) ? Math.max(0.05, focusDistance) : 12;
+  const safePupilDiameter = Number.isFinite(pupilDiameterMm)
+    ? THREE.MathUtils.clamp(pupilDiameterMm, HUMAN_EYE_BRIGHT_PUPIL_MM, HUMAN_EYE_DARK_PUPIL_MM)
+    : HUMAN_EYE_REFERENCE_PUPIL_MM;
+  const hyperfocalDistance =
+    HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE * (safePupilDiameter / HUMAN_EYE_REFERENCE_PUPIL_MM);
+  const pupilScale = safePupilDiameter / HUMAN_EYE_REFERENCE_PUPIL_MM;
+  const practicalHyperfocalDistance = BOKEH_PRACTICAL_HYPERFOCAL_DISTANCE * pupilScale;
+  const normalizedFocus = clampUnit(safeFocusDistance / practicalHyperfocalDistance);
+  // A smoothstep ease-out gives a calm, continuous shoulder at the practical
+  // cutoff. Raising the remaining envelope makes the close-focus blur fall
+  // quickly enough that 2.5 m is about 25% while 6 m is visually sharp.
+  const smoothFocus = normalizedFocus * normalizedFocus * (3 - 2 * normalizedFocus);
+  const intensity = Math.pow(1 - smoothFocus, BOKEH_DISTANCE_FALLOFF_POWER);
+  return {
+    hyperfocalDistance,
+    intensity,
+    aperture: BOKEH_BASE_APERTURE * pupilScale * intensity,
+    maxBlur: BOKEH_BASE_MAX_BLUR * pupilScale * intensity,
+  };
+};
+
 const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "preset">>> = {
   high: {
     dprCap: 1.75,
     shadows: "high",
     shadowMapSize: 2048,
+    ambientOcclusion: false,
     glassMode: "physical",
     skylineLodBias: 1,
     ambientAnimationRate: 1,
@@ -341,6 +1065,7 @@ const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "
     dprCap: 1.35,
     shadows: "medium",
     shadowMapSize: 1024,
+    ambientOcclusion: false,
     glassMode: "simple",
     skylineLodBias: 0.78,
     ambientAnimationRate: 0.75,
@@ -349,6 +1074,7 @@ const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "
     dprCap: 1,
     shadows: "off",
     shadowMapSize: 0,
+    ambientOcclusion: false,
     glassMode: "simple",
     skylineLodBias: 0.56,
     ambientAnimationRate: 0.45,
@@ -360,12 +1086,11 @@ const resolveQuality = (requested: VisualQualityPreset | "auto" | undefined): Sc
   if (preset === undefined) {
     const deviceMemory = (navigator as Navigator & { readonly deviceMemory?: number }).deviceMemory;
     const cores = navigator.hardwareConcurrency;
-    preset =
-      deviceMemory !== undefined && deviceMemory <= 4
-        ? "medium"
-        : cores > 0 && cores <= 4
-          ? "medium"
-          : "high";
+    // Adaptive presentation is deliberately conservative when the browser
+    // does not expose a trustworthy memory budget.  High DPR, shadows, and
+    // Bokeh can multiply the render target on laptops, phones, and software
+    // WebGL; users can still opt into the high tier from the debug panel.
+    preset = deviceMemory !== undefined && deviceMemory >= 8 && cores >= 8 ? "high" : "medium";
   }
   return { preset, ...QUALITY_PRESETS[preset] };
 };
@@ -590,6 +1315,11 @@ const drawTileBack = (): THREE.CanvasTexture => {
 const createTextureCache = (): TileTextureCache => ({
   face: new Map(),
   back: drawTileBack(),
+  bodyGeometry: new Map(),
+  faceGeometry: new Map(),
+  bodyMaterial: new Map(),
+  faceMaterial: new Map(),
+  backMaterial: new Map(),
 });
 
 const getFaceTexture = (cache: TileTextureCache, tile: TileTypeId): THREE.CanvasTexture => {
@@ -602,43 +1332,130 @@ const getFaceTexture = (cache: TileTextureCache, tile: TileTypeId): THREE.Canvas
   return texture;
 };
 
+const tileResourceKey = (width: number, height: number, depth: number): string =>
+  `${width.toFixed(4)}:${height.toFixed(4)}:${depth.toFixed(4)}`;
+
+const getTileBodyGeometry = (
+  cache: TileTextureCache,
+  width: number,
+  height: number,
+  depth: number,
+): RoundedBoxGeometry => {
+  const key = tileResourceKey(width, height, depth);
+  const existing = cache.bodyGeometry.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const geometry = new RoundedBoxGeometry(width, height, depth, 3, Math.min(0.05, depth / 4));
+  cache.bodyGeometry.set(key, geometry);
+  return geometry;
+};
+
+const getTileFaceGeometry = (
+  cache: TileTextureCache,
+  width: number,
+  height: number,
+): THREE.PlaneGeometry => {
+  const key = tileResourceKey(width, height, 0);
+  const existing = cache.faceGeometry.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const geometry = new THREE.PlaneGeometry(width * 0.86, height * 0.9);
+  cache.faceGeometry.set(key, geometry);
+  return geometry;
+};
+
+const getTileBodyMaterial = (
+  cache: TileTextureCache,
+  width: number,
+  height: number,
+  depth: number,
+): THREE.MeshStandardMaterial => {
+  const key = tileResourceKey(width, height, depth);
+  const existing = cache.bodyMaterial.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const material = new THREE.MeshStandardMaterial({
+    color: COLORS.tileIvory,
+    roughness: 0.44,
+    metalness: 0.03,
+  });
+  cache.bodyMaterial.set(key, material);
+  return material;
+};
+
+const getTileBackMaterial = (
+  cache: TileTextureCache,
+  width: number,
+  height: number,
+  depth: number,
+): THREE.MeshStandardMaterial => {
+  const key = tileResourceKey(width, height, depth);
+  const existing = cache.backMaterial.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const material = new THREE.MeshStandardMaterial({
+    map: cache.back,
+    roughness: 0.68,
+    metalness: 0,
+  });
+  cache.backMaterial.set(key, material);
+  return material;
+};
+
+const getTileFaceMaterial = (
+  cache: TileTextureCache,
+  tile: TileTypeId,
+  width: number,
+  height: number,
+  depth: number,
+): THREE.MeshStandardMaterial => {
+  const key = `${tileResourceKey(width, height, depth)}:${tile}`;
+  const existing = cache.faceMaterial.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const material = new THREE.MeshStandardMaterial({
+    map: getFaceTexture(cache, tile),
+    roughness: 0.68,
+    metalness: 0,
+  });
+  cache.faceMaterial.set(key, material);
+  return material;
+};
+
 const createTile = (cache: TileTextureCache, options: TileOptions): THREE.Group => {
   const width = options.width ?? TILE_WIDTH;
   const height = options.height ?? TILE_HEIGHT;
   const depth = options.depth ?? TILE_DEPTH;
   const group = new THREE.Group();
-  group.userData = { tile: options.tile, faceUp: options.faceUp };
+  group.userData = { tile: options.tile, faceUp: options.faceUp, dofFocusTarget: true };
 
   const body = new THREE.Mesh(
-    new RoundedBoxGeometry(width, height, depth, 3, Math.min(0.05, depth / 4)),
-    new THREE.MeshStandardMaterial({
-      color: COLORS.tileIvory,
-      roughness: 0.44,
-      metalness: 0.03,
-    }),
+    getTileBodyGeometry(cache, width, height, depth),
+    getTileBodyMaterial(cache, width, height, depth),
   );
   body.castShadow = true;
   body.receiveShadow = true;
   group.add(body);
 
-  const frontTexture =
-    options.faceUp && options.tile !== undefined ? getFaceTexture(cache, options.tile) : cache.back;
-  const backTexture = options.faceUp && options.bothSides === true ? frontTexture : cache.back;
-  const faceMaterial = new THREE.MeshStandardMaterial({
-    map: frontTexture,
-    roughness: 0.68,
-    metalness: 0,
-  });
-  const backMaterial = new THREE.MeshStandardMaterial({
-    map: backTexture,
-    roughness: 0.68,
-    metalness: 0,
-  });
-  const front = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.86, height * 0.9), faceMaterial);
+  const faceMaterial =
+    options.faceUp && options.tile !== undefined
+      ? getTileFaceMaterial(cache, options.tile, width, height, depth)
+      : getTileBackMaterial(cache, width, height, depth);
+  const backMaterial =
+    options.faceUp && options.bothSides === true
+      ? faceMaterial
+      : getTileBackMaterial(cache, width, height, depth);
+  const faceGeometry = getTileFaceGeometry(cache, width, height);
+  const front = new THREE.Mesh(faceGeometry, faceMaterial);
   front.position.z = depth / 2 + 0.004;
   front.castShadow = true;
   group.add(front);
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.86, height * 0.9), backMaterial);
+  const back = new THREE.Mesh(faceGeometry, backMaterial);
   back.position.z = -depth / 2 - 0.004;
   back.rotation.y = Math.PI;
   group.add(back);
@@ -659,24 +1476,21 @@ const createBackTileInstances = (
 ): THREE.Group => {
   const group = new THREE.Group();
   group.name = "ConcealedTileInstances";
+  group.userData.dofFocusTarget = true;
   if (placements.length === 0) {
     return group;
   }
   const body = new THREE.InstancedMesh(
-    new RoundedBoxGeometry(width, height, depth, 3, Math.min(0.05, depth / 4)),
-    new THREE.MeshStandardMaterial({
-      color: COLORS.tileIvory,
-      roughness: 0.44,
-      metalness: 0.03,
-    }),
+    getTileBodyGeometry(cache, width, height, depth),
+    getTileBodyMaterial(cache, width, height, depth),
     placements.length,
   );
   body.name = "ConcealedTileBodies";
   body.castShadow = true;
   body.receiveShadow = true;
   const back = new THREE.InstancedMesh(
-    new THREE.PlaneGeometry(width * 0.86, height * 0.9),
-    new THREE.MeshStandardMaterial({ map: cache.back, roughness: 0.68, metalness: 0 }),
+    getTileFaceGeometry(cache, width, height),
+    getTileBackMaterial(cache, width, height, depth),
     placements.length,
   );
   back.name = "ConcealedTileBacks";
@@ -1287,12 +2101,7 @@ const makeLabelTexture = (label: string, accent: string): THREE.CanvasTexture =>
   return createCanvasTexture(canvas);
 };
 
-const addLabel = (
-  scene: THREE.Scene,
-  label: string,
-  position: THREE.Vector3,
-  accent: string,
-): THREE.Sprite => {
+const createLabelSprite = (label: string, accent: string): THREE.Sprite => {
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: makeLabelTexture(label, accent),
@@ -1301,10 +2110,233 @@ const addLabel = (
     }),
   );
   sprite.userData.dofIgnore = true;
+  return sprite;
+};
+
+const addLabel = (
+  scene: THREE.Scene,
+  label: string,
+  position: THREE.Vector3,
+  accent: string,
+): THREE.Sprite => {
+  const sprite = createLabelSprite(label, accent);
   sprite.position.copy(position);
   sprite.scale.set(0.95, 0.22, 1);
   scene.add(sprite);
   return sprite;
+};
+
+interface FocusCalibrationHallwayResources {
+  readonly root: THREE.Group;
+  readonly labels: readonly THREE.Sprite[];
+}
+
+const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHallwayResources => {
+  const root = new THREE.Group();
+  root.name = "FocusCalibrationRoot";
+  // The lab is part of the development map, not a separate camera scene.
+  // Keep it present so the player can enter it from the streamed world.
+  root.visible = true;
+  const labels: THREE.Sprite[] = [];
+  const deck = new THREE.Group();
+  deck.name = "FocusCalibrationSecondLevel";
+  deck.position.y = FOCUS_CALIBRATION_DECK_HEIGHT;
+  root.add(deck);
+  const startX = FOCUS_CALIBRATION_START_X;
+  const hallwayStartX =
+    startX - FOCUS_CALIBRATION_ENTRY_MARGIN - FOCUS_CALIBRATION_BACK_EXTENSION;
+  const endX = startX + FOCUS_CALIBRATION_LENGTH;
+  const hallwayLength = endX - hallwayStartX;
+  const centerX = (hallwayStartX + endX) / 2;
+  const halfWidth = FOCUS_CALIBRATION_HALL_WIDTH / 2;
+
+  const floorMaterial = new THREE.MeshStandardMaterial({
+    color: 0x25363a,
+    roughness: 0.82,
+    metalness: 0.08,
+  });
+  floorMaterial.fog = false;
+  const wallMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe5e9e4,
+    roughness: 0.76,
+    metalness: 0.08,
+  });
+  wallMaterial.fog = false;
+  const ceilingMaterial = new THREE.MeshStandardMaterial({
+    color: 0x5d6a6c,
+    roughness: 0.7,
+    metalness: 0.18,
+  });
+  ceilingMaterial.fog = false;
+  const cyanMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.cyan,
+    emissive: COLORS.cyan,
+    emissiveIntensity: 0.42,
+    roughness: 0.35,
+    metalness: 0.2,
+  });
+  cyanMaterial.fog = false;
+  const redMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.red,
+    emissive: COLORS.red,
+    emissiveIntensity: 0.28,
+    roughness: 0.35,
+    metalness: 0.12,
+  });
+  redMaterial.fog = false;
+  const targetMaterials = [cyanMaterial, redMaterial] as const;
+
+  const floor = new THREE.Mesh(
+    new THREE.BoxGeometry(hallwayLength, 0.08, FOCUS_CALIBRATION_PLATFORM_WIDTH),
+    floorMaterial,
+  );
+  floor.name = "FocusCalibrationFloor";
+  floor.position.set(centerX, 0, 0);
+  floor.receiveShadow = true;
+  deck.add(floor);
+
+  for (const z of [-halfWidth, halfWidth] as const) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(hallwayLength, 4.2, 0.16), wallMaterial);
+    wall.name = "FocusCalibrationWall";
+    wall.position.set(centerX, 2.1, z);
+    wall.castShadow = true;
+    wall.receiveShadow = true;
+    deck.add(wall);
+  }
+  const ceiling = new THREE.Mesh(
+    new THREE.BoxGeometry(hallwayLength, 0.14, FOCUS_CALIBRATION_HALL_WIDTH),
+    ceilingMaterial,
+  );
+  ceiling.name = "FocusCalibrationCeiling";
+  ceiling.position.set(centerX, 4.2, 0);
+  ceiling.receiveShadow = true;
+  deck.add(ceiling);
+
+  const rampMaterial = new THREE.MeshStandardMaterial({
+    color: 0x34484c,
+    roughness: 0.78,
+    metalness: 0.12,
+  });
+  rampMaterial.fog = false;
+  const rampAngle = Math.atan2(FOCUS_CALIBRATION_DECK_HEIGHT, FOCUS_CALIBRATION_RAMP_RUN);
+  const ramp = new THREE.Mesh(
+    new THREE.BoxGeometry(FOCUS_CALIBRATION_RAMP_RUN + 0.12, 0.18, FOCUS_CALIBRATION_RAMP_WIDTH),
+    rampMaterial,
+  );
+  ramp.name = "FocusCalibrationRamp";
+  ramp.userData.physicsIgnore = true;
+  ramp.position.set(
+    startX + FOCUS_CALIBRATION_RAMP_RUN / 2,
+    FOCUS_CALIBRATION_DECK_HEIGHT / 2,
+    FOCUS_CALIBRATION_RAMP_TOP_Z,
+  );
+  ramp.rotation.z = -rampAngle;
+  ramp.castShadow = true;
+  ramp.receiveShadow = true;
+  root.add(ramp);
+
+  for (const z of [-1.9, 1.9] as const) {
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(hallwayLength, 0.035, 0.05), cyanMaterial);
+    strip.name = "FocusCalibrationLightStrip";
+    strip.position.set(centerX, 4.08, z);
+    deck.add(strip);
+  }
+
+  const markerDistances = new Set<number>();
+  for (let distance = 0; distance <= FOCUS_CALIBRATION_LENGTH + 0.001; distance += 1) {
+    markerDistances.add(distance);
+  }
+  markerDistances.add(FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE);
+  markerDistances.add(FOCUS_CALIBRATION_LENGTH);
+  const sortedMarkerDistances = [...markerDistances].sort((left, right) => left - right);
+  for (const distance of sortedMarkerDistances) {
+    const isHyperfocal = Math.abs(distance - FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE) < 0.001;
+    const isDoubleHyperfocal = Math.abs(distance - FOCUS_CALIBRATION_LENGTH) < 0.001;
+    const markerMaterial = isHyperfocal || isDoubleHyperfocal ? redMaterial : cyanMaterial;
+    const marker = new THREE.Mesh(
+      new THREE.BoxGeometry(0.025, 0.022, FOCUS_CALIBRATION_HALL_WIDTH - 0.3),
+      markerMaterial,
+    );
+    marker.name = isHyperfocal
+      ? "FocusCalibrationHyperfocalMarker"
+      : isDoubleHyperfocal
+        ? "FocusCalibrationDoubleHyperfocalMarker"
+        : "FocusCalibrationMeterMarker";
+    marker.position.set(startX + distance, 0.065, 0);
+    deck.add(marker);
+
+    const markerText = isHyperfocal
+      ? `H  ${distance.toFixed(1)}m`
+      : isDoubleHyperfocal
+        ? `2H  ${distance.toFixed(1)}m`
+        : `${distance.toFixed(0)}m`;
+    const label = createLabelSprite(
+      markerText,
+      isHyperfocal || isDoubleHyperfocal ? "#e94136" : "#73dce8",
+    );
+    label.position.set(startX + distance, 0.34, -halfWidth + 0.18);
+    label.scale.set(isHyperfocal || isDoubleHyperfocal ? 0.72 : 0.48, 0.14, 1);
+    deck.add(label);
+    labels.push(label);
+  }
+
+  const targetDistances = [
+    0.75,
+    1.5,
+    2.5,
+    4,
+    6,
+    FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE / 2,
+    FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE,
+    FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE * 1.5,
+    FOCUS_CALIBRATION_LENGTH,
+  ];
+  const targetGeometry = new RoundedBoxGeometry(0.09, 0.62, 0.52, 4, 0.035);
+  const targetDotGeometry = new THREE.CylinderGeometry(0.09, 0.09, 0.025, 20);
+  for (const [index, distance] of targetDistances.entries()) {
+    const target = new THREE.Group();
+    target.name = `FocusCalibrationTarget:${distance.toFixed(2)}m`;
+    target.userData.dofFocusTarget = true;
+    target.position.set(startX + distance, 1.65, index % 2 === 0 ? -1.2 : 1.2);
+    const material = targetMaterials[index % targetMaterials.length] ?? cyanMaterial;
+    const panel = new THREE.Mesh(targetGeometry, material);
+    panel.name = "FocusCalibrationTargetPanel";
+    panel.castShadow = true;
+    panel.receiveShadow = true;
+    target.add(panel);
+    const dot = new THREE.Mesh(targetDotGeometry, material);
+    dot.name = "FocusCalibrationTargetDot";
+    dot.rotation.z = Math.PI / 2;
+    dot.position.x = -0.06;
+    dot.castShadow = true;
+    target.add(dot);
+    deck.add(target);
+
+    const isHyperfocal = Math.abs(distance - FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE) < 0.001;
+    const isDoubleHyperfocal = Math.abs(distance - FOCUS_CALIBRATION_LENGTH) < 0.001;
+    const targetText = isHyperfocal
+      ? "TARGET H"
+      : isDoubleHyperfocal
+        ? "TARGET 2H"
+        : `TARGET ${distance.toFixed(1)}m`;
+    const targetLabel = createLabelSprite(targetText, index % 2 === 0 ? "#73dce8" : "#e94136");
+    targetLabel.position.set(target.position.x, target.position.y + 0.48, target.position.z);
+    targetLabel.scale.set(0.68, 0.16, 1);
+    deck.add(targetLabel);
+    labels.push(targetLabel);
+  }
+
+  const title = createLabelSprite(
+    `FOCUS LAB  ·  H(4mm) ${FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE.toFixed(1)}m  ·  2H ${FOCUS_CALIBRATION_LENGTH.toFixed(1)}m`,
+    "#e94136",
+  );
+  title.position.set(startX + 0.7, 3.72, 0);
+  title.scale.set(1.6, 0.24, 1);
+  deck.add(title);
+  labels.push(title);
+
+  scene.add(root);
+  return { root, labels };
 };
 
 const addDice = (scene: THREE.Scene): void => {
@@ -1390,30 +2422,29 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     emissive: COLORS.cyan,
     emissiveIntensity: 0.28,
   });
-  const glass =
-    quality.glassMode === "physical"
-      ? new THREE.MeshPhysicalMaterial({
-          color: COLORS.glass,
-          roughness: 0.055,
-          metalness: 0,
-          transmission: 0.24,
-          transparent: true,
-          opacity: 0.24,
-          ior: 1.45,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        })
-      : new THREE.MeshStandardMaterial({
-          color: COLORS.glass,
-          roughness: 0.15,
-          metalness: 0.05,
-          transparent: true,
-          opacity: 0.2,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        });
+  const physicalGlassMaterial = new THREE.MeshPhysicalMaterial({
+    color: COLORS.glass,
+    roughness: 0.055,
+    metalness: 0,
+    transmission: 0.24,
+    transparent: true,
+    opacity: 0.24,
+    ior: 1.45,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const simpleGlassMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.glass,
+    roughness: 0.15,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.2,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const glass = quality.glassMode === "physical" ? physicalGlassMaterial : simpleGlassMaterial;
 
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(15.2, 11.6), architecturalWhite);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(17.2, 13.4), architecturalWhite);
   floor.name = "PenthouseFloor";
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = 0;
@@ -1430,7 +2461,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   floorInset.receiveShadow = true;
   shell.add(floorInset);
 
-  const ceiling = new THREE.Mesh(new THREE.BoxGeometry(15.2, 0.34, 11.6), whiteLacquer);
+  const ceiling = new THREE.Mesh(new THREE.BoxGeometry(17.2, 0.34, 13.4), whiteLacquer);
   ceiling.name = "CeilingSlab";
   ceiling.position.y = 5.12;
   ceiling.receiveShadow = true;
@@ -1445,9 +2476,9 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   cantilever.receiveShadow = true;
   shell.add(cantilever);
 
-  for (const x of [-7.45, 7.45]) {
+  for (const x of [-8.45, 8.45]) {
     const sideWall = new THREE.Mesh(
-      new THREE.BoxGeometry(0.34, 5.1, 11.5),
+      new THREE.BoxGeometry(0.34, 5.1, 13.3),
       x < 0 ? architecturalWhite : structuralGray,
     );
     sideWall.name = x < 0 ? "WestStructuralWall" : "EastStructuralWall";
@@ -1468,37 +2499,37 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   shell.add(sculpturalWall);
   const corridor = new THREE.Mesh(new THREE.BoxGeometry(0.05, 3.35, 1.75), charcoal);
   corridor.name = "DarkCorridorInset";
-  corridor.position.set(7.25, 2.15, 2.38);
+  corridor.position.set(8.25, 2.15, 2.38);
   shell.add(corridor);
 
-  const northGlass = new THREE.Mesh(new THREE.PlaneGeometry(14.6, 4.42), glass);
+  const northGlass = new THREE.Mesh(new THREE.PlaneGeometry(16.6, 4.42), glass);
   northGlass.name = "NorthGlazing";
   northGlass.position.set(0, 2.86, -5.62);
   windows.add(northGlass);
-  const eastGlass = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 4.42), glass);
+  const eastGlass = new THREE.Mesh(new THREE.PlaneGeometry(5.8, 4.42), glass);
   eastGlass.name = "EastGlassReturn";
   eastGlass.rotation.y = Math.PI / 2;
-  eastGlass.position.set(6.95, 2.86, -3.05);
+  eastGlass.position.set(7.95, 2.86, -3.05);
   windows.add(eastGlass);
   const mullionMaterial = new THREE.MeshStandardMaterial({
     color: 0x20282b,
     roughness: 0.38,
     metalness: 0.42,
   });
-  for (const x of [-6.25, -3.1, 0, 3.1, 6.25]) {
+  for (const x of [-7.25, -3.6, 0, 3.6, 7.25]) {
     const mullion = new THREE.Mesh(new THREE.BoxGeometry(0.045, 4.6, 0.08), mullionMaterial);
     mullion.name = "NorthMullion";
     mullion.position.set(x, 2.85, -5.54);
     windows.add(mullion);
   }
   const horizontalMullion = new THREE.Mesh(
-    new THREE.BoxGeometry(14.65, 0.045, 0.08),
+    new THREE.BoxGeometry(16.65, 0.045, 0.08),
     mullionMaterial,
   );
   horizontalMullion.name = "NorthMullionHorizontal";
   horizontalMullion.position.set(0, 2.56, -5.54);
   windows.add(horizontalMullion);
-  const sill = new THREE.Mesh(new THREE.BoxGeometry(14.8, 0.22, 0.32), structuralGray);
+  const sill = new THREE.Mesh(new THREE.BoxGeometry(16.8, 0.22, 0.32), structuralGray);
   sill.name = "WindowSill";
   sill.position.set(0, 0.7, -5.5);
   sill.castShadow = true;
@@ -1619,6 +2650,1033 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
       skylineMaterials: [],
     },
     teacherTexture,
+    glassSurfaces: [northGlass, eastGlass],
+    simpleGlassMaterial,
+    physicalGlassMaterial,
+  };
+};
+
+interface GeneratedRoomPalette {
+  readonly label: string;
+  readonly accent: number;
+  readonly secondary: number;
+  readonly surface: number;
+  readonly dark: number;
+  readonly plant: number;
+}
+
+interface GeneratedRoomResult {
+  readonly variant: string;
+}
+
+const GENERATED_ROOM_PALETTES: readonly GeneratedRoomPalette[] = [
+  {
+    label: "Northlight",
+    accent: 0x73dce8,
+    secondary: 0xc9e8e7,
+    surface: 0x263538,
+    dark: 0x172124,
+    plant: 0x5f947b,
+  },
+  {
+    label: "Sunset",
+    accent: 0xe98a67,
+    secondary: 0xf0d1ae,
+    surface: 0x3a2d2d,
+    dark: 0x241b1d,
+    plant: 0x7c8f69,
+  },
+  {
+    label: "Jade study",
+    accent: 0x8bd3a7,
+    secondary: 0xd8e7c9,
+    surface: 0x293a36,
+    dark: 0x192724,
+    plant: 0x6fa67d,
+  },
+  {
+    label: "Cobalt gallery",
+    accent: 0x7ca8e8,
+    secondary: 0xd2d9ec,
+    surface: 0x293445,
+    dark: 0x18212d,
+    plant: 0x739c8d,
+  },
+] as const;
+
+const addGeneratedPlanter = (
+  parent: THREE.Object3D,
+  position: THREE.Vector3,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+): void => {
+  const planter = new THREE.Group();
+  planter.name = "GeneratedPlanter";
+  planter.position.copy(position);
+  planter.rotation.y = random.nextFloat() * Math.PI * 2;
+  const pot = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.22, 0.28, 0.42, 18),
+    new THREE.MeshStandardMaterial({ color: palette.dark, roughness: 0.78 }),
+  );
+  pot.position.y = 0.21;
+  pot.castShadow = true;
+  pot.receiveShadow = true;
+  planter.add(pot);
+  const stem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.05, 0.62, 8),
+    new THREE.MeshStandardMaterial({ color: palette.plant, roughness: 0.82 }),
+  );
+  stem.position.y = 0.66;
+  stem.castShadow = true;
+  planter.add(stem);
+  const leafGeometry = new THREE.IcosahedronGeometry(0.17, 1);
+  const leafMaterial = new THREE.MeshStandardMaterial({
+    color: palette.plant,
+    roughness: 0.7,
+  });
+  const leafCount = 3 + random.nextInt(3);
+  for (let index = 0; index < leafCount; index += 1) {
+    const leaf = new THREE.Mesh(leafGeometry, leafMaterial);
+    leaf.position.set(
+      (random.nextFloat() - 0.5) * 0.28,
+      0.94 + random.nextFloat() * 0.45,
+      (random.nextFloat() - 0.5) * 0.28,
+    );
+    leaf.scale.set(0.58, 1.25 + random.nextFloat() * 0.55, 0.58);
+    leaf.rotation.set(random.nextFloat() * 0.35, random.nextFloat() * Math.PI, 0);
+    leaf.castShadow = true;
+    planter.add(leaf);
+  }
+  parent.add(planter);
+};
+
+const addGeneratedDivider = (
+  parent: THREE.Object3D,
+  position: THREE.Vector3,
+  rotation: number,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+): void => {
+  const divider = new THREE.Group();
+  divider.name = "GeneratedRoomDivider";
+  divider.position.copy(position);
+  divider.rotation.y = rotation;
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: palette.secondary,
+    roughness: 0.38,
+    metalness: 0.34,
+  });
+  const lightMaterial = new THREE.MeshStandardMaterial({
+    color: palette.accent,
+    emissive: palette.accent,
+    emissiveIntensity: 0.24,
+    roughness: 0.34,
+    metalness: 0.12,
+  });
+  const width = 1.25 + random.nextFloat() * 0.72;
+  const height = 2.25 + random.nextFloat() * 0.8;
+  const slatCount = 3 + random.nextInt(3);
+  const slatSpacing = width / Math.max(1, slatCount - 1);
+  for (let index = 0; index < slatCount; index += 1) {
+    const slat = new THREE.Mesh(
+      new RoundedBoxGeometry(0.075, height, 0.12, 3, 0.02),
+      frameMaterial,
+    );
+    slat.position.set((index - (slatCount - 1) / 2) * slatSpacing, height / 2, 0);
+    slat.castShadow = true;
+    divider.add(slat);
+  }
+  const header = new THREE.Mesh(
+    new RoundedBoxGeometry(width + 0.12, 0.08, 0.15, 3, 0.02),
+    lightMaterial,
+  );
+  header.position.y = height + 0.045;
+  header.castShadow = true;
+  divider.add(header);
+  parent.add(divider);
+};
+
+const addGeneratedWallPanel = (
+  parent: THREE.Object3D,
+  position: THREE.Vector3,
+  rotation: number,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+): void => {
+  const panel = new THREE.Group();
+  panel.name = "GeneratedWallPanel";
+  panel.position.copy(position);
+  panel.rotation.y = rotation;
+  const width = 0.86 + random.nextFloat() * 0.78;
+  const height = 0.92 + random.nextFloat() * 0.78;
+  const panelMaterial = new THREE.MeshStandardMaterial({
+    color: palette.surface,
+    roughness: 0.65,
+  });
+  const accentMaterial = new THREE.MeshStandardMaterial({
+    color: palette.accent,
+    emissive: palette.accent,
+    emissiveIntensity: 0.19,
+    roughness: 0.38,
+    metalness: 0.2,
+  });
+  const face = new THREE.Mesh(new RoundedBoxGeometry(width, height, 0.075, 4, 0.04), panelMaterial);
+  face.position.y = 1.55 + height / 2;
+  face.castShadow = true;
+  panel.add(face);
+  const barCount = 2 + random.nextInt(3);
+  for (let index = 0; index < barCount; index += 1) {
+    const bar = new THREE.Mesh(
+      new RoundedBoxGeometry(width * (0.26 + random.nextFloat() * 0.34), 0.035, 0.09, 3, 0.012),
+      accentMaterial,
+    );
+    bar.position.set(
+      (random.nextFloat() - 0.5) * width * 0.35,
+      1.7 + random.nextFloat() * Math.max(0.1, height - 0.22),
+      0.055,
+    );
+    bar.rotation.z = (random.nextFloat() - 0.5) * 0.42;
+    bar.castShadow = true;
+    panel.add(bar);
+  }
+  parent.add(panel);
+};
+
+const addGeneratedLightBar = (
+  parent: THREE.Object3D,
+  position: THREE.Vector3,
+  rotation: number,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+): void => {
+  const width = 1.2 + random.nextFloat() * 1.7;
+  const fixture = new THREE.Mesh(
+    new RoundedBoxGeometry(width, 0.06, 0.075, 3, 0.018),
+    new THREE.MeshStandardMaterial({
+      color: palette.accent,
+      emissive: palette.accent,
+      emissiveIntensity: 0.42,
+      roughness: 0.3,
+      metalness: 0.18,
+    }),
+  );
+  fixture.name = "GeneratedLightBar";
+  fixture.position.copy(position);
+  fixture.rotation.y = rotation;
+  fixture.castShadow = true;
+  parent.add(fixture);
+};
+
+const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoomResult => {
+  const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
+  const random = createSeededRandom(normalizedSeed);
+  const palette =
+    GENERATED_ROOM_PALETTES[random.nextInt(GENERATED_ROOM_PALETTES.length)] ??
+    GENERATED_ROOM_PALETTES[0];
+  if (palette === undefined) {
+    throw new Error("Generated room palette is empty");
+  }
+  const root = new THREE.Group();
+  root.name = "GeneratedRoomRoot";
+  root.userData = { roomSeed: normalizedSeed, roomVariant: palette.label };
+
+  const floorWidth = 3.8 + random.nextFloat() * 1.8;
+  const floorDepth = 3.15 + random.nextFloat() * 1.6;
+  const floorMaterial = new THREE.MeshStandardMaterial({
+    color: palette.surface,
+    roughness: 0.88,
+  });
+  const floorPanel = new THREE.Mesh(
+    new RoundedBoxGeometry(floorWidth, 0.035, floorDepth, 5, 0.18),
+    floorMaterial,
+  );
+  floorPanel.name = "GeneratedFloorPanel";
+  floorPanel.position.y = 0.052;
+  floorPanel.rotation.y = (random.nextFloat() - 0.5) * 0.12;
+  floorPanel.receiveShadow = true;
+  root.add(floorPanel);
+
+  const floorAccentMaterial = new THREE.MeshStandardMaterial({
+    color: palette.accent,
+    emissive: palette.accent,
+    emissiveIntensity: 0.16,
+    roughness: 0.4,
+    metalness: 0.18,
+  });
+  const floorAccentWidth = Math.max(2.4, floorWidth - 0.2);
+  const floorAccentDepth = Math.max(1.8, floorDepth - 0.2);
+  for (const [x, z, width, depth] of [
+    [0, -floorAccentDepth / 2, floorAccentWidth, 0.025],
+    [0, floorAccentDepth / 2, floorAccentWidth, 0.025],
+    [-floorAccentWidth / 2, 0, 0.025, floorAccentDepth],
+    [floorAccentWidth / 2, 0, 0.025, floorAccentDepth],
+  ] as const) {
+    const strip = new THREE.Mesh(
+      new RoundedBoxGeometry(width, 0.018, depth, 3, 0.006),
+      floorAccentMaterial,
+    );
+    strip.position.set(x, 0.086, z);
+    strip.receiveShadow = true;
+    root.add(strip);
+  }
+
+  const ceilingLightCount = 2 + random.nextInt(3);
+  for (let index = 0; index < ceilingLightCount; index += 1) {
+    const x = -3.2 + random.nextFloat() * 6.4;
+    const z = -4.35 + random.nextFloat() * 4.2;
+    addGeneratedLightBar(
+      root,
+      new THREE.Vector3(x, 4.5 + random.nextFloat() * 0.24, z),
+      random.nextFloat() > 0.5 ? 0 : Math.PI / 2,
+      palette,
+      random,
+    );
+  }
+
+  const wallSlots = [
+    { position: new THREE.Vector3(-7.8, 0, -3.4), rotation: Math.PI / 2 },
+    { position: new THREE.Vector3(-7.8, 0, 0.4), rotation: Math.PI / 2 },
+    { position: new THREE.Vector3(-7.8, 0, 3.7), rotation: Math.PI / 2 },
+    { position: new THREE.Vector3(7.8, 0, -3.7), rotation: -Math.PI / 2 },
+    { position: new THREE.Vector3(7.8, 0, -0.1), rotation: -Math.PI / 2 },
+    { position: new THREE.Vector3(7.8, 0, 3.3), rotation: -Math.PI / 2 },
+    { position: new THREE.Vector3(-4.2, 0, -5.36), rotation: 0 },
+    { position: new THREE.Vector3(3.6, 0, -5.36), rotation: 0 },
+  ] as const;
+  wallSlots.forEach((slot, index) => {
+    if (random.nextFloat() < 0.16) {
+      return;
+    }
+    const position = slot.position.clone();
+    position.z += (random.nextFloat() - 0.5) * (Math.abs(slot.position.x) > 7 ? 0.35 : 0.2);
+    position.x += Math.abs(slot.position.x) > 7 ? 0 : (random.nextFloat() - 0.5) * 0.32;
+    const kind = (random.nextInt(4) + index) % 4;
+    if (kind === 0) {
+      addGeneratedPlanter(root, new THREE.Vector3(position.x, 0, position.z), palette, random);
+    } else if (kind === 1) {
+      addGeneratedDivider(
+        root,
+        new THREE.Vector3(position.x, 0, position.z),
+        slot.rotation,
+        palette,
+        random,
+      );
+    } else if (kind === 2) {
+      addGeneratedWallPanel(root, position, slot.rotation, palette, random);
+    } else {
+      addGeneratedLightBar(
+        root,
+        new THREE.Vector3(position.x, 3.66 + random.nextFloat() * 0.44, position.z),
+        slot.rotation,
+        palette,
+        random,
+      );
+    }
+  });
+
+  const plinth = new THREE.Mesh(
+    new RoundedBoxGeometry(0.85 + random.nextFloat() * 0.42, 0.6, 0.85, 4, 0.08),
+    new THREE.MeshStandardMaterial({ color: palette.secondary, roughness: 0.46, metalness: 0.08 }),
+  );
+  plinth.name = "GeneratedSculpturePlinth";
+  plinth.position.set(random.nextFloat() > 0.5 ? -5.7 : 5.7, 0.3, -0.6 + random.nextFloat() * 2.2);
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
+  root.add(plinth);
+  const sculpture = new THREE.Mesh(
+    new THREE.TorusKnotGeometry(0.22 + random.nextFloat() * 0.1, 0.05, 48, 10),
+    new THREE.MeshStandardMaterial({
+      color: palette.accent,
+      emissive: palette.accent,
+      emissiveIntensity: 0.2,
+      roughness: 0.3,
+      metalness: 0.62,
+    }),
+  );
+  sculpture.name = "GeneratedSculpture";
+  sculpture.position.y = 0.72;
+  sculpture.rotation.set(random.nextFloat() * 0.6, random.nextFloat() * Math.PI, 0);
+  sculpture.castShadow = true;
+  plinth.add(sculpture);
+
+  scene.add(root);
+  return { variant: palette.label };
+};
+
+interface ExplorationZoneStyle {
+  readonly label: string;
+  readonly ground: number;
+  readonly path: number;
+  readonly prop: number;
+  readonly accent: number;
+}
+
+interface ExplorationWorld {
+  readonly update: (position: THREE.Vector3) => void;
+  readonly getArea: () => string;
+  readonly getLoadedChunkCount: () => number;
+  readonly getPhysicsBoxes: () => readonly PhysicsBox[];
+  readonly getPhysicsVersion: () => number;
+  readonly dispose: () => void;
+}
+
+interface ExplorationChunk {
+  readonly root: THREE.Group;
+  readonly physicsBoxes: readonly PhysicsBox[];
+}
+
+interface ExplorationBuildingSpec {
+  readonly x: number;
+  readonly z: number;
+  readonly width: number;
+  readonly height: number;
+  readonly depth: number;
+  readonly rotation: number;
+}
+
+interface ExplorationWindowSpec {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly width: number;
+  readonly rotation: number;
+}
+
+const EXPLORATION_ZONE_STYLES: readonly ExplorationZoneStyle[] = [
+  { label: "South courtyard", ground: 0x596866, path: 0x344447, prop: 0x91aaa0, accent: 0xe98a67 },
+  { label: "West tea garden", ground: 0x566d62, path: 0x30463f, prop: 0x9bb78e, accent: 0x8bd3a7 },
+  {
+    label: "East practice court",
+    ground: 0x5c687a,
+    path: 0x354252,
+    prop: 0xb4c2d8,
+    accent: 0x7ca8e8,
+  },
+  { label: "North skybridge", ground: 0x536b74, path: 0x304a54, prop: 0x9dc6ce, accent: 0x73dce8 },
+] as const;
+
+const addExplorationGateway = (scene: THREE.Scene): void => {
+  const gateway = new THREE.Group();
+  gateway.name = "ExplorationGateway";
+  const frameMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.whiteLacquer,
+    roughness: 0.34,
+    metalness: 0.22,
+  });
+  const accentMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.cyan,
+    emissive: COLORS.cyan,
+    emissiveIntensity: 0.44,
+    roughness: 0.3,
+    metalness: 0.18,
+  });
+  for (const x of [-1.65, 1.65] as const) {
+    const post = new THREE.Mesh(new RoundedBoxGeometry(0.14, 2.8, 0.14, 4, 0.035), frameMaterial);
+    post.position.set(x, 1.4, 7.15);
+    post.castShadow = true;
+    gateway.add(post);
+  }
+  const beam = new THREE.Mesh(new RoundedBoxGeometry(3.45, 0.16, 0.16, 4, 0.04), frameMaterial);
+  beam.position.set(0, 2.78, 7.15);
+  beam.castShadow = true;
+  gateway.add(beam);
+  const beamLight = new THREE.Mesh(
+    new RoundedBoxGeometry(2.9, 0.055, 0.08, 3, 0.02),
+    accentMaterial,
+  );
+  beamLight.position.set(0, 2.67, 7.15);
+  beamLight.castShadow = true;
+  gateway.add(beamLight);
+  const threshold = new THREE.Mesh(
+    new RoundedBoxGeometry(3.1, 0.045, 0.34, 4, 0.025),
+    accentMaterial,
+  );
+  threshold.position.set(0, 0.08, 7.15);
+  threshold.receiveShadow = true;
+  gateway.add(threshold);
+  const arrowMaterial = new THREE.MeshStandardMaterial({
+    color: COLORS.red,
+    emissive: COLORS.red,
+    emissiveIntensity: 0.22,
+    roughness: 0.34,
+  });
+  for (const z of [7.68, 8.26, 8.84] as const) {
+    const marker = new THREE.Mesh(new RoundedBoxGeometry(0.8, 0.025, 0.11, 3, 0.01), arrowMaterial);
+    marker.position.set(0, 0.08, z);
+    marker.receiveShadow = true;
+    gateway.add(marker);
+  }
+  scene.add(gateway);
+};
+
+export const createExplorationWorld = (
+  scene: THREE.Scene,
+  roomSeed: string,
+  onAreaChange?: (area: string) => void,
+): ExplorationWorld => {
+  const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
+  const root = new THREE.Group();
+  root.name = "ExplorationWorldRoot";
+  root.userData = { roomSeed: normalizedSeed, streaming: true };
+  scene.add(root);
+
+  const groundGeometry = new THREE.BoxGeometry(
+    EXPLORATION_CHUNK_SIZE - 0.08,
+    0.1,
+    EXPLORATION_CHUNK_SIZE - 0.08,
+  );
+  const pathGeometry = new THREE.BoxGeometry(EXPLORATION_CHUNK_SIZE * 0.84, 0.026, 0.9);
+  const propGeometry = new RoundedBoxGeometry(0.28, 1, 0.28, 3, 0.04);
+  const beaconGeometry = new RoundedBoxGeometry(0.12, 0.12, 0.12, 3, 0.02);
+  const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const windowGeometry = new THREE.BoxGeometry(0.56, 0.055, 0.045);
+  const bridgeGeometry = new RoundedBoxGeometry(EXPLORATION_CHUNK_SIZE * 0.86, 0.14, 0.2, 3, 0.035);
+  const groundMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) => new THREE.MeshStandardMaterial({ color: style.ground, roughness: 0.9 }),
+  );
+  const pathMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) => new THREE.MeshStandardMaterial({ color: style.path, roughness: 0.82 }),
+  );
+  const propMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({
+        color: style.prop,
+        roughness: 0.66,
+        metalness: 0.05,
+      }),
+  );
+  const accentMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({
+        color: style.accent,
+        emissive: style.accent,
+        emissiveIntensity: 0.28,
+        roughness: 0.35,
+        metalness: 0.16,
+      }),
+  );
+  const buildingMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({ color: style.prop, roughness: 0.78, metalness: 0.08 }),
+  );
+  const windowMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({
+        color: style.accent,
+        emissive: style.accent,
+        emissiveIntensity: 0.2,
+        roughness: 0.32,
+        metalness: 0.18,
+      }),
+  );
+  const bridgeMaterials = EXPLORATION_ZONE_STYLES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({
+        color: style.path,
+        roughness: 0.48,
+        metalness: 0.44,
+      }),
+  );
+  const activeChunks = new Map<string, ExplorationChunk>();
+  let physicsVersion = 0;
+  let centerChunkX = Number.NaN;
+  let centerChunkZ = Number.NaN;
+  let currentArea = "Penthouse";
+
+  const addClippedMeshes = (
+    parent: THREE.Object3D,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material | undefined,
+    rect: ExplorationRect,
+    baseWidth: number,
+    baseDepth: number,
+    y: number,
+    name: string,
+    receiveShadow: boolean,
+  ): void => {
+    if (material === undefined) {
+      return;
+    }
+    for (const piece of clipExplorationRectAroundPenthouse(rect)) {
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = name;
+      mesh.position.set((piece.minX + piece.maxX) / 2, y, (piece.minZ + piece.maxZ) / 2);
+      mesh.scale.set(
+        (piece.maxX - piece.minX) / baseWidth,
+        1,
+        (piece.maxZ - piece.minZ) / baseDepth,
+      );
+      mesh.receiveShadow = receiveShadow;
+      parent.add(mesh);
+    }
+  };
+
+  const chunkCoordinate = (value: number): number =>
+    Math.floor((value + EXPLORATION_CHUNK_SIZE / 2) / EXPLORATION_CHUNK_SIZE);
+  const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
+  const describeArea = (position: THREE.Vector3): string => {
+    if (Math.abs(position.x) <= 8.9 && position.z >= -7.2 && position.z <= 6.9) {
+      return "Penthouse";
+    }
+    if (position.z > 7.2 && Math.abs(position.x) < 15) {
+      return "South courtyard";
+    }
+    if (position.x < -8.9) {
+      return "West tea garden";
+    }
+    if (position.x > 8.9) {
+      return "East practice court";
+    }
+    if (position.z < -7.2) {
+      return "North skybridge";
+    }
+    return "Exploration grounds";
+  };
+
+  const createChunk = (chunkX: number, chunkZ: number): ExplorationChunk => {
+    const random = createSeededRandom(
+      `${normalizedSeed}|exploration|${String(chunkX)}|${String(chunkZ)}`,
+    );
+    const styleIndex = random.nextInt(EXPLORATION_ZONE_STYLES.length);
+    const style = EXPLORATION_ZONE_STYLES[styleIndex] ?? EXPLORATION_ZONE_STYLES[0];
+    if (style === undefined) {
+      throw new Error("Exploration zone styles are empty");
+    }
+    const chunk = new THREE.Group();
+    const physicsBoxes: PhysicsBox[] = [];
+    chunk.name = `ExplorationChunk:${String(chunkX)}:${String(chunkZ)}`;
+    chunk.userData = {
+      chunkX,
+      chunkZ,
+      roomSeed: normalizedSeed,
+      area: style.label,
+    };
+    const originX = chunkX * EXPLORATION_CHUNK_SIZE;
+    const originZ = chunkZ * EXPLORATION_CHUNK_SIZE;
+    const chunkHalfSize = EXPLORATION_CHUNK_SIZE / 2 - 0.04;
+    addClippedMeshes(
+      chunk,
+      groundGeometry,
+      groundMaterials[styleIndex],
+      {
+        minX: originX - chunkHalfSize,
+        maxX: originX + chunkHalfSize,
+        minZ: originZ - chunkHalfSize,
+        maxZ: originZ + chunkHalfSize,
+      },
+      EXPLORATION_CHUNK_SIZE - 0.08,
+      EXPLORATION_CHUNK_SIZE - 0.08,
+      -0.06,
+      "CityGround",
+      true,
+    );
+    addClippedMeshes(
+      chunk,
+      pathGeometry,
+      pathMaterials[styleIndex],
+      {
+        minX: originX - EXPLORATION_CHUNK_SIZE * 0.42,
+        maxX: originX + EXPLORATION_CHUNK_SIZE * 0.42,
+        minZ: originZ - 0.45,
+        maxZ: originZ + 0.45,
+      },
+      EXPLORATION_CHUNK_SIZE * 0.84,
+      0.9,
+      0.012,
+      "CityGridPath",
+      true,
+    );
+    // Keep a cross-city route at every chunk seam. The buildings and props
+    // vary by seed, but the two orthogonal routes remain continuous so a
+    // player can cross from one streamed block into the next without hitting
+    // a dead-end caused by a random local road orientation.
+    addClippedMeshes(
+      chunk,
+      pathGeometry,
+      pathMaterials[styleIndex],
+      {
+        minX: originX - 0.45,
+        maxX: originX + 0.45,
+        minZ: originZ - EXPLORATION_CHUNK_SIZE * 0.42,
+        maxZ: originZ + EXPLORATION_CHUNK_SIZE * 0.42,
+      },
+      0.9,
+      EXPLORATION_CHUNK_SIZE * 0.84,
+      0.013,
+      "CityGridCrossPath",
+      true,
+    );
+
+    const buildingCount = 1 + random.nextInt(3);
+    const buildingSpecs: ExplorationBuildingSpec[] = [];
+    for (let index = 0; index < buildingCount; index += 1) {
+      const edge = random.nextInt(4);
+      const edgeOffset = (random.nextFloat() - 0.5) * 2.3;
+      const x =
+        edge === 0
+          ? originX - 2.45 + edgeOffset
+          : edge === 1
+            ? originX + 2.45 + edgeOffset
+            : originX + edgeOffset;
+      const z =
+        edge === 2
+          ? originZ - 2.45 + edgeOffset
+          : edge === 3
+            ? originZ + 2.45 + edgeOffset
+            : originZ + edgeOffset;
+      const width = 1.15 + random.nextFloat() * 1.55;
+      const height = 1.7 + random.nextFloat() * 5.2;
+      const depth = 1.15 + random.nextFloat() * 1.55;
+      const rotation = random.nextInt(4) * (Math.PI / 2);
+      const swapsAxes = Math.abs(Math.sin(rotation)) > 0.5;
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: x - (swapsAxes ? depth : width) / 2,
+          maxX: x + (swapsAxes ? depth : width) / 2,
+          minZ: z - (swapsAxes ? width : depth) / 2,
+          maxZ: z + (swapsAxes ? width : depth) / 2,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: x - (swapsAxes ? depth : width) / 2,
+          maxX: x + (swapsAxes ? depth : width) / 2,
+          minZ: z - (swapsAxes ? width : depth) / 2,
+          maxZ: z + (swapsAxes ? width : depth) / 2,
+        })
+      ) {
+        continue;
+      }
+      buildingSpecs.push({ x, z, width, height, depth, rotation });
+      physicsBoxes.push({
+        center: { x, y: height / 2, z },
+        halfExtents: { x: width / 2, y: height / 2, z: depth / 2 },
+        rotationY: rotation,
+      });
+    }
+    const matrix = new THREE.Matrix4();
+    const position = new THREE.Vector3();
+    const rotation = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    const yAxis = new THREE.Vector3(0, 1, 0);
+    if (buildingSpecs.length > 0) {
+      const buildings = new THREE.InstancedMesh(
+        buildingGeometry,
+        buildingMaterials[styleIndex],
+        buildingSpecs.length,
+      );
+      buildings.name = "CityBlockBuildingInstances";
+      buildings.castShadow = true;
+      buildings.receiveShadow = true;
+      buildingSpecs.forEach((building, index) => {
+        position.set(building.x, building.height / 2, building.z);
+        rotation.setFromAxisAngle(yAxis, building.rotation);
+        scale.set(building.width, building.height, building.depth);
+        matrix.compose(position, rotation, scale);
+        buildings.setMatrixAt(index, matrix);
+      });
+      buildings.instanceMatrix.needsUpdate = true;
+      buildings.computeBoundingSphere();
+      chunk.add(buildings);
+    }
+
+    const windowPlacements: ExplorationWindowSpec[] = [];
+    for (const building of buildingSpecs) {
+      const rows = Math.min(5, Math.max(2, Math.floor(building.height / 1.05)));
+      const frontOffset = building.depth / 2 + 0.035;
+      const offsetX = Math.sin(building.rotation) * frontOffset;
+      const offsetZ = Math.cos(building.rotation) * frontOffset;
+      for (let row = 0; row < rows; row += 1) {
+        const windowWidth = Math.max(0.28, building.width * 0.42);
+        const swapsAxes = Math.abs(Math.sin(building.rotation)) > 0.5;
+        const halfWidth = swapsAxes ? 0.0225 : 0.28 * windowWidth;
+        const halfDepth = swapsAxes ? 0.28 * windowWidth : 0.0225;
+        const windowX = building.x + offsetX;
+        const windowZ = building.z + offsetZ;
+        if (
+          !isExplorationRectOutsidePenthouse({
+            minX: windowX - halfWidth,
+            maxX: windowX + halfWidth,
+            minZ: windowZ - halfDepth,
+            maxZ: windowZ + halfDepth,
+          })
+        ) {
+          continue;
+        }
+        windowPlacements.push({
+          x: windowX,
+          y: 0.75 + row * 0.96,
+          z: windowZ,
+          width: windowWidth,
+          rotation: building.rotation,
+        });
+      }
+    }
+    if (windowPlacements.length > 0) {
+      const windows = new THREE.InstancedMesh(
+        windowGeometry,
+        windowMaterials[styleIndex],
+        windowPlacements.length,
+      );
+      windows.name = "CityBlockWindowInstances";
+      windows.castShadow = true;
+      windowPlacements.forEach((window, index) => {
+        position.set(window.x, window.y, window.z);
+        rotation.setFromAxisAngle(yAxis, window.rotation);
+        scale.set(window.width, 1, 1);
+        matrix.compose(position, rotation, scale);
+        windows.setMatrixAt(index, matrix);
+      });
+      windows.instanceMatrix.needsUpdate = true;
+      windows.computeBoundingSphere();
+      chunk.add(windows);
+    }
+
+    if (random.nextFloat() < 0.38) {
+      const bridgeRotation = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
+      const bridgeLength = EXPLORATION_CHUNK_SIZE * 0.86;
+      const bridgeHalfWidth = bridgeRotation === 0 ? bridgeLength / 2 : 0.1;
+      const bridgeHalfDepth = bridgeRotation === 0 ? 0.1 : bridgeLength / 2;
+      const bridgeX = originX;
+      const bridgeZ = originZ;
+      if (
+        isExplorationRectOutsidePenthouse({
+          minX: bridgeX - bridgeHalfWidth,
+          maxX: bridgeX + bridgeHalfWidth,
+          minZ: bridgeZ - bridgeHalfDepth,
+          maxZ: bridgeZ + bridgeHalfDepth,
+        }) &&
+        isExplorationRectOutsideFocusCalibrationRamp({
+          minX: bridgeX - bridgeHalfWidth,
+          maxX: bridgeX + bridgeHalfWidth,
+          minZ: bridgeZ - bridgeHalfDepth,
+          maxZ: bridgeZ + bridgeHalfDepth,
+        })
+      ) {
+        const bridge = new THREE.Mesh(bridgeGeometry, bridgeMaterials[styleIndex]);
+        bridge.name = "SkybridgeSpan";
+        bridge.position.set(originX, 3.2 + random.nextFloat() * 2.2, originZ);
+        bridge.rotation.y = bridgeRotation;
+        bridge.castShadow = true;
+        bridge.receiveShadow = true;
+        chunk.add(bridge);
+        physicsBoxes.push({
+          center: { x: originX, y: bridge.position.y, z: originZ },
+          halfExtents: { x: bridgeLength / 2, y: 0.07, z: 0.1 },
+          rotationY: bridgeRotation,
+        });
+      }
+    }
+
+    const propCount = 3 + random.nextInt(5);
+    const propMatrices: THREE.Matrix4[] = [];
+    for (let index = 0; index < propCount; index += 1) {
+      position.set(
+        originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4),
+        0.4 + random.nextFloat() * 0.8,
+        originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4),
+      );
+      const rotationY = random.nextFloat() * Math.PI * 2;
+      rotation.setFromAxisAngle(yAxis, rotationY);
+      scale.set(
+        0.65 + random.nextFloat() * 1.25,
+        0.65 + random.nextFloat() * 2.2,
+        0.65 + random.nextFloat() * 1.25,
+      );
+      const halfExtent = 0.14 * Math.max(scale.x, scale.z);
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        })
+      ) {
+        continue;
+      }
+      matrix.compose(position, rotation, scale);
+      propMatrices.push(matrix.clone());
+      physicsBoxes.push({
+        center: { x: position.x, y: position.y, z: position.z },
+        halfExtents: { x: scale.x * 0.14, y: scale.y * 0.5, z: scale.z * 0.14 },
+        rotationY,
+      });
+    }
+    if (propMatrices.length > 0) {
+      const props = new THREE.InstancedMesh(
+        propGeometry,
+        propMaterials[styleIndex],
+        propMatrices.length,
+      );
+      props.name = "ExplorationPropInstances";
+      props.castShadow = true;
+      props.receiveShadow = true;
+      propMatrices.forEach((propMatrix, index) => {
+        props.setMatrixAt(index, propMatrix);
+      });
+      props.instanceMatrix.needsUpdate = true;
+      props.computeBoundingSphere();
+      chunk.add(props);
+    }
+
+    const beaconCount = 2 + random.nextInt(3);
+    const beaconMatrices: THREE.Matrix4[] = [];
+    const beaconScale = new THREE.Vector3(1, 1, 1);
+    rotation.identity();
+    for (let index = 0; index < beaconCount; index += 1) {
+      position.set(
+        originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2),
+        1.5 + random.nextFloat() * 1.8,
+        originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2),
+      );
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - 0.06,
+          maxX: position.x + 0.06,
+          minZ: position.z - 0.06,
+          maxZ: position.z + 0.06,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - 0.06,
+          maxX: position.x + 0.06,
+          minZ: position.z - 0.06,
+          maxZ: position.z + 0.06,
+        })
+      ) {
+        continue;
+      }
+      matrix.compose(position, rotation, beaconScale);
+      beaconMatrices.push(matrix.clone());
+    }
+    if (beaconMatrices.length > 0) {
+      const beacons = new THREE.InstancedMesh(
+        beaconGeometry,
+        accentMaterials[styleIndex],
+        beaconMatrices.length,
+      );
+      beacons.name = "ExplorationBeaconInstances";
+      beacons.castShadow = true;
+      beaconMatrices.forEach((beaconMatrix, index) => {
+        beacons.setMatrixAt(index, beaconMatrix);
+      });
+      beacons.instanceMatrix.needsUpdate = true;
+      beacons.computeBoundingSphere();
+      chunk.add(beacons);
+    }
+    return { root: chunk, physicsBoxes };
+  };
+
+  const disposeChunk = (chunk: THREE.Group): void => {
+    // InstancedMesh owns a separate instance-matrix GPU buffer even when its
+    // base geometry/material is shared by every chunk. Release that buffer at
+    // full scene teardown instead of waiting for an unpredictable garbage-
+    // collection pass.
+    chunk.traverse((object) => {
+      if (object instanceof THREE.InstancedMesh) {
+        object.dispose();
+      }
+    });
+  };
+
+  const update = (position: THREE.Vector3): void => {
+    const nextArea = describeArea(position);
+    const nextChunkX = chunkCoordinate(position.x);
+    const nextChunkZ = chunkCoordinate(position.z);
+    if (nextChunkX !== centerChunkX || nextChunkZ !== centerChunkZ) {
+      centerChunkX = nextChunkX;
+      centerChunkZ = nextChunkZ;
+      let physicsChanged = false;
+      // Exploration is an append-only generated map. Keep every chunk once it
+      // has entered the lookahead window so the room can show city scenery
+      // through its windows before the player leaves, and returning to a
+      // neighborhood never regenerates or unloads it. The room seed and chunk
+      // coordinates remain each chunk's identity.
+      for (
+        let offsetX = -EXPLORATION_CHUNK_RADIUS;
+        offsetX <= EXPLORATION_CHUNK_RADIUS;
+        offsetX += 1
+      ) {
+        for (
+          let offsetZ = -EXPLORATION_CHUNK_RADIUS;
+          offsetZ <= EXPLORATION_CHUNK_RADIUS;
+          offsetZ += 1
+        ) {
+          const chunkX = centerChunkX + offsetX;
+          const chunkZ = centerChunkZ + offsetZ;
+          const centerX = chunkX * EXPLORATION_CHUNK_SIZE;
+          const centerZ = chunkZ * EXPLORATION_CHUNK_SIZE;
+          if (
+            centerX < WORLD_BOUNDS.minX - EXPLORATION_CHUNK_SIZE ||
+            centerX > WORLD_BOUNDS.maxX + EXPLORATION_CHUNK_SIZE ||
+            centerZ < WORLD_BOUNDS.minZ - EXPLORATION_CHUNK_SIZE ||
+            centerZ > WORLD_BOUNDS.maxZ + EXPLORATION_CHUNK_SIZE
+          ) {
+            continue;
+          }
+          const key = chunkKey(chunkX, chunkZ);
+          if (!activeChunks.has(key)) {
+            const chunk = createChunk(chunkX, chunkZ);
+            activeChunks.set(key, chunk);
+            root.add(chunk.root);
+            physicsChanged = true;
+          }
+        }
+      }
+      if (physicsChanged) {
+        physicsVersion += 1;
+      }
+    }
+    if (nextArea !== currentArea) {
+      currentArea = nextArea;
+      onAreaChange?.(currentArea);
+    }
+  };
+
+  const dispose = (): void => {
+    root.removeFromParent();
+    for (const chunk of activeChunks.values()) {
+      disposeChunk(chunk.root);
+    }
+    activeChunks.clear();
+    groundGeometry.dispose();
+    pathGeometry.dispose();
+    propGeometry.dispose();
+    beaconGeometry.dispose();
+    buildingGeometry.dispose();
+    windowGeometry.dispose();
+    bridgeGeometry.dispose();
+    for (const material of [
+      ...groundMaterials,
+      ...pathMaterials,
+      ...propMaterials,
+      ...accentMaterials,
+      ...buildingMaterials,
+      ...windowMaterials,
+      ...bridgeMaterials,
+    ]) {
+      material.dispose();
+    }
+  };
+
+  update(new THREE.Vector3(0, 0, 0));
+  onAreaChange?.(currentArea);
+  return {
+    update,
+    getArea: () => currentArea,
+    getLoadedChunkCount: () => activeChunks.size,
+    getPhysicsBoxes: () => {
+      const boxes: PhysicsBox[] = [];
+      for (const chunk of activeChunks.values()) {
+        boxes.push(...chunk.physicsBoxes);
+      }
+      return boxes;
+    },
+    getPhysicsVersion: () => physicsVersion,
+    dispose,
   };
 };
 
@@ -1723,6 +3781,17 @@ const isDofIgnored = (object: THREE.Object3D): boolean => {
   return false;
 };
 
+const isDofFocusTarget = (object: THREE.Object3D): boolean => {
+  let current: THREE.Object3D | null = object;
+  while (current !== null) {
+    if (current.userData.dofFocusTarget === true) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+};
+
 const setCameraPreset = (
   camera: THREE.PerspectiveCamera,
   controls: OrbitControls,
@@ -1755,19 +3824,29 @@ const toneMapperName = (toneMapping: THREE.ToneMapping): VisualToneMapper => {
 };
 
 const disposeObject = (object: THREE.Object3D): void => {
+  const geometries = new Set<{ readonly dispose: () => void }>();
+  const materials = new Set<THREE.Material>();
   object.traverse((child) => {
     const renderable = child as unknown as {
       readonly geometry?: { readonly dispose: () => void };
       readonly material?: THREE.Material | readonly THREE.Material[];
     };
-    renderable.geometry?.dispose();
+    if (renderable.geometry !== undefined) {
+      geometries.add(renderable.geometry);
+    }
     const material = renderable.material;
-    const materials: readonly THREE.Material[] =
+    const entries: readonly THREE.Material[] =
       material === undefined ? [] : material instanceof THREE.Material ? [material] : material;
-    for (const entry of materials) {
-      entry.dispose();
+    for (const entry of entries) {
+      materials.add(entry);
     }
   });
+  for (const geometry of geometries) {
+    geometry.dispose();
+  }
+  for (const material of materials) {
+    material.dispose();
+  }
 };
 
 export const createMahjongTableScene = (
@@ -1775,17 +3854,33 @@ export const createMahjongTableScene = (
   initialView: SceneView = "seat",
   options: MahjongTableSceneOptions = {},
 ): MahjongTableMount => {
-  const quality = resolveQuality(options.quality);
+  const debugEnabled = options.debug === true;
+  const roomSeed = normalizeVisualRoomSeed(options.roomSeed);
+  const visualCameraPresets = createVisualCameraPresets();
+  const sceneStateStorage = getVisualSceneStateStorage();
+  const persistedSceneState = readVisualSceneState(sceneStateStorage, roomSeed);
+  const debugPreferencesStorage = getVisualDebugPreferencesStorage();
+  const persistedDebugPreferences = debugEnabled
+    ? readVisualDebugPreferences(debugPreferencesStorage)
+    : null;
+  const persistedQuality = persistedDebugPreferences?.qualityMode;
+  const requestedQuality =
+    options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
   scene.fog = new THREE.Fog(COLORS.sky, 10, 34);
-  const camera = new THREE.PerspectiveCamera(STANDING_FOV, 1, 0.05, 1200);
+  const camera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
     powerPreference: "high-performance",
     stencil: false,
   });
+  // PointerLockControls owns the camera quaternion. Keep its upright control
+  // pose separate from the short-lived presentation roll applied at render.
+  camera.matrixAutoUpdate = false;
+  const cameraRollMatrix = new THREE.Matrix4();
+  const quality = resolveQuality(requestedQuality);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   renderer.shadowMap.enabled = quality.shadows !== "off";
   renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -1811,17 +3906,45 @@ export const createMahjongTableScene = (
   const composer = new EffectComposer(renderer);
   composer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   composer.addPass(new RenderPass(scene, camera));
-  const bokehPass = new BokehPass(scene, camera, {
-    focus: 8,
-    aperture: 0.0018,
-    maxblur: 0.0045,
+  const gtaoPass = new GTAOPass(scene, camera, 512, 320);
+  gtaoPass.output = GTAOPass.OUTPUT.Default;
+  gtaoPass.blendIntensity = 0.72;
+  // Keep GTAO opt-in so the adaptive/high baseline remains the last good
+  // checkpoint. The debug checkbox can enable it without changing Bokeh.
+  gtaoPass.enabled = false;
+  gtaoPass.updateGtaoMaterial({
+    radius: 0.24,
+    distanceExponent: 1.15,
+    thickness: 1.1,
+    scale: 1.05,
+    samples: 8,
   });
+  gtaoPass.updatePdMaterial({
+    radius: 4,
+    rings: 2,
+    samples: 8,
+  });
+  composer.addPass(gtaoPass);
+  const initialBokeh = resolveHumanEyeBokeh(
+    BOKEH_FOCUS_FALLBACK_DISTANCE,
+    HUMAN_EYE_REFERENCE_PUPIL_MM,
+  );
+  const bokehPass = new BokehPass(scene, camera, {
+    focus: BOKEH_FOCUS_FALLBACK_DISTANCE,
+    aperture: initialBokeh.aperture,
+    maxblur: initialBokeh.maxBlur,
+  });
+  // Keep adaptive/medium rendering inexpensive enough for software WebGL and
+  // mobile GPUs. High quality retains the visual treatment, and debug can
+  // enable it explicitly on a stronger device.
+  bokehPass.enabled = quality.preset === "high";
   composer.addPass(bokehPass);
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
   const focusNdc = new THREE.Vector2(0, 0);
-  let focusDistance = 8;
   let skylineRoot: THREE.Object3D | null = null;
+  let focusCalibrationRoot: THREE.Group | null = null;
+  let focusCalibrationLabels: readonly THREE.Sprite[] = [];
   let debugBoundsRoot: THREE.Group | null = null;
   let sunLight: THREE.DirectionalLight | null = null;
   let redMaterials: THREE.MeshStandardMaterial[] = [];
@@ -1840,8 +3963,24 @@ export const createMahjongTableScene = (
   let debugCyanEmissiveIntensity = 1;
   let debugShadowQuality: VisualShadowQuality = quality.shadows;
   let debugDprCap = quality.dprCap;
+  let debugQualityMode: VisualQualityMode =
+    options.quality === undefined || options.quality === "auto" ? "adaptive" : options.quality;
+  let debugEffectiveQuality: VisualQualityPreset = quality.preset;
+  let debugAmbientAnimationRate = quality.ambientAnimationRate;
+  let debugCameraShiftEnabled = true;
+  let debugCameraBobEnabled = true;
+  let debugBokehEnabled = bokehPass.enabled;
+  let debugBokehStrength = 1;
+  let debugAmbientOcclusionEnabled = gtaoPass.enabled;
+  let debugAutoExposureEnabled = true;
+  let debugExposureTarget = renderer.toneMappingExposure;
+  let debugGlassMode: VisualGlassMode = quality.glassMode;
+  let glassSurfaces: readonly THREE.Mesh[] = [];
+  let simpleGlassMaterial: THREE.MeshStandardMaterial | null = null;
+  let physicalGlassMaterial: THREE.MeshPhysicalMaterial | null = null;
   let debugWireframe = false;
   let debugBoundsVisible = false;
+  let generatedRoomVariant = GENERATED_ROOM_PALETTES[0]?.label ?? "Northlight";
   const debugSkylineLayers: Record<VisualSkylineLayer, boolean> = {
     near: true,
     hero: true,
@@ -1851,8 +3990,70 @@ export const createMahjongTableScene = (
   let debugFps = 60;
   let debugFrameTimeMs = 1000 / 60;
   let previousAnimationTimestamp = 0;
+  let explorationWorld: ExplorationWorld | null = null;
+  let explorationArea = "Penthouse";
+  let loadedExplorationChunks = 0;
+  let focusDistance = BOKEH_FOCUS_FALLBACK_DISTANCE;
+  let focusTarget: VisualFocusTarget = "fallback";
+  let pupilDiameterMm = HUMAN_EYE_REFERENCE_PUPIL_MM;
+  let bokehIntensity = initialBokeh.intensity;
+  const exposureLookDirection = new THREE.Vector3();
   const getSunLight = (): THREE.DirectionalLight | null => sunLight;
   const getDebugBoundsRoot = (): THREE.Group | null => debugBoundsRoot;
+  let suppressDebugPreferencesPersistence = true;
+  let lastDebugPreferencesSerialized: string | null = null;
+  const captureDebugPreferences = (): VisualDebugPreferences => ({
+    version: VISUAL_DEBUG_PREFERENCES_VERSION,
+    cameraPreset: activeDebugPreset,
+    fov: THREE.MathUtils.clamp(debugFovOverride ?? camera.fov, 30, 100),
+    exposure: THREE.MathUtils.clamp(
+      debugAutoExposureEnabled ? debugExposureTarget : renderer.toneMappingExposure,
+      0.5,
+      2.2,
+    ),
+    toneMapper: toneMapperName(renderer.toneMapping),
+    fogDensity: debugFogDensity,
+    skylineVisible: skylineRoot?.visible ?? true,
+    skylineLayers: { ...debugSkylineLayers },
+    sunYaw: debugSunYaw,
+    sunElevation: debugSunElevation,
+    sunIntensity: debugSunIntensity,
+    environmentIntensity: debugEnvironmentIntensity,
+    environmentRotation: debugEnvironmentRotation,
+    redAccentIntensity: debugRedAccentIntensity,
+    cyanEmissiveIntensity: debugCyanEmissiveIntensity,
+    shadowQuality: debugShadowQuality,
+    qualityMode: debugQualityMode,
+    glassMode: debugGlassMode,
+    ambientAnimationRate: debugAmbientAnimationRate,
+    dprCap: debugDprCap,
+    wireframe: debugWireframe,
+    boundsVisible: debugBoundsVisible,
+    bokehEnabled: debugBokehEnabled,
+    bokehStrength: debugBokehStrength,
+    ambientOcclusionEnabled: debugAmbientOcclusionEnabled,
+    autoExposureEnabled: debugAutoExposureEnabled,
+    cameraShiftEnabled: debugCameraShiftEnabled,
+    cameraBobEnabled: debugCameraBobEnabled,
+  });
+  const saveDebugPreferences = (): void => {
+    if (debugPreferencesStorage === null) {
+      return;
+    }
+    const preferences = captureDebugPreferences();
+    const serialized = JSON.stringify(preferences);
+    if (
+      serialized !== lastDebugPreferencesSerialized &&
+      writeVisualDebugPreferences(debugPreferencesStorage, preferences)
+    ) {
+      lastDebugPreferencesSerialized = serialized;
+    }
+  };
+  const persistDebugPreferences = (): void => {
+    if (!suppressDebugPreferencesPersistence) {
+      saveDebugPreferences();
+    }
+  };
 
   const orbitControls = new OrbitControls(camera, renderer.domElement);
   orbitControls.enableDamping = true;
@@ -1971,9 +4172,7 @@ export const createMahjongTableScene = (
     swipeLastX = event.clientX;
     swipeLastY = event.clientY;
     renderer.domElement.setPointerCapture(event.pointerId);
-    if (motionLookEnabled) {
-      setControlActive(true);
-    }
+    setControlActive(true);
   };
   const onSwipePointerMove = (event: PointerEvent): void => {
     if (swipePointerId !== event.pointerId || activeView !== "seat") {
@@ -2013,6 +4212,33 @@ export const createMahjongTableScene = (
     window.addEventListener("orientationchange", resetMotionCalibration);
     orientationListenerAttached = true;
   };
+  const detachOrientationListener = (): void => {
+    if (!orientationListenerAttached) {
+      return;
+    }
+    window.removeEventListener("deviceorientation", onDeviceOrientation);
+    window.removeEventListener("orientationchange", resetMotionCalibration);
+    orientationListenerAttached = false;
+  };
+  const setMotionLookEnabled = (enabled: boolean): void => {
+    if (!supportsMotionLook || motionLookStatus === "unsupported") {
+      return;
+    }
+    if (!enabled) {
+      motionLookEnabled = false;
+      setControlActive(false);
+      detachOrientationListener();
+      resetMotionCalibration();
+      return;
+    }
+    if (motionLookStatus !== "ready") {
+      return;
+    }
+    motionLookEnabled = true;
+    resetMotionCalibration();
+    attachOrientationListener();
+    setControlActive(true);
+  };
   const requestMotionLook = (): Promise<MotionLookStatus> => {
     if (motionRequest !== null) {
       return motionRequest;
@@ -2023,6 +4249,7 @@ export const createMahjongTableScene = (
         return "unsupported";
       }
       if (motionLookStatus === "ready") {
+        setMotionLookEnabled(true);
         return "ready";
       }
       setMotionLookStatus("requesting");
@@ -2032,19 +4259,18 @@ export const createMahjongTableScene = (
           const permission = await requestPermission();
           if (permission !== "granted") {
             motionLookEnabled = false;
+            detachOrientationListener();
             setControlActive(false);
             setMotionLookStatus("denied");
             return "denied";
           }
         }
-        motionLookEnabled = true;
-        resetMotionCalibration();
-        attachOrientationListener();
+        setMotionLookEnabled(true);
         setMotionLookStatus("ready");
-        setControlActive(true);
         return "ready";
       } catch {
         motionLookEnabled = false;
+        detachOrientationListener();
         setControlActive(false);
         setMotionLookStatus("denied");
         return "denied";
@@ -2067,10 +4293,14 @@ export const createMahjongTableScene = (
   };
   const pressedKeys = new Set<string>();
   let eyeHeight = STANDING_EYE_HEIGHT;
+  let firstPersonGroundY = 0;
   let isCrouched = false;
   let jumpOffset = 0;
   let verticalVelocity = 0;
   let grounded = true;
+  let physicsRuntime: MahjongPhysicsRuntime | null = null;
+  let physicsCharacterPosition: PhysicsVector | null = null;
+  let appliedPhysicsVersion = -1;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
   let touchMovementActive = false;
@@ -2078,6 +4308,81 @@ export const createMahjongTableScene = (
   let touchRight = 0;
   let isSprinting = false;
   let lastForwardTapAt = Number.NEGATIVE_INFINITY;
+  let cameraShiftRoll = 0;
+  let cameraShiftTarget = 0;
+  let cameraBobPhase = 0;
+  let cameraBobAmount = 0;
+  let lastLateralDirection = 0;
+  let lateralIdleTime = Number.POSITIVE_INFINITY;
+  let lastSceneStateSaveAt = Number.NEGATIVE_INFINITY;
+  let lastSceneStateSerialized: string | null = null;
+  const captureSceneState = (): VisualSceneState => {
+    const cameraPosition: VisualSceneState["cameraPosition"] = [
+      camera.position.x,
+      activeView === "seat"
+        ? isCrouched
+          ? SEATED_EYE_HEIGHT
+          : STANDING_EYE_HEIGHT
+        : camera.position.y,
+      camera.position.z,
+    ];
+    const cameraQuaternion: VisualSceneState["cameraQuaternion"] = [
+      camera.quaternion.x,
+      camera.quaternion.y,
+      camera.quaternion.z,
+      camera.quaternion.w,
+    ];
+    const orbitTarget: VisualSceneState["orbitTarget"] = [
+      orbitControls.target.x,
+      orbitControls.target.y,
+      orbitControls.target.z,
+    ];
+    return {
+      version: VISUAL_SCENE_STATE_VERSION,
+      roomSeed,
+      view: activeView,
+      activeDebugPreset,
+      cameraPosition,
+      cameraQuaternion,
+      orbitTarget,
+      cameraFov: camera.fov,
+      isCrouched: activeView === "seat" && isCrouched,
+    };
+  };
+  const saveSceneState = (force = false): void => {
+    if (sceneStateStorage === null) {
+      return;
+    }
+    const now = window.performance.now();
+    if (!force && now - lastSceneStateSaveAt < VISUAL_SCENE_STATE_SAVE_INTERVAL_MS) {
+      return;
+    }
+    const state = captureSceneState();
+    const serialized = serializeVisualSceneState(state);
+    if (
+      serialized !== lastSceneStateSerialized &&
+      writeVisualSceneState(sceneStateStorage, state)
+    ) {
+      lastSceneStateSerialized = serialized;
+    }
+    lastSceneStateSaveAt = now;
+  };
+  const syncPhysicsCharacterToCamera = (): void => {
+    physicsCharacterPosition = {
+      x: camera.position.x,
+      y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+      z: camera.position.z,
+    };
+  };
+  const resetCameraMotion = (): void => {
+    cameraShiftRoll = 0;
+    cameraShiftTarget = 0;
+    cameraBobPhase = 0;
+    cameraBobAmount = 0;
+    lastLateralDirection = 0;
+    lateralIdleTime = Number.POSITIVE_INFINITY;
+    camera.updateMatrix();
+  };
   const movementKeys = new Set([
     "KeyW",
     "KeyA",
@@ -2160,6 +4465,7 @@ export const createMahjongTableScene = (
     strafeVelocity = 0;
     isSprinting = false;
     lastForwardTapAt = Number.NEGATIVE_INFINITY;
+    resetCameraMotion();
   };
   const setControlActive = (active: boolean): void => {
     container.dataset.controlActive = active ? "true" : "false";
@@ -2189,6 +4495,7 @@ export const createMahjongTableScene = (
 
   const setFirstPersonPreset = (): void => {
     const preset = cameraPresets.seat;
+    firstPersonGroundY = 0;
     eyeHeight = STANDING_EYE_HEIGHT;
     isCrouched = false;
     jumpOffset = 0;
@@ -2198,18 +4505,51 @@ export const createMahjongTableScene = (
     strafeVelocity = 0;
     isSprinting = false;
     lastForwardTapAt = Number.NEGATIVE_INFINITY;
+    resetCameraMotion();
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
+    syncPhysicsCharacterToCamera();
     resetMotionCalibration();
   };
+  const setComposedTablePreset = (): void => {
+    const preset = cameraPresets.seat;
+    firstPersonGroundY = 0;
+    activeView = "seat";
+    resetCameraMotion();
+    camera.position.copy(preset.position);
+    camera.lookAt(preset.target);
+    syncPhysicsCharacterToCamera();
+    camera.fov = TABLE_CAMERA_FOV;
+    camera.updateProjectionMatrix();
+    resetMotionCalibration();
+  };
+  const setFocusCalibrationVisibility = (): void => {
+    if (focusCalibrationRoot !== null) {
+      // The calibration wing is part of the same walkable development map as
+      // the penthouse and streamed exploration areas. Camera presets should
+      // never hide the rest of the map to make the lab appear.
+      focusCalibrationRoot.visible = debugEnabled;
+    }
+  };
   const setView = (view: SceneView): void => {
+    if (view === "overhead" && !debugEnabled) {
+      setComposedTablePreset();
+      orbitControls.enabled = false;
+      firstPersonControls.enabled = false;
+      return;
+    }
     activeView = view;
     activeDebugPreset = null;
+    setFocusCalibrationVisibility();
     debugFovOverride = null;
     if (view === "seat") {
       orbitControls.enabled = false;
       firstPersonControls.enabled = true;
-      setFirstPersonPreset();
+      if (debugEnabled) {
+        setFirstPersonPreset();
+      } else {
+        setComposedTablePreset();
+      }
       return;
     }
     if (firstPersonControls.isLocked) {
@@ -2220,16 +4560,95 @@ export const createMahjongTableScene = (
     firstPersonControls.enabled = false;
     orbitControls.enabled = true;
     setCameraPreset(camera, orbitControls, view);
+    camera.fov = TABLE_CAMERA_FOV;
+    camera.updateProjectionMatrix();
+  };
+
+  const resetToSpawn = (): void => {
+    setView("seat");
+    onWindowBlur();
+    firstPersonGroundY = 0;
+    eyeHeight = STANDING_EYE_HEIGHT;
+    isCrouched = false;
+    jumpOffset = 0;
+    verticalVelocity = 0;
+    grounded = true;
+    forwardVelocity = 0;
+    strafeVelocity = 0;
+    isSprinting = false;
+    lastForwardTapAt = Number.NEGATIVE_INFINITY;
+
+    const preset = cameraPresets.seat;
+    camera.position.copy(preset.position);
+    camera.lookAt(preset.target);
+    debugFovOverride = null;
+    camera.fov = debugEnabled ? DEBUG_STANDING_FOV : TABLE_CAMERA_FOV;
+    camera.updateProjectionMatrix();
+    camera.updateMatrix();
+    camera.updateMatrixWorld(true);
+    resetMotionCalibration();
+    syncPhysicsCharacterToCamera();
+    saveSceneState(true);
   };
 
   const setDebugCameraPreset = (preset: VisualCameraPreset): void => {
+    if (!debugEnabled) {
+      return;
+    }
     activeDebugPreset = preset;
+    setFocusCalibrationVisibility();
+
+    if (preset === "focusCalibration") {
+      // Focus calibration is a walkable wing of the development map. Keep the
+      // normal first-person controller active instead of replacing the player
+      // with an orbit camera around a detached hallway.
+      activeView = "seat";
+      orbitControls.enabled = false;
+      firstPersonControls.enabled = true;
+      if (firstPersonControls.isLocked) {
+        firstPersonControls.unlock();
+      }
+      onWindowBlur();
+      firstPersonGroundY = FOCUS_CALIBRATION_DECK_HEIGHT;
+      eyeHeight = STANDING_EYE_HEIGHT;
+      isCrouched = false;
+      jumpOffset = 0;
+      verticalVelocity = 0;
+      grounded = true;
+      forwardVelocity = 0;
+      strafeVelocity = 0;
+      isSprinting = false;
+      lastForwardTapAt = Number.NEGATIVE_INFINITY;
+      resetCameraMotion();
+      physicsCharacterPosition = null;
+      camera.position.set(
+        FOCUS_CALIBRATION_START_X + 0.55,
+        FOCUS_CALIBRATION_DECK_HEIGHT + STANDING_EYE_HEIGHT,
+        0,
+      );
+      camera.lookAt(
+        FOCUS_CALIBRATION_START_X + 7,
+        FOCUS_CALIBRATION_DECK_HEIGHT + STANDING_EYE_HEIGHT,
+        0,
+      );
+      debugFovOverride = DEBUG_STANDING_FOV;
+      camera.fov = debugFovOverride;
+      camera.updateProjectionMatrix();
+      camera.updateMatrix();
+      camera.updateMatrixWorld(true);
+      syncPhysicsCharacterToCamera();
+      resetMotionCalibration();
+      persistDebugPreferences();
+      return;
+    }
+
     activeView = "overhead";
     firstPersonControls.enabled = false;
     if (firstPersonControls.isLocked) {
       firstPersonControls.unlock();
     }
     onWindowBlur();
+    physicsCharacterPosition = null;
     orbitControls.enabled = true;
     const cameraPreset = visualCameraPresets[preset];
     camera.position.copy(cameraPreset.position);
@@ -2237,20 +4656,104 @@ export const createMahjongTableScene = (
     orbitControls.update();
     debugFovOverride = camera.fov;
     resetMotionCalibration();
+    persistDebugPreferences();
+  };
+
+  const restoreSceneState = (state: VisualSceneState | null): void => {
+    if (state === null || (state.view === "seat" && initialView !== "seat")) {
+      return;
+    }
+    if (state.activeDebugPreset === "focusCalibration") {
+      if (!debugEnabled) {
+        return;
+      }
+      setDebugCameraPreset("focusCalibration");
+      firstPersonGroundY = FOCUS_CALIBRATION_DECK_HEIGHT;
+      isCrouched = state.isCrouched;
+      eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
+      camera.position.fromArray(state.cameraPosition);
+      camera.position.y = FOCUS_CALIBRATION_DECK_HEIGHT + eyeHeight;
+      camera.quaternion.fromArray(state.cameraQuaternion).normalize();
+      camera.fov = THREE.MathUtils.clamp(state.cameraFov, 30, 100);
+      debugFovOverride = camera.fov;
+      camera.updateProjectionMatrix();
+      camera.updateMatrix();
+      camera.updateMatrixWorld(true);
+      syncPhysicsCharacterToCamera();
+      return;
+    }
+    if (state.view === "overhead") {
+      if (!debugEnabled) {
+        return;
+      }
+      if (state.activeDebugPreset === null) {
+        setView("overhead");
+      } else {
+        setDebugCameraPreset(state.activeDebugPreset);
+      }
+      camera.position.fromArray(state.cameraPosition);
+      orbitControls.target.fromArray(state.orbitTarget);
+      orbitControls.update();
+      camera.quaternion.fromArray(state.cameraQuaternion).normalize();
+      camera.fov = THREE.MathUtils.clamp(state.cameraFov, 30, 100);
+      debugFovOverride = camera.fov;
+      camera.updateProjectionMatrix();
+      camera.updateMatrix();
+      return;
+    }
+
+    setView("seat");
+    onWindowBlur();
+    firstPersonGroundY = 0;
+    isCrouched = state.isCrouched;
+    eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
+    camera.position.x = THREE.MathUtils.clamp(
+      state.cameraPosition[0],
+      WORLD_BOUNDS.minX,
+      WORLD_BOUNDS.maxX,
+    );
+    camera.position.y = eyeHeight;
+    camera.position.z = THREE.MathUtils.clamp(
+      state.cameraPosition[2],
+      WORLD_BOUNDS.minZ,
+      WORLD_BOUNDS.maxZ,
+    );
+    camera.quaternion.fromArray(state.cameraQuaternion).normalize();
+    camera.fov = debugEnabled ? THREE.MathUtils.clamp(state.cameraFov, 30, 100) : TABLE_CAMERA_FOV;
+    debugFovOverride = debugEnabled ? camera.fov : null;
+    camera.updateProjectionMatrix();
+    camera.updateMatrix();
+    resetMotionCalibration();
+    if (physicsRuntime !== null) {
+      syncPhysicsCharacterToCamera();
+    }
   };
 
   const setDebugFov = (fov: number): void => {
     debugFovOverride = THREE.MathUtils.clamp(fov, 30, 100);
     camera.fov = debugFovOverride;
     camera.updateProjectionMatrix();
+    persistDebugPreferences();
   };
 
   const setDebugExposure = (exposure: number): void => {
-    renderer.toneMappingExposure = THREE.MathUtils.clamp(exposure, 0.5, 2.2);
+    debugAutoExposureEnabled = false;
+    debugExposureTarget = THREE.MathUtils.clamp(exposure, 0.5, 2.2);
+    renderer.toneMappingExposure = debugExposureTarget;
+    persistDebugPreferences();
+  };
+
+  const setDebugAutoExposureEnabled = (enabled: boolean): void => {
+    debugAutoExposureEnabled = enabled;
+    if (enabled) {
+      debugExposureTarget = renderer.toneMappingExposure;
+    }
+    persistDebugPreferences();
   };
 
   const setDebugToneMapper = (toneMapper: VisualToneMapper): void => {
     renderer.toneMapping = TONE_MAPPINGS[toneMapper];
+    persistDebugPreferences();
   };
 
   const setDebugFogDensity = (density: number): void => {
@@ -2260,6 +4763,7 @@ export const createMahjongTableScene = (
       fog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
       fog.near = THREE.MathUtils.clamp(fog.far * 0.3, 4, 12);
     }
+    persistDebugPreferences();
   };
 
   const skylineLayerNames: Readonly<Record<VisualSkylineLayer, string>> = {
@@ -2278,12 +4782,14 @@ export const createMahjongTableScene = (
     if (skylineRoot !== null) {
       skylineRoot.visible = Object.values(debugSkylineLayers).some(Boolean);
     }
+    persistDebugPreferences();
   };
 
   const setDebugSkylineVisible = (visible: boolean): void => {
     for (const layer of Object.keys(debugSkylineLayers) as VisualSkylineLayer[]) {
       setDebugSkylineLayerVisible(layer, visible);
     }
+    persistDebugPreferences();
   };
 
   const setDebugSunDirection = (yaw: number, elevation: number): void => {
@@ -2299,6 +4805,7 @@ export const createMahjongTableScene = (
       );
       light.lookAt(0, 0.8, 0);
     }
+    persistDebugPreferences();
   };
 
   const setDebugSunIntensity = (intensity: number): void => {
@@ -2307,16 +4814,19 @@ export const createMahjongTableScene = (
     if (light !== null) {
       light.intensity = debugSunIntensity;
     }
+    persistDebugPreferences();
   };
 
   const setDebugEnvironmentIntensity = (intensity: number): void => {
     debugEnvironmentIntensity = THREE.MathUtils.clamp(intensity, 0, 2.5);
     scene.environmentIntensity = debugEnvironmentIntensity;
+    persistDebugPreferences();
   };
 
   const setDebugEnvironmentRotation = (rotation: number): void => {
     debugEnvironmentRotation = THREE.MathUtils.clamp(rotation, -Math.PI, Math.PI);
     scene.environmentRotation.y = debugEnvironmentRotation;
+    persistDebugPreferences();
   };
 
   const setDebugRedAccentIntensity = (intensity: number): void => {
@@ -2325,6 +4835,7 @@ export const createMahjongTableScene = (
       material.emissiveIntensity =
         (redMaterialBaseIntensity.get(material) ?? 0.12) * debugRedAccentIntensity;
     }
+    persistDebugPreferences();
   };
 
   const setDebugCyanEmissiveIntensity = (intensity: number): void => {
@@ -2333,6 +4844,59 @@ export const createMahjongTableScene = (
       material.emissiveIntensity =
         (cyanMaterialBaseIntensity.get(material) ?? 0.28) * debugCyanEmissiveIntensity;
     }
+    persistDebugPreferences();
+  };
+
+  const setDebugBokehEnabled = (enabled: boolean): void => {
+    debugBokehEnabled = enabled;
+    bokehPass.enabled = enabled;
+    persistDebugPreferences();
+  };
+
+  const setDebugBokehIntensity = (intensity: number): void => {
+    debugBokehStrength = THREE.MathUtils.clamp(intensity, 0, DEBUG_BOKEH_STRENGTH_MAX);
+    persistDebugPreferences();
+  };
+
+  const setDebugAmbientOcclusionEnabled = (enabled: boolean): void => {
+    debugAmbientOcclusionEnabled = enabled;
+    gtaoPass.enabled = enabled;
+    persistDebugPreferences();
+  };
+
+  const setDebugAmbientAnimationRate = (rate: number): void => {
+    debugAmbientAnimationRate = THREE.MathUtils.clamp(rate, 0, 2);
+    persistDebugPreferences();
+  };
+
+  const setDebugCameraShiftEnabled = (enabled: boolean): void => {
+    debugCameraShiftEnabled = enabled;
+    if (!enabled) {
+      cameraShiftRoll = 0;
+      cameraShiftTarget = 0;
+    }
+    persistDebugPreferences();
+  };
+
+  const setDebugCameraBobEnabled = (enabled: boolean): void => {
+    debugCameraBobEnabled = enabled;
+    if (!enabled) {
+      cameraBobAmount = 0;
+    }
+    persistDebugPreferences();
+  };
+
+  const setDebugGlassMode = (mode: VisualGlassMode): void => {
+    debugGlassMode = mode;
+    const material = mode === "physical" ? physicalGlassMaterial : simpleGlassMaterial;
+    if (material === null) {
+      persistDebugPreferences();
+      return;
+    }
+    for (const surface of glassSurfaces) {
+      surface.material = material;
+    }
+    persistDebugPreferences();
   };
 
   const setDebugShadowQuality = (shadowQuality: VisualShadowQuality): void => {
@@ -2347,6 +4911,7 @@ export const createMahjongTableScene = (
       }
     }
     renderer.shadowMap.needsUpdate = true;
+    persistDebugPreferences();
   };
 
   const setDebugDprCap = (dprCap: number): void => {
@@ -2357,6 +4922,29 @@ export const createMahjongTableScene = (
     const width = Math.max(renderer.domElement.clientWidth, 1);
     const height = Math.max(renderer.domElement.clientHeight, 1);
     composer.setSize(width, height);
+    gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
+    persistDebugPreferences();
+  };
+
+  const setDebugQualityMode = (mode: VisualQualityMode): void => {
+    debugQualityMode = mode;
+    const preset = mode === "adaptive" ? quality.preset : mode;
+    const profile = QUALITY_PRESETS[preset];
+    debugEffectiveQuality = preset;
+    setDebugDprCap(profile.dprCap);
+    setDebugShadowQuality(profile.shadows);
+    setDebugAmbientOcclusionEnabled(mode === "adaptive" ? false : profile.ambientOcclusion);
+    setDebugBokehEnabled(preset === "high");
+    setDebugAmbientAnimationRate(profile.ambientAnimationRate);
+    setDebugGlassMode(profile.glassMode);
+    for (const name of ["EmpireStateBuildingLOD", "OneVanderbiltLOD", "ChryslerBuildingLOD"]) {
+      const lod = scene.getObjectByName(name);
+      if (lod instanceof THREE.LOD && lod.levels[1] !== undefined) {
+        lod.levels[1].distance = 14 * profile.skylineLodBias;
+      }
+    }
+    container.dataset.sceneQuality = preset;
+    persistDebugPreferences();
   };
 
   const setMaterialWireframe = (material: THREE.Material, enabled: boolean): void => {
@@ -2383,6 +4971,7 @@ export const createMahjongTableScene = (
         setMaterialWireframe(entry, enabled);
       }
     });
+    persistDebugPreferences();
   };
 
   const setDebugBoundsVisible = (visible: boolean): void => {
@@ -2391,9 +4980,95 @@ export const createMahjongTableScene = (
     if (boundsRoot !== null) {
       boundsRoot.visible = visible;
     }
+    persistDebugPreferences();
+  };
+
+  const defaultDebugPreferences = (): VisualDebugPreferences => ({
+    version: VISUAL_DEBUG_PREFERENCES_VERSION,
+    cameraPreset: null,
+    fov: DEBUG_STANDING_FOV,
+    exposure: 0.98,
+    toneMapper: "agx",
+    fogDensity: 0.018,
+    skylineVisible: true,
+    skylineLayers: { near: true, hero: true, fillers: true, distant: true },
+    sunYaw: -0.59,
+    sunElevation: 0.86,
+    sunIntensity: 3.45,
+    environmentIntensity: 1,
+    environmentRotation: 0,
+    redAccentIntensity: 1,
+    cyanEmissiveIntensity: 1,
+    shadowQuality: quality.shadows,
+    qualityMode:
+      options.quality === undefined || options.quality === "auto" ? "adaptive" : options.quality,
+    glassMode: quality.glassMode,
+    ambientAnimationRate: quality.ambientAnimationRate,
+    dprCap: quality.dprCap,
+    wireframe: false,
+    boundsVisible: false,
+    bokehEnabled: quality.preset === "high",
+    bokehStrength: 1,
+    ambientOcclusionEnabled: false,
+    autoExposureEnabled: true,
+    cameraShiftEnabled: true,
+    cameraBobEnabled: true,
+  });
+
+  const applyDebugPreferences = (preferences: VisualDebugPreferences): void => {
+    if (preferences.cameraPreset !== null) {
+      setDebugCameraPreset(preferences.cameraPreset);
+    } else if (activeDebugPreset !== null) {
+      setView("seat");
+    }
+    setDebugQualityMode(preferences.qualityMode);
+    setDebugToneMapper(preferences.toneMapper);
+    setDebugFogDensity(preferences.fogDensity);
+    setDebugSunDirection(preferences.sunYaw, preferences.sunElevation);
+    setDebugSunIntensity(preferences.sunIntensity);
+    setDebugEnvironmentIntensity(preferences.environmentIntensity);
+    setDebugEnvironmentRotation(preferences.environmentRotation);
+    setDebugRedAccentIntensity(preferences.redAccentIntensity);
+    setDebugCyanEmissiveIntensity(preferences.cyanEmissiveIntensity);
+    setDebugShadowQuality(preferences.shadowQuality);
+    setDebugDprCap(preferences.dprCap);
+    setDebugBokehEnabled(preferences.bokehEnabled);
+    setDebugBokehIntensity(preferences.bokehStrength);
+    setDebugAmbientOcclusionEnabled(preferences.ambientOcclusionEnabled);
+    setDebugAutoExposureEnabled(preferences.autoExposureEnabled);
+    debugExposureTarget = preferences.exposure;
+    renderer.toneMappingExposure = preferences.exposure;
+    setDebugGlassMode(preferences.glassMode);
+    setDebugAmbientAnimationRate(preferences.ambientAnimationRate);
+    setDebugCameraShiftEnabled(preferences.cameraShiftEnabled);
+    setDebugCameraBobEnabled(preferences.cameraBobEnabled);
+    setDebugWireframe(preferences.wireframe);
+    setDebugBoundsVisible(preferences.boundsVisible);
+    for (const layer of Object.keys(debugSkylineLayers) as VisualSkylineLayer[]) {
+      setDebugSkylineLayerVisible(layer, preferences.skylineLayers[layer]);
+    }
+    if (skylineRoot !== null) {
+      skylineRoot.visible = preferences.skylineVisible;
+    }
+    setDebugFov(preferences.fov);
+  };
+
+  const resetDebugPreferences = (): void => {
+    suppressDebugPreferencesPersistence = true;
+    try {
+      applyDebugPreferences(defaultDebugPreferences());
+    } finally {
+      suppressDebugPreferencesPersistence = false;
+    }
+    saveDebugPreferences();
   };
 
   const getDebugSnapshot = (): SceneDebugSnapshot => ({
+    roomSeed,
+    roomVariant: generatedRoomVariant,
+    explorationArea,
+    loadedExplorationChunks,
+    qualityMode: debugQualityMode,
     cameraPreset: activeDebugPreset,
     fov: camera.fov,
     exposure: renderer.toneMappingExposure,
@@ -2409,11 +5084,23 @@ export const createMahjongTableScene = (
     redAccentIntensity: debugRedAccentIntensity,
     cyanEmissiveIntensity: debugCyanEmissiveIntensity,
     shadowQuality: debugShadowQuality,
-    quality: quality.preset,
+    quality: debugEffectiveQuality,
+    glassMode: debugGlassMode,
+    ambientAnimationRate: debugAmbientAnimationRate,
     dpr: renderer.getPixelRatio(),
     dprCap: debugDprCap,
     wireframe: debugWireframe,
     boundsVisible: debugBoundsVisible,
+    bokehEnabled: debugBokehEnabled,
+    focusDistance,
+    focusTarget,
+    pupilDiameterMm,
+    bokehIntensity,
+    bokehStrength: debugBokehStrength,
+    ambientOcclusionEnabled: debugAmbientOcclusionEnabled,
+    autoExposureEnabled: debugAutoExposureEnabled,
+    cameraShiftEnabled: debugCameraShiftEnabled,
+    cameraBobEnabled: debugCameraBobEnabled,
     fps: debugFps,
     frameTimeMs: debugFrameTimeMs,
     drawCalls: renderer.info.render.calls,
@@ -2426,6 +5113,21 @@ export const createMahjongTableScene = (
   setView(initialView);
 
   const architectureResources = addFloor(scene, quality);
+  glassSurfaces = architectureResources.glassSurfaces;
+  simpleGlassMaterial = architectureResources.simpleGlassMaterial;
+  physicalGlassMaterial = architectureResources.physicalGlassMaterial;
+  generatedRoomVariant = createGeneratedRoom(scene, roomSeed).variant;
+  if (debugEnabled) {
+    const focusCalibration = createFocusCalibrationHallway(scene);
+    focusCalibrationRoot = focusCalibration.root;
+    focusCalibrationLabels = focusCalibration.labels;
+  }
+  addExplorationGateway(scene);
+  explorationWorld = createExplorationWorld(scene, roomSeed, (area) => {
+    explorationArea = area;
+    options.onExplorationAreaChange?.(area);
+  });
+  loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
   addLighting(scene, quality);
   const skylineResources = addSkyline(scene, quality.skylineLodBias);
   skylineRoot = scene.getObjectByName("SkylineRoot") ?? null;
@@ -2511,6 +5213,7 @@ export const createMahjongTableScene = (
 
   debugBoundsRoot = new THREE.Group();
   debugBoundsRoot.name = "DebugRoot";
+  debugBoundsRoot.userData.dofIgnore = true;
   debugBoundsRoot.visible = false;
   const debugBoundTargets = [
     scene.getObjectByName("EnvironmentRoot"),
@@ -2528,6 +5231,16 @@ export const createMahjongTableScene = (
   }
   scene.add(debugBoundsRoot);
 
+  if (persistedDebugPreferences !== null) {
+    applyDebugPreferences(persistedDebugPreferences);
+  }
+  suppressDebugPreferencesPersistence = false;
+
+  // Restore the last development-scene transform after all camera targets and
+  // physics surfaces exist, so the first rendered frame starts in the same
+  // place that the HMR remount replaced.
+  restoreSceneState(persistedSceneState);
+
   let previousWidth = 0;
   let previousHeight = 0;
   const resize = (): void => {
@@ -2542,6 +5255,7 @@ export const createMahjongTableScene = (
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     composer.setSize(width, height);
+    gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
   };
   let resizeFrame = 0;
   const observer = new ResizeObserver(() => {
@@ -2558,18 +5272,56 @@ export const createMahjongTableScene = (
 
   let animationFrame = 0;
   let disposed = false;
+  container.dataset.physicsReady = "loading";
+  void createMahjongPhysics(createStaticPhysicsBoxes(scene)).then(
+    (runtime) => {
+      if (disposed) {
+        runtime.dispose();
+        return;
+      }
+      physicsRuntime = runtime;
+      syncPhysicsCharacterToCamera();
+      runtime.setDynamicBoxes(explorationWorld?.getPhysicsBoxes() ?? []);
+      appliedPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
+      container.dataset.physicsReady = "true";
+    },
+    () => {
+      // Rendering remains usable if a browser cannot initialize the optional
+      // WASM physics module; the existing bounded movement is the fallback.
+      container.dataset.physicsReady = "fallback";
+    },
+  );
   let documentVisible = document.visibilityState !== "hidden";
   const timer = new THREE.Timer();
   timer.connect(document);
+  const focusTileSampleOffsets: readonly THREE.Vector2[] = [
+    new THREE.Vector2(BOKEH_TILE_SAMPLE_OFFSET, 0),
+    new THREE.Vector2(-BOKEH_TILE_SAMPLE_OFFSET, 0),
+    new THREE.Vector2(0, BOKEH_TILE_SAMPLE_OFFSET),
+    new THREE.Vector2(0, -BOKEH_TILE_SAMPLE_OFFSET),
+  ];
+  const findVisibleFocusIntersection = (ndc: THREE.Vector2): THREE.Intersection | undefined => {
+    focusRaycaster.setFromCamera(ndc, camera);
+    return focusRaycaster
+      .intersectObjects(scene.children, true)
+      .find((intersection) => !isDofIgnored(intersection.object));
+  };
   const moveSpeed = 3.4;
   const onVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") {
+      saveSceneState(true);
+    }
     documentVisible = document.visibilityState !== "hidden";
     if (documentVisible && animationFrame === 0 && !disposed) {
       animationFrame = window.requestAnimationFrame(animate);
     }
   };
+  const onPageHide = (): void => {
+    saveSceneState(true);
+  };
   document.addEventListener("visibilitychange", onVisibilityChange);
-  const animate = (timestamp?: number): void => {
+  window.addEventListener("pagehide", onPageHide);
+  const animate = (): void => {
     if (disposed) {
       return;
     }
@@ -2577,27 +5329,50 @@ export const createMahjongTableScene = (
       animationFrame = 0;
       return;
     }
-    timer.update(timestamp);
-    const delta = Math.min(timer.getDelta(), 0.05);
-    const currentTimestamp = timestamp ?? performance.now();
+    // Use one clock source for both the timer and frame metrics. Some browsers
+    // expose requestAnimationFrame timestamps on a different origin than
+    // performance.now(), which can otherwise produce a negative delta and send
+    // the damping math to infinity.
+    timer.update();
+    const delta = THREE.MathUtils.clamp(timer.getDelta(), 0, 0.05);
+    const currentTimestamp = performance.now();
     if (previousAnimationTimestamp > 0) {
       const frameTime = Math.max(0.1, currentTimestamp - previousAnimationTimestamp);
-      debugFrameTimeMs = THREE.MathUtils.lerp(debugFrameTimeMs, frameTime, 0.12);
-      debugFps = 1000 / debugFrameTimeMs;
+      if (frameTime <= 250) {
+        debugFrameTimeMs = THREE.MathUtils.lerp(debugFrameTimeMs, frameTime, 0.12);
+        debugFps = 1000 / debugFrameTimeMs;
+      }
     }
     previousAnimationTimestamp = currentTimestamp;
     const ambientTime = currentTimestamp * 0.001;
-    const ambientPulse = Math.sin(ambientTime * 0.78) * 0.035 * quality.ambientAnimationRate;
+    const ambientPulse = Math.sin(ambientTime * 0.78) * 0.035 * debugAmbientAnimationRate;
     for (const material of cyanMaterials) {
       const baseIntensity = cyanMaterialBaseIntensity.get(material) ?? 0.28;
       material.emissiveIntensity = (baseIntensity + ambientPulse) * debugCyanEmissiveIntensity;
     }
-    const skylinePulse = Math.sin(ambientTime * 0.24) * 0.022 * quality.ambientAnimationRate;
+    const skylinePulse = Math.sin(ambientTime * 0.24) * 0.022 * debugAmbientAnimationRate;
     for (const material of ambientSkylineMaterials) {
       material.emissiveIntensity = (0.16 + skylinePulse) * debugCyanEmissiveIntensity;
     }
+    exposureLookDirection.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+    const windowFacing = THREE.MathUtils.clamp(-exposureLookDirection.z, 0, 1);
+    const estimatedLuminance = THREE.MathUtils.clamp(
+      0.72 + debugEnvironmentIntensity * 0.24 + debugSunIntensity * 0.06 + windowFacing * 0.22,
+      0.35,
+      2.4,
+    );
+    if (debugAutoExposureEnabled) {
+      const targetExposure = THREE.MathUtils.clamp(0.98 / estimatedLuminance, 0.58, 1.45);
+      debugExposureTarget = THREE.MathUtils.damp(debugExposureTarget, targetExposure, 1.6, delta);
+      renderer.toneMappingExposure = debugExposureTarget;
+    }
     const targetFov =
-      debugFovOverride ?? (activeView === "seat" && isCrouched ? SEATED_FOV : STANDING_FOV);
+      debugFovOverride ??
+      (debugEnabled && activeView === "seat" && isCrouched
+        ? DEBUG_SEATED_FOV
+        : debugEnabled && activeView === "seat"
+          ? DEBUG_STANDING_FOV
+          : TABLE_CAMERA_FOV);
     const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, 10, delta);
     if (Math.abs(nextFov - camera.fov) > 0.001) {
       camera.fov = nextFov;
@@ -2613,19 +5388,23 @@ export const createMahjongTableScene = (
       if (motionLookEnabled && motionTargetValid) {
         camera.quaternion.slerp(motionTargetQuaternion, 1 - Math.exp(-18 * delta));
       }
+      // Rebuild the upright control matrix before PointerLockControls moves.
       camera.updateMatrix();
+      camera.updateMatrixWorld(true);
       const crouching = isCrouched;
       const targetEyeHeight = crouching ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       eyeHeight = THREE.MathUtils.damp(eyeHeight, targetEyeHeight, 14, delta);
       let forward: number;
       let right: number;
       let currentMoveSpeed: number;
+      let movementMagnitude: number;
       let inputScale = 1;
       if (touchMovementActive) {
         const touchMagnitude = Math.min(1, Math.hypot(touchForward, touchRight));
         const touchDirectionScale = touchMagnitude > 0 ? 1 / touchMagnitude : 0;
         forward = touchForward * touchDirectionScale;
         right = touchRight * touchDirectionScale;
+        movementMagnitude = touchMagnitude;
         const sprintCap = getTouchSprintCap(forward);
         currentMoveSpeed =
           moveSpeed * (crouching ? 0.5 : 1) * SPRINT_MULTIPLIER * sprintCap * touchMagnitude;
@@ -2637,6 +5416,7 @@ export const createMahjongTableScene = (
           (pressedKeys.has("KeyD") || pressedKeys.has("ArrowRight") ? 1 : 0) -
           (pressedKeys.has("KeyA") || pressedKeys.has("ArrowLeft") ? 1 : 0);
         const inputMagnitude = Math.hypot(forward, right);
+        movementMagnitude = Math.min(1, inputMagnitude);
         inputScale = inputMagnitude > 1 ? 1 / inputMagnitude : 1;
         const sprinting = isSprinting && inputMagnitude > 0 && !crouching;
         const speedMultiplier = crouching ? 0.5 : sprinting ? SPRINT_MULTIPLIER : 1;
@@ -2644,48 +5424,228 @@ export const createMahjongTableScene = (
       }
       const desiredForward = forward * inputScale * currentMoveSpeed;
       const desiredStrafe = right * inputScale * currentMoveSpeed;
+      const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
+      const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
+      if (debugCameraShiftEnabled && Math.abs(right) > 0.05) {
+        const lateralDirection = Math.sign(right);
+        if (lastLateralDirection === 0 || lateralDirection !== lastLateralDirection) {
+          const sprintStrength = THREE.MathUtils.clamp(
+            (movementSpeedRatio - 1 / SPRINT_MULTIPLIER) / (1 - 1 / SPRINT_MULTIPLIER),
+            0,
+            1,
+          );
+          const shiftAmount = THREE.MathUtils.lerp(
+            CAMERA_SHIFT_WALK,
+            CAMERA_SHIFT_SPRINT,
+            sprintStrength,
+          );
+          cameraShiftTarget = -lateralDirection * shiftAmount;
+        }
+        lastLateralDirection = lateralDirection;
+        lateralIdleTime = 0;
+      } else if (debugCameraShiftEnabled) {
+        lateralIdleTime += delta;
+        if (lateralIdleTime > CAMERA_DIRECTION_MEMORY_SECONDS) {
+          lastLateralDirection = 0;
+        }
+      } else {
+        lastLateralDirection = 0;
+        lateralIdleTime = Number.POSITIVE_INFINITY;
+      }
       forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
       strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
+      const movementStart = camera.position.clone();
       if (Math.abs(forwardVelocity) > 0.001) {
         firstPersonControls.moveForward(forwardVelocity * delta);
       }
       if (Math.abs(strafeVelocity) > 0.001) {
         firstPersonControls.moveRight(strafeVelocity * delta);
       }
-      if (!grounded || jumpOffset > 0) {
-        verticalVelocity -= GRAVITY * delta;
-        jumpOffset += verticalVelocity * delta;
-        if (jumpOffset <= 0) {
-          jumpOffset = 0;
-          verticalVelocity = 0;
-          grounded = true;
+      const desiredHorizontalDelta = camera.position.clone().sub(movementStart);
+      let baseCameraY: number;
+      if (physicsRuntime !== null) {
+        camera.position.copy(movementStart);
+        if (physicsCharacterPosition === null) {
+          syncPhysicsCharacterToCamera();
         }
+        const characterPosition = physicsCharacterPosition ?? {
+          x: camera.position.x,
+          y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+          z: camera.position.z,
+        };
+        if (!grounded || verticalVelocity > 0) {
+          verticalVelocity -= GRAVITY * delta;
+        }
+        const movement = physicsRuntime.move(characterPosition, {
+          x: desiredHorizontalDelta.x,
+          y: verticalVelocity * delta,
+          z: desiredHorizontalDelta.z,
+        });
+        const clampedPosition: PhysicsVector = {
+          x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+          y: movement.position.y,
+          z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+        };
+        physicsCharacterPosition = clampedPosition;
+        grounded = movement.grounded;
+        if (grounded && verticalVelocity < 0) {
+          verticalVelocity = 0;
+        }
+        jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
+        camera.position.x = clampedPosition.x;
+        camera.position.z = clampedPosition.z;
+        baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+      } else {
+        camera.position.x = THREE.MathUtils.clamp(
+          camera.position.x,
+          WORLD_BOUNDS.minX,
+          WORLD_BOUNDS.maxX,
+        );
+        camera.position.z = THREE.MathUtils.clamp(
+          camera.position.z,
+          WORLD_BOUNDS.minZ,
+          WORLD_BOUNDS.maxZ,
+        );
+        if (!grounded || jumpOffset > 0) {
+          verticalVelocity -= GRAVITY * delta;
+          jumpOffset += verticalVelocity * delta;
+          if (jumpOffset <= 0) {
+            jumpOffset = 0;
+            verticalVelocity = 0;
+            grounded = true;
+          }
+        }
+        baseCameraY = firstPersonGroundY + eyeHeight + jumpOffset;
       }
-      camera.position.x = THREE.MathUtils.clamp(
-        camera.position.x,
-        ROOM_BOUNDS.minX,
-        ROOM_BOUNDS.maxX,
+      cameraShiftTarget = THREE.MathUtils.damp(
+        cameraShiftTarget,
+        0,
+        CAMERA_SHIFT_TARGET_DAMPING,
+        delta,
       );
-      camera.position.y = eyeHeight + jumpOffset;
-      camera.position.z = THREE.MathUtils.clamp(
-        camera.position.z,
-        ROOM_BOUNDS.minZ,
-        ROOM_BOUNDS.maxZ,
+      cameraShiftRoll = THREE.MathUtils.damp(
+        cameraShiftRoll,
+        cameraShiftTarget,
+        CAMERA_SHIFT_DAMPING,
+        delta,
       );
+      const bobTarget = debugCameraBobEnabled
+        ? movementMagnitude * movementSpeedRatio * (crouching ? 0.7 : 1)
+        : 0;
+      cameraBobAmount = THREE.MathUtils.damp(cameraBobAmount, bobTarget, CAMERA_BOB_DAMPING, delta);
+      cameraBobPhase +=
+        delta *
+        THREE.MathUtils.lerp(
+          CAMERA_BOB_MIN_FREQUENCY,
+          CAMERA_BOB_MAX_FREQUENCY,
+          movementSpeedRatio,
+        );
+      camera.position.y =
+        baseCameraY + Math.sin(cameraBobPhase) * CAMERA_BOB_AMPLITUDE * cameraBobAmount;
+      camera.updateMatrix();
+      if (Math.abs(cameraShiftRoll) > 0.0001) {
+        cameraRollMatrix.makeRotationZ(cameraShiftRoll);
+        camera.matrix.multiply(cameraRollMatrix);
+        camera.matrixWorldNeedsUpdate = true;
+      }
     } else {
       forwardVelocity = THREE.MathUtils.damp(forwardVelocity, 0, 10, delta);
       strafeVelocity = THREE.MathUtils.damp(strafeVelocity, 0, 10, delta);
-      orbitControls.update();
+      // OrbitControls retains its own spherical state from the composed table
+      // preset. Do not let it overwrite a restored first-person position while
+      // the seat view is waiting for pointer lock (or while touch controls are
+      // about to take over).
+      if (activeView === "overhead" || !firstPersonControls.enabled) {
+        orbitControls.update();
+      }
+      resetCameraMotion();
     }
-    focusRaycaster.setFromCamera(focusNdc, camera);
-    const focusHit = focusRaycaster
-      .intersectObjects(scene.children, true)
-      .find((intersection) => !isDofIgnored(intersection.object));
-    const nextFocusDistance = focusHit?.distance ?? 8;
-    focusDistance = THREE.MathUtils.damp(focusDistance, nextFocusDistance, 12, delta);
+    const cameraPosition: VisualSceneVector3 = [
+      camera.position.x,
+      camera.position.y,
+      camera.position.z,
+    ];
+    const physicsPositionIsUnrecoverable =
+      physicsCharacterPosition !== null &&
+      (!Number.isFinite(physicsCharacterPosition.x) ||
+        !Number.isFinite(physicsCharacterPosition.y) ||
+        !Number.isFinite(physicsCharacterPosition.z) ||
+        physicsCharacterPosition.y < VISUAL_SCENE_FALL_RESET_Y);
+    if (!isVisualScenePositionRecoverable(cameraPosition) || physicsPositionIsUnrecoverable) {
+      resetToSpawn();
+    }
+    camera.updateMatrixWorld(true);
+    // The focus lab is part of the same streamed world, so moving through it
+    // must continue loading and retaining the surrounding development map.
+    explorationWorld?.update(camera.position);
+    const nextPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
+    if (physicsRuntime !== null && nextPhysicsVersion !== appliedPhysicsVersion) {
+      physicsRuntime.setDynamicBoxes(explorationWorld?.getPhysicsBoxes() ?? []);
+      appliedPhysicsVersion = nextPhysicsVersion;
+    }
+    loadedExplorationChunks = explorationWorld?.getLoadedChunkCount() ?? 0;
+    saveSceneState();
+    let centerFocusHit: THREE.Intersection | undefined;
+    let tileFocusHit: THREE.Intersection | undefined;
+    if (debugBokehEnabled) {
+      centerFocusHit = findVisibleFocusIntersection(focusNdc);
+      tileFocusHit =
+        centerFocusHit !== undefined && isDofFocusTarget(centerFocusHit.object)
+          ? centerFocusHit
+          : undefined;
+      let tileFocusOffset = Number.POSITIVE_INFINITY;
+      if (tileFocusHit === undefined) {
+        for (const offset of focusTileSampleOffsets) {
+          const sampleNdc = focusNdc.clone().add(offset);
+          const sampleHit = findVisibleFocusIntersection(sampleNdc);
+          if (sampleHit === undefined || !isDofFocusTarget(sampleHit.object)) {
+            continue;
+          }
+          const sampleOffset = offset.lengthSq();
+          if (sampleOffset < tileFocusOffset) {
+            tileFocusHit = sampleHit;
+            tileFocusOffset = sampleOffset;
+          }
+        }
+      }
+    }
+    // Keep the original nearest-surface behavior when the reticule is not on
+    // a tile, but allow a tile immediately around the reticule to become the
+    // subject when the center falls in a narrow gap between tile faces.
+    const focusHit = tileFocusHit ?? centerFocusHit;
+    const nextFocusDistance = focusHit?.distance ?? BOKEH_FOCUS_FALLBACK_DISTANCE;
+    focusTarget = debugBokehEnabled
+      ? tileFocusHit !== undefined
+        ? "tile"
+        : centerFocusHit !== undefined
+          ? "surface"
+          : "fallback"
+      : "fallback";
+    focusDistance = THREE.MathUtils.damp(
+      focusDistance,
+      nextFocusDistance,
+      resolveFocusAccommodationDamping(focusDistance, nextFocusDistance),
+      delta,
+    );
+    pupilDiameterMm = THREE.MathUtils.damp(
+      pupilDiameterMm,
+      resolveHumanEyePupilDiameter(estimatedLuminance),
+      BOKEH_PUPIL_ADAPTATION_DAMPING,
+      delta,
+    );
+    const bokeh = resolveHumanEyeBokeh(focusDistance, pupilDiameterMm);
+    bokehIntensity = bokeh.intensity * debugBokehStrength;
     const focusUniform = bokehPass.materialBokeh.uniforms.focus;
     if (focusUniform !== undefined) {
       focusUniform.value = focusDistance;
+    }
+    const apertureUniform = bokehPass.materialBokeh.uniforms.aperture;
+    const maxBlurUniform = bokehPass.materialBokeh.uniforms.maxblur;
+    if (apertureUniform !== undefined) {
+      apertureUniform.value = bokeh.aperture * debugBokehStrength;
+    }
+    if (maxBlurUniform !== undefined) {
+      maxBlurUniform.value = bokeh.maxBlur * debugBokehStrength;
     }
     if (debugBoundsVisible) {
       const boundsRoot = getDebugBoundsRoot();
@@ -2701,19 +5661,31 @@ export const createMahjongTableScene = (
     animationFrame = window.requestAnimationFrame(animate);
   };
   animate();
-  void renderer
-    .compileAsync(scene, camera)
-    .catch(() => undefined)
-    .finally(() => {
+  // Keep readiness on our own cancellable frame. The first render remains the
+  // safe fallback when lazy shader compilation fails or the context is lost;
+  // no synchronous compile is forced on software WebGL.
+  let readyFrame = 0;
+  let warmupTimer = window.setTimeout(() => {
+    warmupTimer = 0;
+    if (disposed) {
+      return;
+    }
+    // Do not force a synchronous shader compile here. Browsers can compile
+    // lazily during the first render; forcing it blocks the main thread on
+    // software WebGL and can make the page appear unresponsive.
+    readyFrame = window.requestAnimationFrame(() => {
+      readyFrame = 0;
       if (!disposed) {
         container.dataset.sceneReady = "true";
         options.onReady?.();
       }
     });
+  }, 0);
 
   return {
     setView,
     requestMotionLook,
+    setMotionLookEnabled,
     setTouchMovementVector,
     toggleCrouch,
     jump,
@@ -2733,25 +5705,44 @@ export const createMahjongTableScene = (
       setCyanEmissiveIntensity: setDebugCyanEmissiveIntensity,
       setShadowQuality: setDebugShadowQuality,
       setDprCap: setDebugDprCap,
+      setQualityMode: setDebugQualityMode,
+      setBokehEnabled: setDebugBokehEnabled,
+      setBokehIntensity: setDebugBokehIntensity,
+      setAmbientOcclusionEnabled: setDebugAmbientOcclusionEnabled,
+      setAutoExposureEnabled: setDebugAutoExposureEnabled,
+      setAmbientAnimationRate: setDebugAmbientAnimationRate,
+      setGlassMode: setDebugGlassMode,
+      setCameraShiftEnabled: setDebugCameraShiftEnabled,
+      setCameraBobEnabled: setDebugCameraBobEnabled,
       setWireframe: setDebugWireframe,
       setBoundsVisible: setDebugBoundsVisible,
+      resetDefaults: resetDebugPreferences,
       getSnapshot: getDebugSnapshot,
     },
     anchors,
     dispose: () => {
+      saveSceneState(true);
       disposed = true;
       window.cancelAnimationFrame(animationFrame);
+      if (warmupTimer !== 0) {
+        window.clearTimeout(warmupTimer);
+        warmupTimer = 0;
+      }
+      if (readyFrame !== 0) {
+        window.cancelAnimationFrame(readyFrame);
+        readyFrame = 0;
+      }
       if (resizeFrame !== 0) {
         window.cancelAnimationFrame(resizeFrame);
       }
       observer.disconnect();
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onWindowBlur);
       if (orientationListenerAttached) {
-        window.removeEventListener("deviceorientation", onDeviceOrientation);
-        window.removeEventListener("orientationchange", resetMotionCalibration);
+        detachOrientationListener();
       }
       renderer.domElement.removeEventListener("click", onCanvasClick);
       renderer.domElement.removeEventListener("contextmenu", preventTouchTextMenu);
@@ -2768,10 +5759,18 @@ export const createMahjongTableScene = (
       firstPersonControls.dispose();
       orbitControls.dispose();
       timer.dispose();
+      physicsRuntime?.dispose();
+      physicsRuntime = null;
+      physicsCharacterPosition = null;
+      explorationWorld?.dispose();
+      explorationWorld = null;
       disposeObject(scene);
+      simpleGlassMaterial.dispose();
+      physicalGlassMaterial.dispose();
       environmentTexture.dispose();
       disposeObject(roomEnvironment);
       pmremGenerator.dispose();
+      gtaoPass.dispose();
       bokehPass.dispose();
       composer.dispose();
       skylineResources.texture.dispose();
@@ -2780,7 +5779,7 @@ export const createMahjongTableScene = (
       for (const texture of textureCache.face.values()) {
         texture.dispose();
       }
-      for (const label of seatLabels) {
+      for (const label of [...seatLabels, ...focusCalibrationLabels]) {
         const material = label.material;
         if (material instanceof THREE.SpriteMaterial) {
           material.map?.dispose();
