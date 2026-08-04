@@ -125,7 +125,8 @@ Evidence recorded 2026-08-03:
   completed hand; and learner-owned decisions/reviews cannot cross game owners.
 - Accepted decision evidence is tied to the emitted player/action/revision event batch, and a
   duplicate practice-branch request remains idempotent after the child advances.
-- Focused M5/M3/protocol tests pass (181 tests); the full suite passes 21 files and 328 tests.
+- Focused M5/M3/protocol tests pass (181 tests); the current full suite passes 24 files and 340
+  tests, with 338 tests in the configured coverage run.
   Coverage passes the configured gates: core/hk-rules/protocol 95% statements and branches,
   analysis/bots/coach/persistence at least 85% statements (persistence 87.97%, coach 95.30%).
 - Serialized `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`,
@@ -164,6 +165,8 @@ Evidence recorded 2026-08-04:
   textures, pointer-lock/WASD movement, and semantic overlays for every legal action.
 - The scene now synchronizes from the redacted observation: the learner hand uses exact tile types,
   opponents render concealed backs/counts only, and public melds/discards update per revision.
+- Home setup offers a one-wind practice match or a full four-wind match; the selected match length
+  is sent through the same game-creation API, and terminal full matches show public final standings.
 - The isolated Playwright seeded-game flow passes after switching its web server to the existing
   temporary-database fixture.
 
@@ -218,6 +221,9 @@ Evidence recorded 2026-08-04:
 - `pnpm verify`, production start, and the smoke test pass on the exact clean canonical candidate.
 - The remote natural-wall receipt and live production provider/no-key attestation remain external
   evidence gates.
+- The natural-simulation workflow is committed on this branch but is not registered on the current
+  GitHub default branch (`visual-table-gb9d082b587`), so a remote 500-hand receipt cannot yet be
+  dispatched without explicit branch authorization.
 - The seeded rooms are named deterministic seeds with teaching focus metadata rather than bespoke
   scripted wall fixtures for every edge-case scenario; exact claim/kong/robbery/scoring fixtures
   remain in the core test-fixture package.

@@ -17,8 +17,9 @@
 
 ## Current milestone
 
-Milestones 6–10 are complete as local vertical slices. Release hardening is validated locally; the
-remote natural-wall receipt and live provider attestation remain external evidence.
+Milestones 6–9 are complete as local vertical slices. The Milestone 10 browser/release slice is
+validated locally; the remote natural-wall receipt and live provider attestation remain external
+evidence.
 
 ## Completed
 
@@ -76,7 +77,8 @@ remote natural-wall receipt and live provider attestation remain external eviden
 
 ## Milestone 5 evidence
 
-- The full suite passes 24 files and 338 tests. The configured coverage run passes with 336 tests.
+- The current full suite passes 24 files and 340 tests. The configured coverage run passes with 338
+  tests.
   Focused persistence/scoring/protocol coverage passes 181 tests.
 - Coverage passes the configured thresholds: core/hk-rules/protocol meet the 95% statement and
   branch gates; analysis/bots/coach/persistence meet the 85% statement gates. The fresh report
@@ -98,6 +100,9 @@ remote natural-wall receipt and live provider attestation remain external eviden
 - The Fastify server composes the session controller behind validated HTTP/WebSocket routes. The
   browser now renders the existing first-person Three.js penthouse table over the local game flow,
   with keyboard-safe legal actions, save/resume, replay, hints, drills, profile, and rules views.
+- Home setup supports one-wind practice and full four-wind matches through the same API. Full-match
+  terminal observations render public final standings; the Three.js scene remains the first-person
+  presentation layer.
 - The home screen exposes ten deterministic seeded rooms; `mahjong demos` lists the same rooms for
   the CLI. Rules now have a fetched scoring glossary and the complete local tile catalog.
 - Replay has a real, server-gated post-hand omniscient toggle. It reveals concealed hands only for
@@ -115,13 +120,16 @@ remote natural-wall receipt and live provider attestation remain external eviden
 - The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
-- GitHub Actions verify run `30876124786` is green for the current head. The workflow annotation
+- GitHub Actions verify run `30876688289` is green for the current candidate. The workflow annotation
   only reports the hosted runner's Node 20 action deprecation warning.
 
 ## Blockers and remaining scope
 
 - The remote natural-wall receipt and live production provider/no-key attestation are not available
   in this local checkout. They are the only remaining release evidence called out by the plan.
+- `.github/workflows/natural-simulation.yml` is committed here but is not registered on GitHub's
+  current default branch (`visual-table-gb9d082b587`), so the remote 500-hand gate cannot be
+  dispatched without explicit branch authorization.
 - The browser scene uses procedural Three.js geometry and semantic DOM controls; headed WebGL proof
   is browser-dependent, while automation intentionally skips the renderer on SwiftShader.
 - The ten seeded rooms are deterministic named seeds with teaching focus metadata; they are not

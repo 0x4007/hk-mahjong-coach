@@ -39,6 +39,7 @@ interface RulesetSummary {
 }
 
 type Demo = DemoDescriptor;
+type MatchLength = "one_wind" | "full_four_winds";
 
 interface HintResult {
   status: "template" | "provider" | "fallback" | "unavailable";
@@ -369,7 +370,9 @@ const Table = ({
             </div>
             {observation.result !== null ? (
               <div className="game-result" role="status">
-                <p className="eyebrow">Hand result</p>
+                <p className="eyebrow">
+                  {observation.phase === "match_ended" ? "Match result" : "Hand result"}
+                </p>
                 <h2>{observation.result.kind.replaceAll("_", " ")}</h2>
                 {observation.result.kind === "win" ? (
                   observation.result.winners.map((winner) => (
@@ -386,6 +389,34 @@ const Table = ({
                 ) : (
                   <p>The live wall ended without a scored win.</p>
                 )}
+                {observation.phase === "match_ended" ? (
+                  <section aria-labelledby="match-standings-heading">
+                    <p className="eyebrow" id="match-standings-heading">
+                      Final standings
+                    </p>
+                    <ol className="game-standings">
+                      {[...observation.players]
+                        .sort((left, right) => right.score - left.score)
+                        .map((player, index) => (
+                          <li key={player.playerId}>
+                            <strong>
+                              {String(index + 1)}. {player.displayName}
+                            </strong>
+                            <span>
+                              {player.seat} · {String(player.score)} points
+                            </span>
+                          </li>
+                        ))}
+                    </ol>
+                    <button
+                      className="game-action-button"
+                      onClick={() => onNavigate("home")}
+                      type="button"
+                    >
+                      Start another lesson
+                    </button>
+                  </section>
+                ) : null}
                 <div className="game-action-list">
                   <button className="game-action-button" onClick={onReplay} type="button">
                     Open replay
@@ -416,11 +447,13 @@ const Home = ({
   rulesetId,
   mode,
   seed,
+  matchLength,
   busy,
   hasSavedGame,
   onRuleset,
   onMode,
   onSeed,
+  onMatchLength,
   onStart,
   onDemo,
   onContinue,
@@ -431,11 +464,13 @@ const Home = ({
   rulesetId: string;
   mode: string;
   seed: string;
+  matchLength: MatchLength;
   busy: boolean;
   hasSavedGame: boolean;
   onRuleset: (value: string) => void;
   onMode: (value: string) => void;
   onSeed: (value: string) => void;
+  onMatchLength: (value: MatchLength) => void;
   onStart: () => void;
   onDemo: (demo: Demo) => void;
   onContinue: () => void;
@@ -487,6 +522,15 @@ const Home = ({
             </select>
             <label htmlFor="seed-input">Seed</label>
             <input id="seed-input" value={seed} onChange={(event) => onSeed(event.target.value)} />
+            <label htmlFor="match-length-select">Match length</label>
+            <select
+              id="match-length-select"
+              value={matchLength}
+              onChange={(event) => onMatchLength(event.target.value as MatchLength)}
+            >
+              <option value="one_wind">One wind · practice</option>
+              <option value="full_four_winds">Full four winds</option>
+            </select>
             {selectedRuleset ? (
               <p className="disclaimer">
                 {selectedRuleset.disclaimer} Minimum {selectedRuleset.minimumFaan} faan; cap{" "}
@@ -944,6 +988,7 @@ const App = (): React.JSX.Element => {
   const [rulesetId, setRulesetId] = useState("hk_nyc_social_v1");
   const [mode, setMode] = useState("guided");
   const [seed, setSeed] = useState("browser-demo-001");
+  const [matchLength, setMatchLength] = useState<MatchLength>("one_wind");
   const [observation, setObservation] = useState<PlayerObservationDto | null>(null);
   const [view, setView] = useState<"home" | "profile" | "drills" | "rules" | "replay">("home");
   const [busy, setBusy] = useState(false);
@@ -1026,7 +1071,7 @@ const App = (): React.JSX.Element => {
           body: JSON.stringify({
             mode: demo?.mode ?? mode,
             rulesetId: demo?.rulesetId ?? rulesetId,
-            matchLength: "one_wind",
+            matchLength,
             seed: demo?.seed ?? seed,
             human: { displayName: "You", preferredSeat: "east" },
             opponents: [
@@ -1359,11 +1404,13 @@ const App = (): React.JSX.Element => {
         rulesetId={rulesetId}
         mode={mode}
         seed={seed}
+        matchLength={matchLength}
         busy={busy}
         hasSavedGame={hasSavedGame}
         onRuleset={setRulesetId}
         onMode={setMode}
         onSeed={setSeed}
+        onMatchLength={setMatchLength}
         onStart={() => void startGame()}
         onDemo={(demo) => void startGame(demo)}
         onContinue={() => void continueGame()}

@@ -19,6 +19,9 @@ Open <http://127.0.0.1:4173>. The server stores local data in
 `~/.hk-mahjong-coach/coach.sqlite`. `POST /api/profile/reset` or `mahjong profile reset` clears
 learner progress while leaving the application schema intact.
 
+The home screen keeps the first-person Three.js table for both setup and play. Choose a one-wind
+practice match or a full four-wind match; completed full matches show public final standings.
+
 ## CLI
 
 ```bash

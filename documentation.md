@@ -122,9 +122,9 @@
 - Learner-owned decisions and reviews are bound to the owning game. When a request ID is supplied,
   decision evidence must match the accepted player/action/revision event batch; unrelated legal
   actions are rejected. Persisted imports apply the same ownership and completed-hand checks.
-- Validation on the exact dirty SHA: 21 test files/328 tests, fresh coverage gates (persistence
-  87.97% statements; coach 95.30%; protocol 100% statements/96.96% branches), 500-hand fast
-  simulation with zero failures, production build, and smoke.
+- Validation on the exact candidate: 24 test files/340 tests, 338 coverage tests, fresh coverage
+  gates (persistence 87.97% statements; coach 95.30%; protocol 100% statements/96.96% branches),
+  500-hand fast simulation with zero failures, production build, and smoke.
 
 ## 2026-08-04 — CLI, local web composition, and observation-driven 3D table
 
@@ -138,6 +138,9 @@
   `MahjongTableGameState` is derived from the redacted observation: the learner's face-up hand and
   drawn-tile spacing are exact; opponent hands expose only concealed counts and backs; public melds,
   discards, active-seat labels, and relative seat placement synchronize on every accepted action.
+- Setup supports one-wind practice and full four-wind matches through the same game-creation route.
+  A terminal full match adds a public score-ranked standings panel; movement and camera remain
+  first-person scene behavior while the DOM overlay stays authoritative for legal actions.
 - The scene remains presentation-only for movement/camera; legal actions and game truth stay in the
   DOM observation overlay and authoritative session engine. WebGL is intentionally skipped in
   automation browsers whose SwiftShader renderer stalls; headed browsers mount the full scene.
@@ -199,3 +202,6 @@ pnpm start
 - Milestones 0–10 are locally validated as a working prototype. The remote natural-wall receipt and
   live production provider/no-key attestation remain outside this checkout; screenshots and headed
   WebGL capture are optional visual evidence rather than correctness gates.
+- The natural-simulation workflow is committed on this branch but is not registered on GitHub's
+  current default branch (`visual-table-gb9d082b587`), so the remote 500-hand gate remains
+  undispatched until that branch change is explicitly authorized.

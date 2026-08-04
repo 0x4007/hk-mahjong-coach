@@ -6,6 +6,9 @@ test("exposes first-person setup, seeded rooms, rules glossary, profile, and dri
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Stay in the hand." })).toBeVisible();
   await expect(page.getByText("Live first-person preview")).toBeVisible();
+  await expect(page.getByLabel("Match length")).toHaveValue("one_wind");
+  await page.getByLabel("Match length").selectOption("full_four_winds");
+  await expect(page.getByLabel("Match length")).toHaveValue("full_four_winds");
 
   const demoRooms = page.locator(".demo-card");
   await expect(demoRooms).toHaveCount(10);
