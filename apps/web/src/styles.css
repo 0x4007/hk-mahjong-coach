@@ -299,14 +299,12 @@ button[aria-pressed="true"] {
   top: 50%;
   left: 50%;
   display: grid;
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 3.45rem;
+  height: 3.45rem;
   place-items: center;
-  border: 1px solid rgb(255 255 255 / 72%);
+  border: 3px solid rgb(255 255 255 / 10%);
   border-radius: 50%;
-  box-shadow:
-    0 0 0 1px rgb(12 18 19 / 48%),
-    0 0 1.2rem rgb(115 220 232 / 34%);
+  box-shadow: none;
   pointer-events: none;
   transform: translate(-50%, -50%);
 }
@@ -315,8 +313,7 @@ button[aria-pressed="true"] {
   width: 0.22rem;
   height: 0.22rem;
   border-radius: 50%;
-  background: var(--accent-cyan);
-  box-shadow: 0 0 0.45rem rgb(115 220 232 / 72%);
+  background: #ffffff;
 }
 
 .scene-overlay {

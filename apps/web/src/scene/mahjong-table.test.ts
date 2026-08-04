@@ -236,14 +236,14 @@ describe("exploration room exclusion", () => {
 });
 
 describe("append-only exploration chunks", () => {
-  it("keeps the initial window and previously visited chunks resident", () => {
+  it("preloads all exploration chunks up front and retains them", () => {
     const scene = new THREE.Scene();
     const world = createExplorationWorld(scene, "append-only-test");
 
-    expect(world.getLoadedChunkCount()).toBe(9);
+    expect(world.getLoadedChunkCount()).toBe(255);
     world.update(new THREE.Vector3(16, 0, 0));
     const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBeGreaterThan(9);
+    expect(expandedCount).toBe(255);
 
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);

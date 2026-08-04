@@ -19,6 +19,12 @@ import {
 } from "./mahjong-physics.js";
 
 if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    // Flush the live scene before Vite replaces this module. React's wrapper
+    // also disposes the mount, but that remount can race Fast Refresh when a
+    // scene dependency changes.
+    window.dispatchEvent(new Event(MAHJONG_TABLE_HMR_SAVE_EVENT));
+  });
   import.meta.hot.accept(() => {
     // Ask the React wrapper to replace only the mounted Three.js scene. The
     // surrounding app state and browser session stay intact during iteration.
@@ -27,6 +33,7 @@ if (import.meta.hot) {
 }
 
 export const MAHJONG_TABLE_HMR_EVENT = "mahjong-table:scene-hmr";
+export const MAHJONG_TABLE_HMR_SAVE_EVENT = "mahjong-table:scene-hmr-save";
 
 export type SceneView = "seat" | "overhead";
 
@@ -90,6 +97,26 @@ const WORLD_BOUNDS = {
   minZ: -52,
   maxZ: 52,
 } as const;
+const OUTSIDE_PLAY_GRID_UNIT = 0.5;
+const OUTSIDE_PLAY_GRID_ROTATION_STEP = Math.PI / 4;
+
+const quantizeToGrid = (value: number): number =>
+  Math.round(value / OUTSIDE_PLAY_GRID_UNIT) * OUTSIDE_PLAY_GRID_UNIT;
+
+const quantizeHorizontal = (position: THREE.Vector3): THREE.Vector3 => {
+  position.x = quantizeToGrid(position.x);
+  position.z = quantizeToGrid(position.z);
+  return position;
+};
+
+const quantizeScale = (value: number): number =>
+  Math.max(
+    OUTSIDE_PLAY_GRID_UNIT,
+    Math.round(value / OUTSIDE_PLAY_GRID_UNIT) * OUTSIDE_PLAY_GRID_UNIT,
+  );
+
+const quantizeRotation45 = (rotation: number): number =>
+  Math.round(rotation / OUTSIDE_PLAY_GRID_ROTATION_STEP) * OUTSIDE_PLAY_GRID_ROTATION_STEP;
 
 const isVisualScenePositionRecoverable = (position: VisualSceneVector3): boolean => {
   const [x, y, z] = position;
@@ -786,7 +813,6 @@ const FOCUS_CALIBRATION_RAMP_RUN = 24;
 const FOCUS_CALIBRATION_RAMP_WIDTH = 8;
 const FOCUS_CALIBRATION_RAMP_TOP_Z = FOCUS_CALIBRATION_PLATFORM_WIDTH / 2;
 const EXPLORATION_CHUNK_SIZE = 8;
-const EXPLORATION_CHUNK_RADIUS = 1;
 
 /**
  * The room is larger than one streamed block, so the first city blocks at
@@ -2143,8 +2169,7 @@ const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHall
   deck.position.y = FOCUS_CALIBRATION_DECK_HEIGHT;
   root.add(deck);
   const startX = FOCUS_CALIBRATION_START_X;
-  const hallwayStartX =
-    startX - FOCUS_CALIBRATION_ENTRY_MARGIN - FOCUS_CALIBRATION_BACK_EXTENSION;
+  const hallwayStartX = startX - FOCUS_CALIBRATION_ENTRY_MARGIN - FOCUS_CALIBRATION_BACK_EXTENSION;
   const endX = startX + FOCUS_CALIBRATION_LENGTH;
   const hallwayLength = endX - hallwayStartX;
   const centerX = (hallwayStartX + endX) / 2;
@@ -2292,7 +2317,64 @@ const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHall
     FOCUS_CALIBRATION_LENGTH,
   ];
   const targetGeometry = new RoundedBoxGeometry(0.09, 0.62, 0.52, 4, 0.035);
-  const targetDotGeometry = new THREE.CylinderGeometry(0.09, 0.09, 0.025, 20);
+  // The focus‑calibration target dot has historically been a small dark disc that
+  // inherited the panel material. The new design calls for a larger, white,
+  // semi‑transparent disc with a thicker outline.
+  //
+  // * Triple the original diameter – the original cylinder had a radius of 0.09,
+  //   so the new radius is 0.27.
+  // * Use a white colour with 50 % opacity (hex `#ffffff80`).
+  // * The disc remains thin (height = 0.025) and is rotated onto the Y‑plane.
+  // The focus‑calibration target dot is a visual aid that previously used a small
+  // dark cylinder that inherited the panel material.  The new design requires a
+  // larger white disc with 50 % opacity (hex ``#ffffff80``) and a visible border
+  // whose stroke width is three times the original thickness.
+  //
+  // * Triple the original radius: the old cylinder had a radius of ``0.09`` – the
+  //   new radius is ``0.27``.
+  // * Use a semi‑transparent white material for the fill.
+  // * Add a thin ring geometry to serve as the outline (stroke). The ring is
+  //   slightly larger than the disc to create a visible border.  The thickness is
+  //   chosen as ``0.015`` which is roughly three times the estimated original
+  //   stroke width.
+  // ---------------------------------------------------------------------------
+  // Focus‑calibration target – dot
+  // ---------------------------------------------------------------------------
+  // The original implementation used a small dark cylinder that inherited the
+  // panel material. The new design requirements are:
+  //   • The disc should be white with 50 % opacity (hex ``#ffffff80``).
+  //   • Its diameter should be three times the original (original radius = 0.09).
+  //   • An outline (stroke) that is three times the original line width.
+  //
+  // We achieve this by:
+  //   – Using a larger cylinder geometry (radius 0.27).
+  //   – Creating a dedicated ``MeshBasicMaterial`` with ``color: 0xffffff`` and a
+  //     semi‑transparent opacity of ``0.5``.
+  //   – Adding a thin ``RingGeometry`` around the disc to act as the stroke.
+  //     The ring thickness is based on an estimated original stroke of ``0.009`` –
+  //     three times that gives a ``strokeWidth`` of ``0.027``.
+  const targetDotGeometry = new THREE.CylinderGeometry(0.27, 0.27, 0.025, 20);
+  // Material for the white, semi‑transparent fill.
+  const whiteDotMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+  });
+  // Outline (stroke) geometry and material.
+  const strokeWidth = 0.027; // three times an estimated original stroke width.
+  const targetDotOutlineGeometry = new THREE.RingGeometry(
+    0.27 - strokeWidth,
+    0.27 + strokeWidth,
+    20,
+  );
+  const outlineMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.5,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
   for (const [index, distance] of targetDistances.entries()) {
     const target = new THREE.Group();
     target.name = `FocusCalibrationTarget:${distance.toFixed(2)}m`;
@@ -2304,12 +2386,22 @@ const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHall
     panel.castShadow = true;
     panel.receiveShadow = true;
     target.add(panel);
-    const dot = new THREE.Mesh(targetDotGeometry, material);
+    // Use the dedicated white, semi‑transparent material for the disc.
+    const dot = new THREE.Mesh(targetDotGeometry, whiteDotMaterial);
     dot.name = "FocusCalibrationTargetDot";
     dot.rotation.z = Math.PI / 2;
     dot.position.x = -0.06;
     dot.castShadow = true;
     target.add(dot);
+
+    // Add the outline (stroke) mesh. The outline sits just behind the disc to avoid
+    // z‑fighting; a slight offset on the Y‑axis works well because the disc is thin.
+    const outline = new THREE.Mesh(targetDotOutlineGeometry, outlineMaterial);
+    outline.name = "FocusCalibrationTargetDotOutline";
+    outline.rotation.z = Math.PI / 2;
+    outline.position.set(-0.06, 0.001, 0);
+    outline.castShadow = true;
+    target.add(outline);
     deck.add(target);
 
     const isHyperfocal = Math.abs(distance - FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE) < 0.001;
@@ -2671,36 +2763,36 @@ interface GeneratedRoomResult {
 
 const GENERATED_ROOM_PALETTES: readonly GeneratedRoomPalette[] = [
   {
-    label: "Northlight",
-    accent: 0x73dce8,
-    secondary: 0xc9e8e7,
-    surface: 0x263538,
-    dark: 0x172124,
-    plant: 0x5f947b,
+    label: "Northstone",
+    accent: 0xa8b5c1,
+    secondary: 0x6f808e,
+    surface: 0x2d3740,
+    dark: 0x1d252b,
+    plant: 0x58646f,
   },
   {
-    label: "Sunset",
-    accent: 0xe98a67,
-    secondary: 0xf0d1ae,
-    surface: 0x3a2d2d,
-    dark: 0x241b1d,
-    plant: 0x7c8f69,
+    label: "Northstone +1",
+    accent: 0x98a8b5,
+    secondary: 0x64737f,
+    surface: 0x2b343c,
+    dark: 0x1a2127,
+    plant: 0x525d68,
   },
   {
-    label: "Jade study",
-    accent: 0x8bd3a7,
-    secondary: 0xd8e7c9,
-    surface: 0x293a36,
-    dark: 0x192724,
-    plant: 0x6fa67d,
+    label: "Northstone +2",
+    accent: 0x9aa8b4,
+    secondary: 0x697985,
+    surface: 0x2f3942,
+    dark: 0x1c242a,
+    plant: 0x55616d,
   },
   {
-    label: "Cobalt gallery",
-    accent: 0x7ca8e8,
-    secondary: 0xd2d9ec,
-    surface: 0x293445,
-    dark: 0x18212d,
-    plant: 0x739c8d,
+    label: "Northstone +3",
+    accent: 0xa0adba,
+    secondary: 0x6a7a88,
+    surface: 0x2a3540,
+    dark: 0x191f25,
+    plant: 0x56616d,
   },
 ] as const;
 
@@ -2713,7 +2805,8 @@ const addGeneratedPlanter = (
   const planter = new THREE.Group();
   planter.name = "GeneratedPlanter";
   planter.position.copy(position);
-  planter.rotation.y = random.nextFloat() * Math.PI * 2;
+  quantizeHorizontal(planter.position);
+  planter.rotation.y = quantizeRotation45(random.nextFloat() * Math.PI * 2);
   const pot = new THREE.Mesh(
     new THREE.CylinderGeometry(0.22, 0.28, 0.42, 18),
     new THREE.MeshStandardMaterial({ color: palette.dark, roughness: 0.78 }),
@@ -2738,12 +2831,16 @@ const addGeneratedPlanter = (
   for (let index = 0; index < leafCount; index += 1) {
     const leaf = new THREE.Mesh(leafGeometry, leafMaterial);
     leaf.position.set(
-      (random.nextFloat() - 0.5) * 0.28,
+      quantizeToGrid((random.nextFloat() - 0.5) * 0.28),
       0.94 + random.nextFloat() * 0.45,
-      (random.nextFloat() - 0.5) * 0.28,
+      quantizeToGrid((random.nextFloat() - 0.5) * 0.28),
     );
     leaf.scale.set(0.58, 1.25 + random.nextFloat() * 0.55, 0.58);
-    leaf.rotation.set(random.nextFloat() * 0.35, random.nextFloat() * Math.PI, 0);
+    leaf.rotation.set(
+      random.nextFloat() * 0.35,
+      quantizeRotation45(random.nextFloat() * Math.PI * 2),
+      0,
+    );
     leaf.castShadow = true;
     planter.add(leaf);
   }
@@ -2760,7 +2857,8 @@ const addGeneratedDivider = (
   const divider = new THREE.Group();
   divider.name = "GeneratedRoomDivider";
   divider.position.copy(position);
-  divider.rotation.y = rotation;
+  quantizeHorizontal(divider.position);
+  divider.rotation.y = quantizeRotation45(rotation);
   const frameMaterial = new THREE.MeshStandardMaterial({
     color: palette.secondary,
     roughness: 0.38,
@@ -2773,8 +2871,8 @@ const addGeneratedDivider = (
     roughness: 0.34,
     metalness: 0.12,
   });
-  const width = 1.25 + random.nextFloat() * 0.72;
-  const height = 2.25 + random.nextFloat() * 0.8;
+  const width = quantizeScale(1.25 + random.nextFloat() * 0.72);
+  const height = quantizeScale(2.25 + random.nextFloat() * 0.8);
   const slatCount = 3 + random.nextInt(3);
   const slatSpacing = width / Math.max(1, slatCount - 1);
   for (let index = 0; index < slatCount; index += 1) {
@@ -2806,9 +2904,10 @@ const addGeneratedWallPanel = (
   const panel = new THREE.Group();
   panel.name = "GeneratedWallPanel";
   panel.position.copy(position);
-  panel.rotation.y = rotation;
-  const width = 0.86 + random.nextFloat() * 0.78;
-  const height = 0.92 + random.nextFloat() * 0.78;
+  quantizeHorizontal(panel.position);
+  panel.rotation.y = quantizeRotation45(rotation);
+  const width = quantizeScale(0.86 + random.nextFloat() * 0.78);
+  const height = quantizeScale(0.92 + random.nextFloat() * 0.78);
   const panelMaterial = new THREE.MeshStandardMaterial({
     color: palette.surface,
     roughness: 0.65,
@@ -2849,7 +2948,7 @@ const addGeneratedLightBar = (
   palette: GeneratedRoomPalette,
   random: ReturnType<typeof createSeededRandom>,
 ): void => {
-  const width = 1.2 + random.nextFloat() * 1.7;
+  const width = quantizeScale(1.2 + random.nextFloat() * 1.7);
   const fixture = new THREE.Mesh(
     new RoundedBoxGeometry(width, 0.06, 0.075, 3, 0.018),
     new THREE.MeshStandardMaterial({
@@ -2862,7 +2961,8 @@ const addGeneratedLightBar = (
   );
   fixture.name = "GeneratedLightBar";
   fixture.position.copy(position);
-  fixture.rotation.y = rotation;
+  quantizeHorizontal(fixture.position);
+  fixture.rotation.y = quantizeRotation45(rotation);
   fixture.castShadow = true;
   parent.add(fixture);
 };
@@ -2920,10 +3020,10 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
     root.add(strip);
   }
 
-  const ceilingLightCount = 2 + random.nextInt(3);
+  const ceilingLightCount = 1 + random.nextInt(2);
   for (let index = 0; index < ceilingLightCount; index += 1) {
-    const x = -3.2 + random.nextFloat() * 6.4;
-    const z = -4.35 + random.nextFloat() * 4.2;
+    const x = quantizeToGrid(-3.2 + random.nextFloat() * 6.4);
+    const z = quantizeToGrid(-4.35 + random.nextFloat() * 4.2);
     addGeneratedLightBar(
       root,
       new THREE.Vector3(x, 4.5 + random.nextFloat() * 0.24, z),
@@ -2944,23 +3044,18 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
     { position: new THREE.Vector3(3.6, 0, -5.36), rotation: 0 },
   ] as const;
   wallSlots.forEach((slot, index) => {
-    if (random.nextFloat() < 0.16) {
+    if (random.nextFloat() < 0.55) {
       return;
     }
     const position = slot.position.clone();
     position.z += (random.nextFloat() - 0.5) * (Math.abs(slot.position.x) > 7 ? 0.35 : 0.2);
     position.x += Math.abs(slot.position.x) > 7 ? 0 : (random.nextFloat() - 0.5) * 0.32;
+    quantizeHorizontal(position);
     const kind = (random.nextInt(4) + index) % 4;
     if (kind === 0) {
       addGeneratedPlanter(root, new THREE.Vector3(position.x, 0, position.z), palette, random);
     } else if (kind === 1) {
-      addGeneratedDivider(
-        root,
-        new THREE.Vector3(position.x, 0, position.z),
-        slot.rotation,
-        palette,
-        random,
-      );
+      addGeneratedDivider(root, position, slot.rotation, palette, random);
     } else if (kind === 2) {
       addGeneratedWallPanel(root, position, slot.rotation, palette, random);
     } else {
@@ -2980,6 +3075,7 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
   );
   plinth.name = "GeneratedSculpturePlinth";
   plinth.position.set(random.nextFloat() > 0.5 ? -5.7 : 5.7, 0.3, -0.6 + random.nextFloat() * 2.2);
+  quantizeHorizontal(plinth.position);
   plinth.castShadow = true;
   plinth.receiveShadow = true;
   root.add(plinth);
@@ -2995,7 +3091,7 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
   );
   sculpture.name = "GeneratedSculpture";
   sculpture.position.y = 0.72;
-  sculpture.rotation.set(random.nextFloat() * 0.6, random.nextFloat() * Math.PI, 0);
+  sculpture.rotation.y = quantizeRotation45(random.nextFloat() * Math.PI * 2);
   sculpture.castShadow = true;
   plinth.add(sculpture);
 
@@ -3043,30 +3139,48 @@ interface ExplorationWindowSpec {
 }
 
 const EXPLORATION_ZONE_STYLES: readonly ExplorationZoneStyle[] = [
-  { label: "South courtyard", ground: 0x596866, path: 0x344447, prop: 0x91aaa0, accent: 0xe98a67 },
-  { label: "West tea garden", ground: 0x566d62, path: 0x30463f, prop: 0x9bb78e, accent: 0x8bd3a7 },
+  {
+    label: "South courtyard",
+    ground: 0x545f67,
+    path: 0x3a4852,
+    prop: 0x72818d,
+    accent: 0x93a0ad,
+  },
+  {
+    label: "West tea garden",
+    ground: 0x505c65,
+    path: 0x37434d,
+    prop: 0x6e7b88,
+    accent: 0x8a96a2,
+  },
   {
     label: "East practice court",
-    ground: 0x5c687a,
-    path: 0x354252,
-    prop: 0xb4c2d8,
-    accent: 0x7ca8e8,
+    ground: 0x5a656f,
+    path: 0x3e4a54,
+    prop: 0x7a8794,
+    accent: 0x97a3ae,
   },
-  { label: "North skybridge", ground: 0x536b74, path: 0x304a54, prop: 0x9dc6ce, accent: 0x73dce8 },
+  {
+    label: "North skybridge",
+    ground: 0x515a63,
+    path: 0x394450,
+    prop: 0x6f7d89,
+    accent: 0x91a0ad,
+  },
 ] as const;
 
 const addExplorationGateway = (scene: THREE.Scene): void => {
   const gateway = new THREE.Group();
   gateway.name = "ExplorationGateway";
   const frameMaterial = new THREE.MeshStandardMaterial({
-    color: COLORS.whiteLacquer,
+    color: 0xf2f4f7,
     roughness: 0.34,
     metalness: 0.22,
   });
   const accentMaterial = new THREE.MeshStandardMaterial({
-    color: COLORS.cyan,
-    emissive: COLORS.cyan,
-    emissiveIntensity: 0.44,
+    color: 0x8f9ea8,
+    emissive: 0x8f9ea8,
+    emissiveIntensity: 0.32,
     roughness: 0.3,
     metalness: 0.18,
   });
@@ -3095,9 +3209,9 @@ const addExplorationGateway = (scene: THREE.Scene): void => {
   threshold.receiveShadow = true;
   gateway.add(threshold);
   const arrowMaterial = new THREE.MeshStandardMaterial({
-    color: COLORS.red,
-    emissive: COLORS.red,
-    emissiveIntensity: 0.22,
+    color: 0xa4b2bd,
+    emissive: 0xa4b2bd,
+    emissiveIntensity: 0.18,
     roughness: 0.34,
   });
   for (const z of [7.68, 8.26, 8.84] as const) {
@@ -3179,8 +3293,6 @@ export const createExplorationWorld = (
   );
   const activeChunks = new Map<string, ExplorationChunk>();
   let physicsVersion = 0;
-  let centerChunkX = Number.NaN;
-  let centerChunkZ = Number.NaN;
   let currentArea = "Penthouse";
 
   const addClippedMeshes = (
@@ -3307,26 +3419,28 @@ export const createExplorationWorld = (
       true,
     );
 
-    const buildingCount = 1 + random.nextInt(3);
+    const buildingCount = 1 + random.nextInt(2);
     const buildingSpecs: ExplorationBuildingSpec[] = [];
     for (let index = 0; index < buildingCount; index += 1) {
       const edge = random.nextInt(4);
       const edgeOffset = (random.nextFloat() - 0.5) * 2.3;
-      const x =
+      const x = quantizeToGrid(
         edge === 0
           ? originX - 2.45 + edgeOffset
           : edge === 1
             ? originX + 2.45 + edgeOffset
-            : originX + edgeOffset;
-      const z =
+            : originX + edgeOffset,
+      );
+      const z = quantizeToGrid(
         edge === 2
           ? originZ - 2.45 + edgeOffset
           : edge === 3
             ? originZ + 2.45 + edgeOffset
-            : originZ + edgeOffset;
-      const width = 1.15 + random.nextFloat() * 1.55;
-      const height = 1.7 + random.nextFloat() * 5.2;
-      const depth = 1.15 + random.nextFloat() * 1.55;
+            : originZ + edgeOffset,
+      );
+      const width = quantizeScale(1.15 + random.nextFloat() * 1.55);
+      const height = quantizeScale(1.7 + random.nextFloat() * 5.2);
+      const depth = quantizeScale(1.15 + random.nextFloat() * 1.55);
       const rotation = random.nextInt(4) * (Math.PI / 2);
       const swapsAxes = Math.abs(Math.sin(rotation)) > 0.5;
       if (
@@ -3389,8 +3503,8 @@ export const createExplorationWorld = (
         const swapsAxes = Math.abs(Math.sin(building.rotation)) > 0.5;
         const halfWidth = swapsAxes ? 0.0225 : 0.28 * windowWidth;
         const halfDepth = swapsAxes ? 0.28 * windowWidth : 0.0225;
-        const windowX = building.x + offsetX;
-        const windowZ = building.z + offsetZ;
+        const windowX = quantizeToGrid(building.x + offsetX);
+        const windowZ = quantizeToGrid(building.z + offsetZ);
         if (
           !isExplorationRectOutsidePenthouse({
             minX: windowX - halfWidth,
@@ -3430,7 +3544,7 @@ export const createExplorationWorld = (
       chunk.add(windows);
     }
 
-    if (random.nextFloat() < 0.38) {
+    if (random.nextFloat() < 0.2) {
       const bridgeRotation = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
       const bridgeLength = EXPLORATION_CHUNK_SIZE * 0.86;
       const bridgeHalfWidth = bridgeRotation === 0 ? bridgeLength / 2 : 0.1;
@@ -3454,7 +3568,7 @@ export const createExplorationWorld = (
         const bridge = new THREE.Mesh(bridgeGeometry, bridgeMaterials[styleIndex]);
         bridge.name = "SkybridgeSpan";
         bridge.position.set(originX, 3.2 + random.nextFloat() * 2.2, originZ);
-        bridge.rotation.y = bridgeRotation;
+        bridge.rotation.y = quantizeRotation45(bridgeRotation);
         bridge.castShadow = true;
         bridge.receiveShadow = true;
         chunk.add(bridge);
@@ -3466,20 +3580,20 @@ export const createExplorationWorld = (
       }
     }
 
-    const propCount = 3 + random.nextInt(5);
+    const propCount = 1 + random.nextInt(3);
     const propMatrices: THREE.Matrix4[] = [];
     for (let index = 0; index < propCount; index += 1) {
       position.set(
-        originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4),
-        0.4 + random.nextFloat() * 0.8,
-        originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4),
+        quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
+        quantizeToGrid(0.4 + random.nextFloat() * 0.8),
+        quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
       );
-      const rotationY = random.nextFloat() * Math.PI * 2;
+      const rotationY = quantizeRotation45(random.nextFloat() * Math.PI * 2);
       rotation.setFromAxisAngle(yAxis, rotationY);
       scale.set(
-        0.65 + random.nextFloat() * 1.25,
-        0.65 + random.nextFloat() * 2.2,
-        0.65 + random.nextFloat() * 1.25,
+        quantizeScale(0.65 + random.nextFloat() * 1.25),
+        quantizeScale(0.65 + random.nextFloat() * 2.2),
+        quantizeScale(0.65 + random.nextFloat() * 1.25),
       );
       const halfExtent = 0.14 * Math.max(scale.x, scale.z);
       if (
@@ -3523,15 +3637,15 @@ export const createExplorationWorld = (
       chunk.add(props);
     }
 
-    const beaconCount = 2 + random.nextInt(3);
+    const beaconCount = random.nextInt(2);
     const beaconMatrices: THREE.Matrix4[] = [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
     for (let index = 0; index < beaconCount; index += 1) {
       position.set(
-        originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2),
-        1.5 + random.nextFloat() * 1.8,
-        originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2),
+        quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2)),
+        quantizeToGrid(1.5 + random.nextFloat() * 1.8),
+        quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2)),
       );
       if (
         !isExplorationRectOutsidePenthouse({
@@ -3582,54 +3696,47 @@ export const createExplorationWorld = (
     });
   };
 
-  const update = (position: THREE.Vector3): void => {
-    const nextArea = describeArea(position);
-    const nextChunkX = chunkCoordinate(position.x);
-    const nextChunkZ = chunkCoordinate(position.z);
-    if (nextChunkX !== centerChunkX || nextChunkZ !== centerChunkZ) {
-      centerChunkX = nextChunkX;
-      centerChunkZ = nextChunkZ;
-      let physicsChanged = false;
-      // Exploration is an append-only generated map. Keep every chunk once it
-      // has entered the lookahead window so the room can show city scenery
-      // through its windows before the player leaves, and returning to a
-      // neighborhood never regenerates or unloads it. The room seed and chunk
-      // coordinates remain each chunk's identity.
-      for (
-        let offsetX = -EXPLORATION_CHUNK_RADIUS;
-        offsetX <= EXPLORATION_CHUNK_RADIUS;
-        offsetX += 1
+  const preloadAllChunks = (): void => {
+    let physicsChanged = false;
+    const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX) - 1;
+    const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX) + 1;
+    const minChunkZ = chunkCoordinate(WORLD_BOUNDS.minZ) - 1;
+    const maxChunkZ = chunkCoordinate(WORLD_BOUNDS.maxZ) + 1;
+
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
+      const centerX = chunkX * EXPLORATION_CHUNK_SIZE;
+      if (
+        centerX < WORLD_BOUNDS.minX - EXPLORATION_CHUNK_SIZE ||
+        centerX > WORLD_BOUNDS.maxX + EXPLORATION_CHUNK_SIZE
       ) {
-        for (
-          let offsetZ = -EXPLORATION_CHUNK_RADIUS;
-          offsetZ <= EXPLORATION_CHUNK_RADIUS;
-          offsetZ += 1
-        ) {
-          const chunkX = centerChunkX + offsetX;
-          const chunkZ = centerChunkZ + offsetZ;
-          const centerX = chunkX * EXPLORATION_CHUNK_SIZE;
-          const centerZ = chunkZ * EXPLORATION_CHUNK_SIZE;
-          if (
-            centerX < WORLD_BOUNDS.minX - EXPLORATION_CHUNK_SIZE ||
-            centerX > WORLD_BOUNDS.maxX + EXPLORATION_CHUNK_SIZE ||
-            centerZ < WORLD_BOUNDS.minZ - EXPLORATION_CHUNK_SIZE ||
-            centerZ > WORLD_BOUNDS.maxZ + EXPLORATION_CHUNK_SIZE
-          ) {
-            continue;
-          }
-          const key = chunkKey(chunkX, chunkZ);
-          if (!activeChunks.has(key)) {
-            const chunk = createChunk(chunkX, chunkZ);
-            activeChunks.set(key, chunk);
-            root.add(chunk.root);
-            physicsChanged = true;
-          }
-        }
+        continue;
       }
-      if (physicsChanged) {
-        physicsVersion += 1;
+      for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+        const centerZ = chunkZ * EXPLORATION_CHUNK_SIZE;
+        if (
+          centerZ < WORLD_BOUNDS.minZ - EXPLORATION_CHUNK_SIZE ||
+          centerZ > WORLD_BOUNDS.maxZ + EXPLORATION_CHUNK_SIZE
+        ) {
+          continue;
+        }
+
+        const key = chunkKey(chunkX, chunkZ);
+        if (activeChunks.has(key)) {
+          continue;
+        }
+        const chunk = createChunk(chunkX, chunkZ);
+        activeChunks.set(key, chunk);
+        root.add(chunk.root);
+        physicsChanged = true;
       }
     }
+    if (physicsChanged) {
+      physicsVersion += 1;
+    }
+  };
+
+  const update = (position: THREE.Vector3): void => {
+    const nextArea = describeArea(position);
     if (nextArea !== currentArea) {
       currentArea = nextArea;
       onAreaChange?.(currentArea);
@@ -3662,6 +3769,7 @@ export const createExplorationWorld = (
     }
   };
 
+  preloadAllChunks();
   update(new THREE.Vector3(0, 0, 0));
   onAreaChange?.(currentArea);
   return {
@@ -4367,6 +4475,10 @@ export const createMahjongTableScene = (
     }
     lastSceneStateSaveAt = now;
   };
+  const onHotModuleDispose = (): void => {
+    saveSceneState(true);
+  };
+  window.addEventListener(MAHJONG_TABLE_HMR_SAVE_EVENT, onHotModuleDispose);
   const syncPhysicsCharacterToCamera = (): void => {
     physicsCharacterPosition = {
       x: camera.position.x,
@@ -5717,6 +5829,24 @@ export const createMahjongTableScene = (
       setWireframe: setDebugWireframe,
       setBoundsVisible: setDebugBoundsVisible,
       resetDefaults: resetDebugPreferences,
+      /**
+       * Teleport the camera to the focus‑calibration platform.
+       * This is exposed on the `debug` API so UI components can call
+       * `mount.debug.teleportToFocusLab()` to instantly move the view to the
+       * ramp used for focus calibration.
+       */
+      teleportToFocusLab: () => {
+        if (focusCalibrationRoot !== null) {
+          const worldPos = new THREE.Vector3();
+          focusCalibrationRoot.getWorldPosition(worldPos);
+          // The main Three.js camera used for rendering is the `camera`
+          // variable defined earlier in this module. We copy the world
+          // position of the ramp and orient the camera to look at that point.
+          camera.position.copy(worldPos);
+          camera.lookAt(worldPos);
+          camera.updateMatrixWorld(true);
+        }
+      },
       getSnapshot: getDebugSnapshot,
     },
     anchors,
@@ -5738,6 +5868,7 @@ export const createMahjongTableScene = (
       observer.disconnect();
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener(MAHJONG_TABLE_HMR_SAVE_EVENT, onHotModuleDispose);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onWindowBlur);

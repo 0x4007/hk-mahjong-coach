@@ -240,7 +240,16 @@ const VisualDebugPanel = ({
         <button
           className="scene-debug-focus-quick-action"
           onClick={() => {
+            // Switch the camera preset to the focus‑calibration view.
             setCameraPreset("focusCalibration");
+            // Teleport the camera directly to the focus‑lab platform so the
+            // user is positioned at the calibration ramp immediately.
+            // ``mount`` is the scene mount provided by the surrounding hook.
+            // The new debug method ``teleportToFocusLab`` is a safe wrapper that
+            // moves the active camera to the ramp's world position.
+            // The optional chaining protects against the mount being undefined
+            // during the very first render.
+            mount?.debug?.teleportToFocusLab?.();
             setIsExpanded(true);
           }}
           type="button"

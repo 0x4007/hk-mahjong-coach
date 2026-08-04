@@ -36,6 +36,7 @@ export const MahjongTableScene = ({
   const debugRef = useRef(debug);
   const viewRef = useRef(view);
   const roomSeedRef = useRef(roomSeed);
+  const appliedViewRef = useRef<SceneView | null>(null);
   onMountRef.current = onMount;
   onMotionLookStatusChangeRef.current = onMotionLookStatusChange;
   onExplorationAreaChangeRef.current = onExplorationAreaChange;
@@ -68,6 +69,7 @@ export const MahjongTableScene = ({
           onReady: () => setSceneReady(true),
           roomSeed: roomSeedRef.current,
         });
+        appliedViewRef.current = viewRef.current;
         mountRef.current = mount;
         onMountRef.current?.(mount);
         setError(null);
@@ -90,6 +92,10 @@ export const MahjongTableScene = ({
   }, [roomSeed]);
 
   useEffect(() => {
+    if (appliedViewRef.current === view) {
+      return;
+    }
+    appliedViewRef.current = view;
     mountRef.current?.setView(view);
   }, [view]);
 
