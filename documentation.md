@@ -141,15 +141,15 @@
 - The scene remains presentation-only for movement/camera; legal actions and game truth stay in the
   DOM observation overlay and authoritative session engine. WebGL is intentionally skipped in
   automation browsers whose SwiftShader renderer stalls; headed browsers mount the full scene.
-- Validation on this dirty state: 338 unit/integration tests, 336 coverage tests, isolated seeded
+- Validation on this dirty state: 340 unit/integration tests, 338 coverage tests, isolated seeded
   Playwright acceptance, `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`,
   `pnpm smoke`, and `pnpm verify` pass.
 
 ## 2026-08-04 — Release simulation and local acceptance receipt
 
 - The isolated CLI JSONL subprocess fixture proves schema-valid stdout, sequence monotonicity, the
-  one-second action deadline, structured `external_agent_timeout`, and deterministic fallback after
-  three timeouts.
+  one-second action deadline, structured `external_agent_timeout`, deterministic fallback after
+  three timeouts, and a real first-legal-action agent completing a seeded hand through `hand_ended`.
 - The release simulation completes 10,000 hands and 2,500 matches with zero illegal actions,
   invariant violations, crashes, command-bound failures, or replay mismatches. Run digest:
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.

@@ -146,6 +146,9 @@ Evidence recorded 2026-08-04:
 - The JSONL host applies a one-second response deadline, emits a structured `external_agent_timeout`
   error, and falls back after three malformed or timed-out responses. The isolated subprocess
   acceptance fixture passes with clean, schema-valid stdout and the bounded fallback receipt.
+- A real scripted JSONL agent now selects the first emitted legal action until a seeded hand emits
+  `hand_ended`; the subprocess test observes accepted actions, rejects no legal action, and verifies
+  strictly increasing host sequence numbers.
 
 ## Milestone 7 — Local server and visual table (`complete`)
 
@@ -208,7 +211,7 @@ Evidence recorded 2026-08-04:
 - Ten deterministic seeded rooms are listed in the home screen and through `mahjong demos`; the
   rules screen loads every bundled scoring rule plus the complete local tile glossary.
 - The seeded Playwright browser flow passes against an isolated temporary database. Full validation
-  passes 24 test files and 339 tests; the configured coverage gates pass with 336 coverage tests.
+  passes 24 test files and 340 tests; the configured coverage gates pass with 338 coverage tests.
 - The release simulation completes 10,000 hands across 2,500 matches with zero illegal actions,
   invariant violations, crashes, command-bound failures, or replay mismatches. Receipt run digest:
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.

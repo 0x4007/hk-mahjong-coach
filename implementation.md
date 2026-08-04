@@ -90,7 +90,9 @@ remote natural-wall receipt and live provider attestation remain external eviden
 - The CLI dispatches human, JSONL stdio, replay, analysis, drill, rules, and profile commands. The
   JSONL host validates envelopes and action IDs, keeps stdout machine-clean, reports structured
   rejections, applies a one-second deadline, and reaches a bounded deterministic fallback after
-  three malformed or timed-out responses. The isolated subprocess regression passes.
+  three malformed or timed-out responses. A real subprocess agent selects emitted legal actions
+  through a seeded hand and reaches `hand_ended` without rejection; the timeout fallback regression
+  also passes.
 - The Fastify server composes the session controller behind validated HTTP/WebSocket routes. The
   browser now renders the existing first-person Three.js penthouse table over the local game flow,
   with keyboard-safe legal actions, save/resume, replay, hints, drills, profile, and rules views.
@@ -104,9 +106,10 @@ remote natural-wall receipt and live provider attestation remain external eviden
   families are wired through the session and web surfaces. The optional Responses narrator is
   server-only, validates grounded structured output, caches by prompt identity, and falls back to
   templates on provider errors or timeouts.
-- `pnpm test` passes 339 tests; the seeded Playwright browser flows pass against the isolated
-  temporary-database fixture; `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and
-  `pnpm smoke` pass on the canonical candidate.
+- `pnpm test` passes 340 tests and `pnpm test:coverage` passes 338 tests at 93.61% statements and
+  87.64% branches; the seeded Playwright browser flows pass against the isolated temporary-
+  database fixture. `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke`
+  pass on the canonical candidate.
 - The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
