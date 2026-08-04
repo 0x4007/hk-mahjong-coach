@@ -126,6 +126,8 @@ The optional live production provider/no-key attestation remains an external dep
   `989c6b6c7bfaee955edbc005207496e12c6e08c2`. All 20 shards and the aggregate job passed for
   500/500 fully natural shuffled-wall hands under seed namespace `m4-natural-ci-v1`; the aggregate
   receipt digest is `sha256:aa7471e49e9e389db568a2557b853817407a6e79631e88e7bb66c003378b6ec2`.
+- Final hosted verify run `30907663837` passed on this documentation state at SHA
+  `6ca867daa2940ac98cd74a36eeb3e9e8794c8af2`.
 
 ## Blockers and remaining scope
 
