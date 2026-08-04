@@ -15,8 +15,8 @@
 
 ## Current milestone
 
-Milestones 6–9 are complete as local vertical slices. Milestone 10 release hardening is validated
-locally; the remote natural-wall receipt and live provider attestation remain external evidence.
+Milestones 6–10 are complete as local vertical slices. Release hardening is validated locally; the
+remote natural-wall receipt and live provider attestation remain external evidence.
 
 ## Completed
 
@@ -94,15 +94,19 @@ locally; the remote natural-wall receipt and live provider attestation remain ex
 - The Fastify server composes the session controller behind validated HTTP/WebSocket routes. The
   browser now renders the existing first-person Three.js penthouse table over the local game flow,
   with keyboard-safe legal actions, save/resume, replay, hints, drills, profile, and rules views.
+- The home screen exposes ten deterministic seeded rooms; `mahjong demos` lists the same rooms for
+  the CLI. Rules now have a fetched scoring glossary and the complete local tile catalog.
+- Replay has a real, server-gated post-hand omniscient toggle. It reveals concealed hands only for
+  terminal hands or sandbox mode; live non-sandbox replay responses remain observation-redacted.
 - Scene state is observation-derived: the exact learner hand is face-up, opponent concealed hands
   are backs/counts only, and public melds/discards are synchronized on every accepted revision.
 - Offline coaching, learner evidence, curriculum progression, spaced drills, and all fourteen drill
   families are wired through the session and web surfaces. The optional Responses narrator is
   server-only, validates grounded structured output, caches by prompt identity, and falls back to
   templates on provider errors or timeouts.
-- `pnpm test` passes 338 tests; the seeded Playwright browser flow passes against the isolated
+- `pnpm test` passes 339 tests; the seeded Playwright browser flows pass against the isolated
   temporary-database fixture; `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and
-  `pnpm smoke` pass on this dirty canonical state.
+  `pnpm smoke` pass on the canonical candidate.
 - The 10,000-hand release simulation completes 10,000/10,000 hands and 2,500/2,500 matches with
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
@@ -113,10 +117,13 @@ locally; the remote natural-wall receipt and live provider attestation remain ex
   in this local checkout. They are the only remaining release evidence called out by the plan.
 - The browser scene uses procedural Three.js geometry and semantic DOM controls; headed WebGL proof
   is browser-dependent, while automation intentionally skips the renderer on SwiftShader.
+- The ten seeded rooms are deterministic named seeds with teaching focus metadata; they are not
+  bespoke scripted wall fixtures for every acceptance scenario. Use the core/test-fixture scenarios
+  for exact claim, kong, robbery, and scoring setup.
 - This is a validated local prototype, not a production deployment claim.
 
 ## Next action
 
-The local Milestone 10 checks are complete on the exact canonical SHA. Preserve the remote/release
-evidence boundary and do not claim deployment readiness without the natural-wall receipt and live
-provider attestation.
+The local Milestone 10 checks are complete on the exact canonical candidate. Preserve the
+remote/release evidence boundary and do not claim deployment readiness without the natural-wall
+receipt and live provider attestation.

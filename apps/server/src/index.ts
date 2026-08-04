@@ -5,7 +5,7 @@ import { access, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUNDLED_RULESET_IDS, listBundledRulesets } from "@hk-mahjong/hk-rules";
+import { BUNDLED_RULESET_IDS, getBundledRuleset, listBundledRulesets } from "@hk-mahjong/hk-rules";
 import {
   actionRequestSchema,
   actionResponseSchema,
@@ -31,9 +31,11 @@ import {
   hintResponseSchema,
   masteryResponseSchema,
   reviewSchema,
+  rulesetDetailsSchema,
+  demosResponseSchema,
   type ProtocolError,
 } from "@hk-mahjong/protocol";
-import { SessionController } from "@hk-mahjong/session";
+import { listSeededDemos, SessionController } from "@hk-mahjong/session";
 import { CONCEPT_IDS, type ConceptId, type CoachNarrator } from "@hk-mahjong/coach";
 
 const HOST = "127.0.0.1";
@@ -102,11 +104,59 @@ export const buildServer = async (options: ServerOptions = {}): Promise<FastifyI
     listBundledRulesets().map((summary) => rulesetSummarySchema.parse(summary)),
   );
 
+  server.get("/api/demos", () => demosResponseSchema.parse(listSeededDemos()));
+
   server.get<{ Params: { id: string } }>("/api/rulesets/:id", async (request, reply) => {
     try {
       return rulesetSummarySchema.parse(
         listBundledRulesets().find(({ id }) => id === request.params.id),
       );
+    } catch (error) {
+      return sendError(
+        reply,
+        404,
+        errorPayload("ruleset_invalid", error instanceof Error ? error.message : "Unknown ruleset"),
+      );
+    }
+  });
+
+  server.get<{ Params: { id: string } }>("/api/rulesets/:id/details", async (request, reply) => {
+    try {
+      const ruleset = getBundledRuleset(request.params.id);
+      const summary = listBundledRulesets().find(({ id }) => id === request.params.id);
+      if (summary === undefined) {
+        throw new RangeError(`Unknown bundled ruleset ${request.params.id}`);
+      }
+      return rulesetDetailsSchema.parse({
+        ...summary,
+        tileSet: {
+          bonusTilesEnabled: ruleset.definition.tileSet.bonusTilesEnabled,
+          ordinaryDrawDirection: ruleset.definition.tileSet.ordinaryDrawDirection,
+          replacementDrawDirection: ruleset.definition.tileSet.replacementDrawDirection,
+          exhaustionBoundary: ruleset.definition.tileSet.exhaustionBoundary,
+        },
+        winRules: {
+          minimumFaan: ruleset.definition.winRules.minimumFaan,
+          capFaan: ruleset.definition.winRules.capFaan,
+          multipleWinners: ruleset.definition.winRules.multipleWinners,
+          allowSevenPairs: ruleset.definition.winRules.allowSevenPairs,
+          allowThirteenOrphans: ruleset.definition.winRules.allowThirteenOrphans,
+          allowNineGates: ruleset.definition.winRules.allowNineGates,
+        },
+        kongRules: {
+          robAddedKong: ruleset.definition.kongRules.robAddedKong,
+          robConcealedKong: ruleset.definition.kongRules.robConcealedKong,
+          allowKongImmediatelyAfterChowOrPung:
+            ruleset.definition.kongRules.allowKongImmediatelyAfterChowOrPung,
+        },
+        scoringRules: ruleset.definition.scoringRules.map((rule) => ({
+          id: rule.id,
+          names: rule.names,
+          value: rule.value,
+          category: rule.category,
+          enabled: rule.enabled,
+        })),
+      });
     } catch (error) {
       return sendError(
         reply,
@@ -265,7 +315,12 @@ export const buildServer = async (options: ServerOptions = {}): Promise<FastifyI
       }
       try {
         return replayResponseSchema.parse(
-          controller.replay(request.params.id, parsed.data.playerId, parsed.data.branchId),
+          controller.replay(
+            request.params.id,
+            parsed.data.playerId,
+            parsed.data.branchId,
+            parsed.data.omniscient,
+          ),
         );
       } catch (error) {
         return sendError(

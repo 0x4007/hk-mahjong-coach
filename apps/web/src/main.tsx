@@ -1,17 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { tileTypeFromInstanceId, type TileTypeId } from "@hk-mahjong/core";
+import {
+  TILE_DEFINITIONS,
+  getTileDefinition,
+  tileTypeFromInstanceId,
+  type TileTypeId,
+} from "@hk-mahjong/core";
 import {
   actionResponseSchema,
   branchResponseSchema,
   createGameResponseSchema,
   curriculumResponseSchema,
+  demoDescriptorSchema,
+  demosResponseSchema,
   drillAnswerResponseSchema,
   drillSessionResponseSchema,
   hintResponseSchema,
   profileSchema,
   replayResponseSchema,
+  rulesetDetailsSchema,
   rulesetSummarySchema,
+  type DemoDescriptor,
+  type OmniscientReplayView,
+  type RulesetDetails,
   type PlayerObservationDto,
 } from "@hk-mahjong/protocol";
 import { TileFace } from "@hk-mahjong/tile-ui";
@@ -26,6 +37,8 @@ interface RulesetSummary {
   capFaan: number;
   disclaimer: string;
 }
+
+type Demo = DemoDescriptor;
 
 interface HintResult {
   status: "template" | "provider" | "fallback" | "unavailable";
@@ -96,6 +109,7 @@ interface ReplayData {
   }[];
   terminalObservation: PlayerObservationDto;
   omniscientAvailable: boolean;
+  omniscient: OmniscientReplayView | null;
 }
 
 const SAVED_GAME_KEY = "hk-mahjong-coach.saved-game";
@@ -398,6 +412,7 @@ const Table = ({
 
 const Home = ({
   rulesets,
+  demos,
   rulesetId,
   mode,
   seed,
@@ -407,10 +422,12 @@ const Home = ({
   onMode,
   onSeed,
   onStart,
+  onDemo,
   onContinue,
   onNavigate,
 }: {
   rulesets: RulesetSummary[];
+  demos: Demo[];
   rulesetId: string;
   mode: string;
   seed: string;
@@ -420,6 +437,7 @@ const Home = ({
   onMode: (value: string) => void;
   onSeed: (value: string) => void;
   onStart: () => void;
+  onDemo: (demo: Demo) => void;
   onContinue: () => void;
   onNavigate: (view: "home" | "profile" | "drills" | "rules") => void;
 }): React.JSX.Element => {
@@ -506,6 +524,31 @@ const Home = ({
                 </button>
               ) : null}
             </div>
+            <section className="demo-list" aria-labelledby="demo-heading">
+              <div>
+                <p className="eyebrow">Seeded rooms</p>
+                <h3 id="demo-heading">Choose a focused lesson</h3>
+              </div>
+              {demos.length === 0 ? <p>No seeded rooms are available.</p> : null}
+              <div className="demo-grid">
+                {demos.map((demo) => (
+                  <article className="demo-card" key={demo.id}>
+                    <div>
+                      <strong>{demo.title}</strong>
+                      <span>{demo.description}</span>
+                    </div>
+                    <small>{demo.focus.join(" · ")}</small>
+                    <button
+                      className="game-action-button"
+                      onClick={() => onDemo(demo)}
+                      type="button"
+                    >
+                      Enter room
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </section>
           </section>
           <div className="scene-hud home-scene-hud" aria-label="Scene details">
             <span>
@@ -635,9 +678,11 @@ const DrillsView = ({
 };
 
 const RulesView = ({
+  details,
   rulesets,
   onNavigate,
 }: {
+  details: RulesetDetails[];
   rulesets: RulesetSummary[];
   onNavigate: (view: "home" | "profile" | "drills" | "rules") => void;
 }): React.JSX.Element => (
@@ -645,7 +690,7 @@ const RulesView = ({
     <Nav active="rules" onNavigate={onNavigate} />
     <section className="content-card" aria-labelledby="rules-heading">
       <p className="eyebrow">Visible assumptions</p>
-      <h2 id="rules-heading">Bundled rulesets</h2>
+      <h2 id="rules-heading">Rules and glossary</h2>
       <div className="profile-grid">
         {rulesets.map((ruleset) => (
           <article className="score-card" key={ruleset.id}>
@@ -657,6 +702,69 @@ const RulesView = ({
           </article>
         ))}
       </div>
+      {details.map((ruleset) => (
+        <details className="rules-detail" key={ruleset.id} open={ruleset.id === rulesets[0]?.id}>
+          <summary>{ruleset.displayName}</summary>
+          <p>{ruleset.description}</p>
+          <div className="rules-facts">
+            <span>
+              {ruleset.winRules.minimumFaan}-faan minimum · {ruleset.winRules.capFaan}-faan cap
+            </span>
+            <span>
+              {ruleset.tileSet.bonusTilesEnabled ? "144 tiles with bonuses" : "136 tiles"} ·{" "}
+              {ruleset.kongRules.robAddedKong
+                ? "added-kong robbery enabled"
+                : "added-kong robbery off"}
+            </span>
+          </div>
+          <div
+            className="rules-table"
+            role="table"
+            aria-label={`${ruleset.displayName} scoring rules`}
+          >
+            {ruleset.scoringRules.map((rule) => (
+              <div className="rules-row" key={rule.id} role="row">
+                <span role="cell">
+                  <strong>{rule.names.en}</strong>
+                  <small>{rule.id}</small>
+                </span>
+                <span role="cell">
+                  {rule.enabled
+                    ? rule.value.type === "limit"
+                      ? "Limit"
+                      : `${String(rule.value.amount)} faan`
+                    : "Disabled"}
+                </span>
+                <span role="cell">
+                  {rule.names.zhHant} · {rule.names.zhHans}
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      ))}
+      <section className="tile-glossary" aria-labelledby="tile-glossary-heading">
+        <div>
+          <p className="eyebrow">42 semantic tile types</p>
+          <h3 id="tile-glossary-heading">Tile glossary</h3>
+        </div>
+        <div className="tile-glossary-grid">
+          {TILE_DEFINITIONS.map((tile) => (
+            <article className="tile-glossary-item" key={tile.id}>
+              <TileFace tile={tile.id} />
+              <div>
+                <strong>{tile.names.en}</strong>
+                <span>
+                  {tile.compactCode} · {tile.names.zhHant} · {tile.names.zhHans}
+                </span>
+                <small>
+                  {tile.names.jyutping} · {tile.names.pinyin}
+                </small>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
     </section>
   </>
 );
@@ -666,11 +774,15 @@ const ReplayView = ({
   comparison,
   onBranch,
   onBack,
+  onToggleOmniscient,
+  busy,
 }: {
   replay: ReplayData | null;
   comparison: { parent: ReplayData; branch: ReplayData } | null;
   onBranch: (decision: ReplayData["decisions"][number]) => void;
   onBack: () => void;
+  onToggleOmniscient: () => void;
+  busy: boolean;
 }): React.JSX.Element => {
   const [cursor, setCursor] = useState(0);
   useEffect(() => {
@@ -699,6 +811,45 @@ const ReplayView = ({
             {replay.events.length} public events · terminal revision{" "}
             {replay.terminalObservation.revision} · branch {replay.game.branchId}
           </p>
+          {replay.omniscientAvailable ? (
+            <section className="replay-omniscient" aria-labelledby="omniscient-heading">
+              <div>
+                <p className="eyebrow">Post-hand only</p>
+                <h3 id="omniscient-heading">Reveal the completed table</h3>
+              </div>
+              <p>
+                This view is intentionally unavailable during live play. It reveals concealed hands
+                only after the hand has ended.
+              </p>
+              <button
+                className="action-button"
+                disabled={busy}
+                onClick={onToggleOmniscient}
+                type="button"
+              >
+                {replay.omniscient === null ? "Show omniscient view" : "Hide omniscient view"}
+              </button>
+              {replay.omniscient !== null ? (
+                <div className="omniscient-players">
+                  {replay.omniscient.players.map((player) => (
+                    <article key={player.playerId}>
+                      <strong>
+                        {player.displayName} · {player.seat} · {player.score} points
+                      </strong>
+                      <span>
+                        {player.concealedTiles
+                          .map(
+                            (tileId) =>
+                              getTileDefinition(tileTypeFromInstanceId(tileId)).compactCode,
+                          )
+                          .join(" ")}
+                      </span>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
           <label className="replay-scrubber" htmlFor="replay-position">
             Event position <output>{cursor}</output>
             <input
@@ -789,6 +940,7 @@ const ReplayView = ({
 
 const App = (): React.JSX.Element => {
   const [rulesets, setRulesets] = useState<RulesetSummary[]>([]);
+  const [demos, setDemos] = useState<Demo[]>([]);
   const [rulesetId, setRulesetId] = useState("hk_nyc_social_v1");
   const [mode, setMode] = useState("guided");
   const [seed, setSeed] = useState("browser-demo-001");
@@ -805,6 +957,7 @@ const App = (): React.JSX.Element => {
     parent: ReplayData;
     branch: ReplayData;
   } | null>(null);
+  const [ruleDetails, setRuleDetails] = useState<RulesetDetails[]>([]);
   const [hasSavedGame, setHasSavedGame] = useState(false);
 
   const loadProfile = useCallback(async (): Promise<void> => {
@@ -817,10 +970,17 @@ const App = (): React.JSX.Element => {
   }, []);
 
   useEffect(() => {
-    void Promise.all([fetch("/api/rulesets").then((response) => readJson(response)), loadProfile()])
-      .then(([value]) => {
+    void Promise.all([
+      fetch("/api/rulesets").then((response) => readJson(response)),
+      fetch("/api/demos").then((response) => readJson(response)),
+      loadProfile(),
+    ])
+      .then(([value, demoValue]) => {
         if (!Array.isArray(value)) throw new Error("Ruleset response is invalid");
         setRulesets(value.map((entry) => rulesetSummarySchema.parse(entry)));
+        setDemos(
+          demosResponseSchema.parse(demoValue).map((entry) => demoDescriptorSchema.parse(entry)),
+        );
       })
       .catch((caught: unknown) =>
         setError(caught instanceof Error ? caught.message : "Could not load local data"),
@@ -854,7 +1014,7 @@ const App = (): React.JSX.Element => {
     return () => socket.close();
   }, [observation?.gameId, observation?.branchId]);
 
-  const startGame = async (): Promise<void> => {
+  const startGame = async (demo?: Demo): Promise<void> => {
     setBusy(true);
     setError(null);
     setHint(null);
@@ -864,10 +1024,10 @@ const App = (): React.JSX.Element => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            mode,
-            rulesetId,
+            mode: demo?.mode ?? mode,
+            rulesetId: demo?.rulesetId ?? rulesetId,
             matchLength: "one_wind",
-            seed,
+            seed: demo?.seed ?? seed,
             human: { displayName: "You", preferredSeat: "east" },
             opponents: [
               { displayName: "Ming", difficulty: "basic", personality: "fast" },
@@ -971,12 +1131,43 @@ const App = (): React.JSX.Element => {
     try {
       const value = await readJson(
         await fetch(
-          `/api/games/${encodeURIComponent(observation.gameId)}/replay?playerId=${encodeURIComponent(observation.viewer.playerId)}&branchId=${encodeURIComponent(observation.branchId)}`,
+          `/api/games/${encodeURIComponent(observation.gameId)}/replay?playerId=${encodeURIComponent(observation.viewer.playerId)}&branchId=${encodeURIComponent(observation.branchId)}&omniscient=false`,
         ),
       );
       setReplay(replayResponseSchema.parse(value));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Replay unavailable");
+    }
+  };
+
+  const toggleOmniscientReplay = async (): Promise<void> => {
+    if (observation === null || replay?.omniscientAvailable !== true) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const value = await readJson(
+        await fetch(
+          `/api/games/${encodeURIComponent(observation.gameId)}/replay?playerId=${encodeURIComponent(observation.viewer.playerId)}&branchId=${encodeURIComponent(observation.branchId)}&omniscient=${replay.omniscient === null ? "true" : "false"}`,
+        ),
+      );
+      setReplay(replayResponseSchema.parse(value));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Omniscient replay unavailable");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadRuleDetails = async (): Promise<void> => {
+    try {
+      const values = await Promise.all(
+        rulesets.map((ruleset) =>
+          fetch(`/api/rulesets/${encodeURIComponent(ruleset.id)}/details`).then(readJson),
+        ),
+      );
+      setRuleDetails(values.map((value) => rulesetDetailsSchema.parse(value)));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Rules glossary unavailable");
     }
   };
 
@@ -1112,6 +1303,7 @@ const App = (): React.JSX.Element => {
     setView(next);
     if (next === "profile") void loadProfile();
     if (next === "drills") void openDrills();
+    if (next === "rules") void loadRuleDetails();
   };
 
   let content: React.JSX.Element;
@@ -1134,14 +1326,17 @@ const App = (): React.JSX.Element => {
         onNavigate={onNavigate}
       />
     );
-  else if (view === "rules") content = <RulesView rulesets={rulesets} onNavigate={onNavigate} />;
+  else if (view === "rules")
+    content = <RulesView details={ruleDetails} rulesets={rulesets} onNavigate={onNavigate} />;
   else if (view === "replay")
     content = (
       <ReplayView
         comparison={comparison}
         onBack={() => setView("home")}
         onBranch={(decision) => void branchFromDecision(decision)}
+        onToggleOmniscient={() => void toggleOmniscientReplay()}
         replay={replay}
+        busy={busy}
       />
     );
   else if (observation !== null)
@@ -1160,6 +1355,7 @@ const App = (): React.JSX.Element => {
     content = (
       <Home
         rulesets={rulesets}
+        demos={demos}
         rulesetId={rulesetId}
         mode={mode}
         seed={seed}
@@ -1169,6 +1365,7 @@ const App = (): React.JSX.Element => {
         onMode={setMode}
         onSeed={setSeed}
         onStart={() => void startGame()}
+        onDemo={(demo) => void startGame(demo)}
         onContinue={() => void continueGame()}
         onNavigate={onNavigate}
       />

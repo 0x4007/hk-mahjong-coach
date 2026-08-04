@@ -17,3 +17,12 @@ safe for clients and never contain database paths, keys, stack traces, hidden ti
 HTTP and WebSocket use the same schemas. `GET /api/games/:id/replay` returns public events plus
 learner decision summaries. `POST /api/games/:id/branches` reconstructs the persisted decision
 revision before creating a nondestructive practice branch.
+
+`GET /api/games/:id/replay?omniscient=true` is a separate post-hand/sandbox review projection. The
+session controller rejects live non-sandbox reveals and ordinary replay responses return
+`omniscient: null`. The reveal contains a schema-validated completed player/wall view rather than
+the authoritative `GameState` object.
+
+`GET /api/demos` lists the ten deterministic teaching-room seeds. `GET
+/api/rulesets/:id/details` returns the resolved scoring-rule names and visible turn/kong assumptions
+used by the Rules and glossary screen.

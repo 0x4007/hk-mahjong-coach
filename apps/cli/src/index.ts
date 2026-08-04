@@ -20,7 +20,7 @@ import {
   type AgentProtocolEnvelope,
   type PlayerObservationDto,
 } from "@hk-mahjong/protocol";
-import { SessionController, DEFAULT_OPPONENTS } from "@hk-mahjong/session";
+import { SessionController, DEFAULT_OPPONENTS, listSeededDemos } from "@hk-mahjong/session";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -38,6 +38,7 @@ Usage:
   mahjong drill scoring
   mahjong rules list
   mahjong rules show hk_nyc_social_v1
+  mahjong demos
   mahjong profile show
 `;
 
@@ -587,6 +588,10 @@ const printDrill = (args: readonly string[]): void => {
   process.stdout.write(`${JSON.stringify({ ...drill, answer: undefined }, null, 2)}\n`);
 };
 
+const printDemos = (): void => {
+  process.stdout.write(`${JSON.stringify(listSeededDemos(), null, 2)}\n`);
+};
+
 const printReplay = (args: readonly string[]): void => {
   const gameId = args[0];
   if (gameId === undefined) throw new Error("Usage: mahjong replay <game-id> [--format jsonl]");
@@ -627,6 +632,10 @@ const main = async (): Promise<void> => {
   }
   if (command === "drill") {
     printDrill(args);
+    return;
+  }
+  if (command === "demos") {
+    printDemos();
     return;
   }
   if (command === "replay") {

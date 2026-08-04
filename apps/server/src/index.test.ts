@@ -117,6 +117,7 @@ describe("local HTTP game surface", () => {
     expect(replay.statusCode).toBe(200);
     const replayBody = JSON.parse(replay.body) as { events: unknown[] };
     expect(replayBody.events.length).toBeGreaterThan(0);
+    expect(replayBody).toHaveProperty("omniscient", null);
 
     const profile = await server.inject({ method: "GET", url: "/api/profile" });
     expect(profile.statusCode).toBe(200);
@@ -148,6 +149,67 @@ describe("local HTTP game surface", () => {
     expect(exported.statusCode).toBe(200);
     const exportBody = JSON.parse(exported.body) as { format: string };
     expect(exportBody.format).toBe("hk-mahjong-persistence");
+  });
+
+  it("serves seeded rooms, rules details, and a gated sandbox omniscient replay", async () => {
+    const server = await buildServer({ databasePath: ":memory:" });
+    servers.push(server);
+
+    const demos = await server.inject({ method: "GET", url: "/api/demos" });
+    expect(demos.statusCode).toBe(200);
+    const demoBody = JSON.parse(demos.body) as { id: string; seed: string }[];
+    expect(demoBody).toHaveLength(10);
+    expect(demoBody.map(({ id }) => id)).toContain("demo_robbing_kong");
+    expect(demoBody.every(({ id, seed }) => id === seed)).toBe(true);
+
+    const details = await server.inject({
+      method: "GET",
+      url: "/api/rulesets/hk_nyc_social_v1/details",
+    });
+    expect(details.statusCode).toBe(200);
+    const detailsBody = JSON.parse(details.body) as {
+      id: string;
+      scoringRules: { id: string; names: Record<string, string> }[];
+    };
+    expect(detailsBody.id).toBe("hk_nyc_social_v1");
+    expect(
+      detailsBody.scoringRules.some(
+        ({ id, names }) => id === "dragon_pung" && names.en === "Dragon Pung or Kong",
+      ),
+    ).toBe(true);
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/api/games",
+      payload: {
+        mode: "sandbox",
+        rulesetId: "training_relaxed_v1",
+        matchLength: "one_wind",
+        seed: "sandbox-omniscient-surface",
+        human: { displayName: "Learner", preferredSeat: "east" },
+        opponents: [
+          { displayName: "Ming", difficulty: "basic", personality: "fast" },
+          { displayName: "Jade", difficulty: "basic", personality: "value" },
+          { displayName: "Alex", difficulty: "basic", personality: "balanced" },
+        ],
+        coach: { enabled: false, provider: "templates", verbosity: "brief" },
+      },
+    });
+    const game = JSON.parse(created.body) as { game: { gameId: string } };
+    const omniscient = await server.inject({
+      method: "GET",
+      url: `/api/games/${game.game.gameId}/replay?playerId=player-0&branchId=main&omniscient=true`,
+    });
+    expect(omniscient.statusCode).toBe(200);
+    const omniscientBody = JSON.parse(omniscient.body) as {
+      omniscientAvailable: boolean;
+      omniscient: { players: { concealedTiles: string[] }[] } | null;
+    };
+    expect(omniscientBody.omniscientAvailable).toBe(true);
+    expect(omniscientBody.omniscient?.players).toHaveLength(4);
+    expect(
+      omniscientBody.omniscient?.players.every(({ concealedTiles }) => concealedTiles.length > 0),
+    ).toBe(true);
   });
 
   it("composes an injected narrator only on the server boundary", async () => {

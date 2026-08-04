@@ -158,6 +158,21 @@
   remains the presentation layer; the redacted observation and session controller remain
   authoritative.
 
+## 2026-08-04 — Seeded rooms, rules glossary, and post-hand reveal
+
+- `GET /api/demos` and `mahjong demos` expose the same ten deterministic teaching-room seeds. The
+  home screen enters each room through the existing first-person Three.js table, so demos do not
+  create a parallel game loop.
+- `GET /api/rulesets/:id/details` supplies the active assumptions, kong/win switches, and every
+  named scoring rule. The Rules view also renders all 42 local tile definitions with compact code,
+  English, Traditional/Simplified Chinese, Jyutping, and pinyin labels.
+- Replay accepts `omniscient=true` only through the session controller's terminal/sandbox gate.
+  The response contains a separate, schema-validated view of concealed hands and wall positions;
+  ordinary live replay remains redacted and returns `omniscient: null`.
+- The isolated Playwright suite now covers the first-person setup, all ten seeded rooms, rules
+  glossary, profile accessibility toggle, and drill answer flow in addition to the seeded action
+  smoke.
+
 ## Commands
 
 ```bash
@@ -175,6 +190,9 @@ pnpm start
   photorealistic assets; this matches the local-first, non-photorealistic product boundary.
 - The default browser automation path omits WebGL mounting when `navigator.webdriver` is true because
   the available SwiftShader renderer can stall. Semantic controls remain fully testable there.
+- Seeded rooms are named deterministic seeds with teaching focus metadata, not bespoke scripted wall
+  fixtures for every exact claim/kong/scoring scenario. The authoritative engine and test fixtures
+  still cover those edge cases.
 
 ## Known limitations
 

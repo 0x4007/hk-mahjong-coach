@@ -7,6 +7,7 @@ import {
 import {
   canonicalJsonHash,
   createGameEngine,
+  createOmniscientReplayView,
   projectPublicEventStream,
   reduceGameEvent,
   type CreatePlayer,
@@ -58,10 +59,13 @@ import {
 import {
   playerObservationSchema,
   publicGameEventSchema,
+  omniscientReplayViewSchema,
+  type OmniscientReplayView,
   type PlayerObservationDto,
   type ProtocolError,
   type PublicGameEventDto,
 } from "@hk-mahjong/protocol";
+export { SEEDED_DEMOS, listSeededDemos } from "./demos.js";
 
 export interface SessionOpponent {
   readonly playerId: string;
@@ -221,6 +225,53 @@ const protocolObservation = (observation: PlayerObservation): PlayerObservationD
 
 const protocolPublicEvents = (events: readonly PublicGameEvent[]): readonly PublicGameEventDto[] =>
   events.map((event) => publicGameEventSchema.parse(event));
+
+const protocolOmniscientView = (state: GameState): OmniscientReplayView => {
+  const view = createOmniscientReplayView(state);
+  const seatOrder = new Map([
+    ["east", 0],
+    ["south", 1],
+    ["west", 2],
+    ["north", 3],
+  ] as const);
+  return omniscientReplayViewSchema.parse({
+    schemaVersion: 1,
+    gameId: view.state.gameId,
+    branchId: view.state.branchId,
+    phase: view.state.phase,
+    revision: view.state.revision,
+    stateHash: view.state.stateHash,
+    players: Object.values(view.state.players)
+      .sort((left, right) => (seatOrder.get(left.seat) ?? 0) - (seatOrder.get(right.seat) ?? 0))
+      .map((player) => ({
+        playerId: player.id,
+        displayName: player.displayName,
+        seat: player.seat,
+        score: player.score,
+        concealedTiles: [...player.concealed],
+        melds: player.melds.map((meld) => ({
+          id: meld.id,
+          kind: meld.kind,
+          kongKind: meld.kongKind,
+          tileIds: [...meld.tileIds],
+          exposed: meld.exposed,
+          claimedFrom: meld.claimedFrom,
+        })),
+        bonusTiles: [...player.bonusTiles],
+        discards: player.discards.map((discard) => ({
+          id: discard.id,
+          tileId: discard.tileId,
+          claimedBy: discard.claimedBy,
+          winningPlayerIds: [...discard.winningPlayerIds],
+        })),
+      })),
+    wall: {
+      tiles: [...view.state.wall.tiles],
+      liveIndex: view.state.wall.liveIndex,
+      replacementIndex: view.state.wall.replacementIndex,
+    },
+  });
+};
 
 const isJsonValue = (value: unknown): value is JsonValue => {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -644,7 +695,7 @@ export class SessionController {
     });
   }
 
-  public replay(gameId: string, playerId: string, branchId = "main") {
+  public replay(gameId: string, playerId: string, branchId = "main", includeOmniscient = false) {
     const game = this.requireGame(gameId, branchId);
     const repository = this.repositoryFor();
     const loaded = repository.loadGame({ gameId, branchId });
@@ -670,16 +721,19 @@ export class SessionController {
     const events = projectPublicEventStream(
       repository.listHistory({ gameId, branchId }).map(({ event }) => event),
     );
+    const omniscientAvailable =
+      loaded.state.mode === "sandbox" ||
+      loaded.state.phase === "hand_ended" ||
+      loaded.state.phase === "match_ended";
     return {
       game: { gameId, branchId },
       viewerPlayerId: playerId,
       events: events.map((event) => publicGameEventSchema.parse(event)),
       decisions,
       terminalObservation: protocolObservation(game.engine.observation(loaded.state, playerId)),
-      omniscientAvailable:
-        loaded.state.mode === "sandbox" ||
-        loaded.state.phase === "hand_ended" ||
-        loaded.state.phase === "match_ended",
+      omniscientAvailable,
+      omniscient:
+        includeOmniscient && omniscientAvailable ? protocolOmniscientView(loaded.state) : null,
     };
   }
 

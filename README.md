@@ -27,6 +27,7 @@ pnpm --filter @hk-mahjong/cli dev -- serve --stdio --seat player-0
 pnpm --filter @hk-mahjong/cli dev -- replay <game-id>
 pnpm --filter @hk-mahjong/cli dev -- analyze --hand "1m 2m 3m 4p 5p 6p 7s 8s 9s E E E R R"
 pnpm --filter @hk-mahjong/cli dev -- rules list
+pnpm --filter @hk-mahjong/cli dev demos
 pnpm --filter @hk-mahjong/cli dev -- drill tiles
 ```
 
@@ -38,12 +39,17 @@ deterministic fallback. Diagnostics go to stderr.
 
 The default is `hk_nyc_social_v1`, a clearly labeled Hong Kong Old Style / NYC Social Teaching
 Profile with a three-faan minimum. `training_relaxed_v1` and `hk_modern_13f_v1` are bundled
-alternatives. Opponent concealed tiles, wall order, and authoritative `GameState` never cross the
-observation, bot, coach, protocol, or browser boundary.
+alternatives. During live play, opponent concealed tiles, wall order, and authoritative `GameState`
+never cross the observation, bot, coach, protocol, or browser boundary. A separate, explicitly
+labeled post-hand/sandbox replay view may reveal completed concealed hands for review.
 
 The optional narrator is server-only and receives redacted observations plus structured analysis.
 Templates are always available offline; provider errors, invalid output, and timeouts immediately
 fall back to templates.
+
+The browser home screen also lists ten deterministic teaching rooms (`demo_tile_basics` through
+`demo_scoring_limit`). They are named seeds with a teaching focus; exact claim, kong, robbery, and
+scoring fixtures remain available in the engine test-fixture package.
 
 ## Development checks
 

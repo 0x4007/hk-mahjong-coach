@@ -8,6 +8,8 @@ import {
   decisionIdSchema,
   gameKeySchema,
   gameModeSchema,
+  gameIdSchema,
+  hashSchema,
   handIdSchema,
   hintLevelSchema,
   identifierSchema,
@@ -16,6 +18,7 @@ import {
   playerIdSchema,
   requestIdSchema,
   revisionSchema,
+  tileInstanceIdSchema,
   windSchema,
 } from "./common.js";
 import {
@@ -90,6 +93,10 @@ export const replayQuerySchema = z
   .object({
     playerId: playerIdSchema,
     branchId: branchIdSchema.default("main"),
+    omniscient: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
   })
   .strict();
 
@@ -250,6 +257,133 @@ export const reviewSchema = z
   })
   .strict();
 
+const omniscientReplayPlayerSchema = z
+  .object({
+    playerId: playerIdSchema,
+    displayName: identifierSchema,
+    seat: windSchema,
+    score: z.number().int(),
+    concealedTiles: z.array(tileInstanceIdSchema),
+    melds: z.array(
+      z
+        .object({
+          id: identifierSchema,
+          kind: z.enum(["chow", "pung", "kong"]),
+          kongKind: z.enum(["exposed", "concealed", "added"]).nullable(),
+          tileIds: z.array(tileInstanceIdSchema),
+          exposed: z.boolean(),
+          claimedFrom: playerIdSchema.nullable(),
+        })
+        .strict(),
+    ),
+    bonusTiles: z.array(tileInstanceIdSchema),
+    discards: z.array(
+      z
+        .object({
+          id: identifierSchema,
+          tileId: tileInstanceIdSchema,
+          claimedBy: playerIdSchema.nullable(),
+          winningPlayerIds: z.array(playerIdSchema),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const omniscientReplayViewSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    gameId: gameIdSchema,
+    branchId: branchIdSchema,
+    phase: z.enum([
+      "setup",
+      "initial_replacements",
+      "awaiting_discard",
+      "awaiting_claims",
+      "awaiting_kong_robbery",
+      "drawing_replacement",
+      "hand_ended",
+      "match_ended",
+    ]),
+    revision: revisionSchema,
+    stateHash: hashSchema,
+    players: z.array(omniscientReplayPlayerSchema).length(4),
+    wall: z
+      .object({
+        tiles: z.array(tileInstanceIdSchema),
+        liveIndex: nonNegativeIntegerSchema,
+        replacementIndex: nonNegativeIntegerSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
+const rulesetRuleValueSchema = z.union([
+  z.object({ type: z.literal("faan"), amount: z.number().int().nonnegative() }).strict(),
+  z.object({ type: z.literal("limit") }).strict(),
+]);
+
+export const rulesetDetailsSchema = rulesetSummarySchema
+  .extend({
+    tileSet: z
+      .object({
+        bonusTilesEnabled: z.boolean(),
+        ordinaryDrawDirection: z.string().min(1),
+        replacementDrawDirection: z.string().min(1),
+        exhaustionBoundary: z.string().min(1),
+      })
+      .strict(),
+    winRules: z
+      .object({
+        minimumFaan: nonNegativeIntegerSchema,
+        capFaan: nonNegativeIntegerSchema,
+        multipleWinners: z.boolean(),
+        allowSevenPairs: z.boolean(),
+        allowThirteenOrphans: z.boolean(),
+        allowNineGates: z.boolean(),
+      })
+      .strict(),
+    kongRules: z
+      .object({
+        robAddedKong: z.boolean(),
+        robConcealedKong: z.boolean(),
+        allowKongImmediatelyAfterChowOrPung: z.boolean(),
+      })
+      .strict(),
+    scoringRules: z.array(
+      z
+        .object({
+          id: identifierSchema,
+          names: z
+            .object({
+              en: z.string().min(1),
+              zhHant: z.string().min(1),
+              zhHans: z.string().min(1),
+            })
+            .strict(),
+          value: rulesetRuleValueSchema,
+          category: identifierSchema,
+          enabled: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const demoDescriptorSchema = z
+  .object({
+    id: identifierSchema,
+    title: z.string().min(1).max(256),
+    description: z.string().min(1).max(2000),
+    rulesetId: identifierSchema,
+    mode: gameModeSchema,
+    seed: identifierSchema,
+    focus: z.array(z.string().min(1).max(256)).min(1).max(8),
+  })
+  .strict();
+
+export const demosResponseSchema = z.array(demoDescriptorSchema).min(1);
+
 export const masteryResponseSchema = z
   .object({
     learnerId: identifierSchema,
@@ -292,6 +426,7 @@ export const replayResponseSchema = z
     ),
     terminalObservation: playerObservationSchema,
     omniscientAvailable: z.boolean(),
+    omniscient: omniscientReplayViewSchema.nullable(),
   })
   .strict();
 
@@ -310,3 +445,7 @@ export type ActionResponse = z.infer<typeof actionResponseSchema>;
 export type HintRequest = z.infer<typeof hintRequestSchema>;
 export type BranchRequest = z.infer<typeof branchRequestSchema>;
 export type BranchResponse = z.infer<typeof branchResponseSchema>;
+export type DemoDescriptor = z.infer<typeof demoDescriptorSchema>;
+export type OmniscientReplayView = z.infer<typeof omniscientReplayViewSchema>;
+export type ReplayResponse = z.infer<typeof replayResponseSchema>;
+export type RulesetDetails = z.infer<typeof rulesetDetailsSchema>;
