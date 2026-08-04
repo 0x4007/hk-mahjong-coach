@@ -6,7 +6,7 @@
 - Worktree:
   `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
 - Branch: `implementation-takeover-019fc5b7-g06506cba54`
-- Current clean head: `a07748053c0ab59c434bb34470fda2f6016f0322` (`test: exercise scripted jsonl hand`).
+- Current clean head: `e040f7e5bee7ac03452ad535462f1753369df1d9` (`docs: record canonical verification receipt`).
 - Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
 - Implementation lane: this canonical worktree, with one writer.
 - The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
