@@ -6,8 +6,8 @@
 - Worktree:
   `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
 - Branch: `implementation-takeover-019fc5b7-g06506cba54`
-- The release candidate is clean and includes the scripted JSONL acceptance and canonical
-  verification receipt documentation.
+- The release candidate is clean and includes the scripted JSONL acceptance, canonical verification
+  receipt documentation, and the registered natural-simulation workflow.
 - Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
 - Implementation lane: this canonical worktree, with one writer.
 - The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
@@ -17,9 +17,8 @@
 
 ## Current milestone
 
-Milestones 6–9 are complete as local vertical slices. The Milestone 10 browser/release slice is
-validated locally; the remote natural-wall receipt and live provider attestation remain external
-evidence.
+Milestones 6–10 are complete as local vertical slices plus the accepted remote natural-wall receipt.
+The optional live production provider/no-key attestation remains an external deployment check.
 
 ## Completed
 
@@ -121,15 +120,17 @@ evidence.
   zero failures. Its run digest is
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
 - GitHub Actions verify run `30878077706` is green for the implementation candidate. The workflow annotation
-  only reports the hosted runner's Node 20 action deprecation warning.
+  only reports the hosted runner's Node 20 action deprecation warning. The final documentation candidate
+  was also green in verify run `30878719618` at SHA `048e7f54ef25916436dfd301d681c5469dc693b5`.
+- GitHub Actions natural-simulation run `30903897249` passed at registered default-branch SHA
+  `989c6b6c7bfaee955edbc005207496e12c6e08c2`. All 20 shards and the aggregate job passed for
+  500/500 fully natural shuffled-wall hands under seed namespace `m4-natural-ci-v1`; the aggregate
+  receipt digest is `sha256:aa7471e49e9e389db568a2557b853817407a6e79631e88e7bb66c003378b6ec2`.
 
 ## Blockers and remaining scope
 
-- The remote natural-wall receipt and live production provider/no-key attestation are not available
-  in this local checkout. They are the only remaining release evidence called out by the plan.
-- `.github/workflows/natural-simulation.yml` is committed here but is not registered on GitHub's
-  current default branch (`visual-table-gb9d082b587`), so the remote 500-hand gate cannot be
-  dispatched without explicit branch authorization.
+- Live production provider/no-key attestation is not available in this local checkout. It remains an
+  external deployment check; the offline template path is the supported no-key behavior.
 - The browser scene uses procedural Three.js geometry and semantic DOM controls; headed WebGL proof
   is browser-dependent, while automation intentionally skips the renderer on SwiftShader.
 - The ten seeded rooms are deterministic named seeds with teaching focus metadata; they are not
@@ -139,6 +140,6 @@ evidence.
 
 ## Next action
 
-The local Milestone 10 checks are complete on the exact canonical candidate. Preserve the
-remote/release evidence boundary and do not claim deployment readiness without the natural-wall
-receipt and live provider attestation.
+The local Milestone 10 checks and the remote natural-wall receipt are complete. Preserve the
+deployment evidence boundary and do not claim production deployment readiness without a live
+provider/no-key attestation.

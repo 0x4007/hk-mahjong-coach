@@ -86,8 +86,11 @@
   receipts, and verifies one aggregate digest. A one-hand local shard/aggregate smoke passed with
   aggregate digest
   `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
-  The interrupted local natural run is not 500-hand acceptance evidence; the first accepted
-  500-hand receipt must come from the remote workflow after the implementation commit is pushed.
+  The registered default branch accepted GitHub Actions run `30903897249` at SHA
+  `989c6b6c7bfaee955edbc005207496e12c6e08c2`, completing 500/500 fully natural shuffled-wall hands
+  across 20/20 shards. The redacted aggregate receipt reports digest
+  `sha256:aa7471e49e9e389db568a2557b853817407a6e79631e88e7bb66c003378b6ec2` under seed namespace
+  `m4-natural-ci-v1`.
 
 ## 2026-08-03 — Canonical takeover and Milestone 4 reconciliation
 
@@ -147,6 +150,9 @@
 - Validation on the clean canonical candidate: 340 unit/integration tests, 338 coverage tests, isolated seeded
   Playwright acceptance, `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`,
   `pnpm smoke`, and `pnpm verify` pass.
+- The canonical first-person Three.js scene remains the user-facing presentation layer: movement,
+  camera, room geometry, tile rendering, and public-table context are rendered in 3D, while the
+  redacted observation and session controller remain authoritative for legal actions and hidden data.
 
 ## 2026-08-04 — Release simulation and local acceptance receipt
 
@@ -199,9 +205,6 @@ pnpm start
 
 ## Known limitations
 
-- Milestones 0–10 are locally validated as a working prototype. The remote natural-wall receipt and
-  live production provider/no-key attestation remain outside this checkout; screenshots and headed
-  WebGL capture are optional visual evidence rather than correctness gates.
-- The natural-simulation workflow is committed on this branch but is not registered on GitHub's
-  current default branch (`visual-table-gb9d082b587`), so the remote 500-hand gate remains
-  undispatched until that branch change is explicitly authorized.
+- Milestones 0–10 are locally validated as a working prototype, and the remote natural-wall receipt
+  is recorded above. Live production provider/no-key attestation remains outside this checkout;
+  screenshots and headed WebGL capture are optional visual evidence rather than correctness gates.

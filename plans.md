@@ -105,8 +105,11 @@ Evidence recorded 2026-08-03:
   up-to-20-way sharding and redacted aggregate receipts. A one-hand natural shard and aggregate smoke
   passed locally with aggregate digest
   `sha256:fbb7aa9f24c57aa9143a783ef731352df382db7610386c59b7589bd3ae30ad8c`.
-  The earlier local 500-hand run was interrupted without a receipt, so remote 500-hand acceptance
-  remains pending.
+  The remote natural-wall gate passed on the registered default branch in GitHub Actions run
+  `30903897249` at SHA `989c6b6c7bfaee955edbc005207496e12c6e08c2`: 500/500 fully natural
+  shuffled-wall hands across 20/20 shards, with aggregate receipt digest
+  `sha256:aa7471e49e9e389db568a2557b853817407a6e79631e88e7bb66c003378b6ec2` and seed namespace
+  `m4-natural-ci-v1`.
 
 ## Milestone 5 — Persistence and replay (`complete`)
 
@@ -198,7 +201,7 @@ Evidence recorded 2026-08-04:
 - Production provider composition and live no-key attestation remain external release evidence, not
   a prerequisite for the offline local-first path.
 
-## Milestone 10 — Replay UI, accessibility, documentation, and release gates (`in progress`)
+## Milestone 10 — Replay UI, accessibility, documentation, and release gates (`complete`)
 
 - Implement replay timeline/branch comparison, rules/glossary/settings/curriculum screens, WCAG 2.2
   AA behavior, responsive polish, seeded demos, complete docs, screenshots, and data controls.
@@ -219,11 +222,12 @@ Evidence recorded 2026-08-04:
   invariant violations, crashes, command-bound failures, or replay mismatches. Receipt run digest:
   `sha256:6ffd08d1a4fb79c97e08c1abee1a6d75ec33ce9d01ee728b2e5cecbd2daea19e`.
 - `pnpm verify`, production start, and the smoke test pass on the exact clean canonical candidate.
-- The remote natural-wall receipt and live production provider/no-key attestation remain external
-  evidence gates.
-- The natural-simulation workflow is committed on this branch but is not registered on the current
-  GitHub default branch (`visual-table-gb9d082b587`), so a remote 500-hand receipt cannot yet be
-  dispatched without explicit branch authorization.
+- The remote natural-wall gate also passes: GitHub Actions run `30903897249` at registered default
+  branch SHA `989c6b6c7bfaee955edbc005207496e12c6e08c2` completed 500/500 fully natural shuffled-wall
+  hands in 20/20 shards. Its aggregate receipt digest is
+  `sha256:aa7471e49e9e389db568a2557b853817407a6e79631e88e7bb66c003378b6ec2`.
+- Live production provider/no-key attestation remains an external deployment check and is not claimed
+  by this local-first release evidence.
 - The seeded rooms are named deterministic seeds with teaching focus metadata rather than bespoke
   scripted wall fixtures for every edge-case scenario; exact claim/kong/robbery/scoring fixtures
   remain in the core test-fixture package.
