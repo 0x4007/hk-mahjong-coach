@@ -91,6 +91,83 @@
   The interrupted local natural run is not acceptance evidence; the first accepted 500-hand receipt
   must come from the remote workflow after the implementation commit is pushed.
 
+## 2026-08-03 — Procedural Three.js visual table base
+
+- The isolated `visual-table-gb9d082b587` worktree adds the first visible browser slice for the future
+  table milestone. `apps/web/src/scene/mahjong-table.ts` owns the scene graph, camera presets, lights,
+  tile meshes, local canvas textures, public discard rivers, and the Midtown window backdrop; the React
+  wrapper only mounts and disposes it.
+- The scene uses Three.js `0.185.1` directly with Vite. `RoundedBoxGeometry`, `OrbitControls`, local
+  `CanvasTexture` generation, `InstancedMesh`, and landmark `LOD` are the main rendering helpers. No
+  downloaded model, HDRI, or tile art is bundled. Poly Haven and ambientCG remain possible future
+  sources for clearly licensed wood, felt, or window materials, but they are not part of this prototype.
+- The static composition follows the supplied visual contract: a bright, double-height penthouse shell
+  with broad architectural whites, charcoal recesses, a restrained red floor direction line, pale cyan
+  system seams, floor-to-ceiling glazing, and depth-compressed Midtown geometry. Camera buttons switch
+  between the composed seat and overhead views; only the overhead view remains orbit-controlled.
+- Tile bodies are warm ivory with crisp local face artwork; backs use an original charcoal, red, and cyan
+  line treatment. Playing-field, shell, center, and seam surfaces are offset by explicit depth layers so
+  they do not flicker from coplanar WebGL faces.
+- The visual direction is original architectural futurism informed by the supplied Mirror's Edge-style
+  principles: pale monolithic planes, dark voids, hard white daylight, and sparse red/cyan signals. No
+  game assets, logos, or textures are copied from that title.
+- The WebGL mount coalesces resize observations and ignores unchanged canvas dimensions, which avoids
+  a resize-notification loop while the view is mounted. Shadows use the current `PCFShadowMap` API.
+- The seat camera intentionally borrows familiar first-person game conventions: click-to-capture pointer
+  lock, unrestricted vertical mouse look, WASD/arrow movement through the penthouse within room bounds,
+  an Escape unlock, and an alternate orbit-controlled overhead lens.
+- The seat lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
+  Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
+  jump apex. Directional sprites hide when seated, the centered reticule remains visible, and adaptive Bokeh
+  focuses on the nearest non-overlay object under the aim ray. Double-tapping W engages a 3× sprint that
+  remains active while any movement key is held, so W→A/D/S direction transfers preserve sprint speed.
+- Pointer-lock state fades the instructional overlays while the scene is under direct control.
+- The scene resolves an explicit or conservative auto-selected `high`/`medium`/`low` presentation
+  preset for DPR, shadows, and glass; it uses the required `OutputPass`, warms shaders after the first
+  frame, pauses rendering when the document is hidden, and exposes a warm loading treatment during setup.
+- Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
+  cyan system and skyline window materials modulate only with a subtle ambient pulse.
+- The skyline adds a local PMREM room environment, six depth-compressed near-rooftop masses, and a visible
+  separated draw tile in the static human hand; no external assets or hidden opponent identities are introduced.
+- Touch-capable devices now get a mobile instruction panel that asks iPhone users to rotate to
+  landscape, requests iOS motion permission from a user gesture, and calibrates gyroscope/device
+  orientation look against the current seat camera. The same first-person movement path accepts a
+  four-way virtual joystick with diagonal movement and continuous 0–100% speed control from the
+  center to its outer edge: forward reaches sprint speed, forward diagonal reaches 75%, and
+  backward/sideways cap at 50% of sprint with a smooth forward-bias curve. A separate swipe on the scene changes seat camera yaw and
+  pitch without requiring the phone to move, at tuned drag sensitivity. Swiping establishes a new
+  gyro camera reference when motion look is enabled. Crouch and Jump use independent touch pointers,
+  so they can be activated while the joystick is held. Text selection and iOS touch callouts are
+  disabled across the mobile immersive surface. Desktop pointer-lock controls remain unchanged.
+- Development mode accepts `?debug=1` and adds a visual panel for the table/room/skyline/asset camera
+  presets, FOV, exposure, tone mapper, fog density, skyline visibility, and live renderer metrics.
+  Repeated skyline windows are batched with `InstancedMesh`, and the Empire State, One Vanderbilt, and
+  Chrysler silhouettes use distance-based `LOD` fallbacks.
+- For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
+  directory, then run:
+
+  ```bash
+  mkdir -p artifacts/visual
+  pnpm exec playwright screenshot --browser=chromium --viewport-size="1440,900" --wait-for-timeout=2000 "http://127.0.0.1:5173/?debug=1" artifacts/visual/penthouse-1440.png
+  ```
+
+- The Vite development server and Fastify server bind to `0.0.0.0` so a phone on the same LAN can
+  open the preview. Run `pnpm dev`, then use the host Mac's LAN address on port `5173` (for example,
+  `http://192.168.x.x:5173`). Safari may require an HTTPS origin before it grants motion permission.
+- The browser shell is a viewport-owned scene rather than a document card. It uses `100dvh` with
+  minimal overlay controls so the table remains the primary surface on desktop and mobile.
+- Rendered-browser acceptance was verified with a fresh `agent-browser` session at
+  `http://127.0.0.1:5173/`: the shipping scene reached `document.readyState === "complete"`, exposed
+  `data-scene-ready="true"`, and produced a 1440×900 screenshot. After reload, the browser console and
+  page-error queues were empty. The harness reports roughly 26–39 FPS at this viewport, so native-browser
+  performance sign-off against the 60 FPS target remains a separate check. Pointer-lock interaction is
+  not testable in this harness because the browser refuses the Pointer Lock API; no browser security
+  control was bypassed.
+- This is a rendering base, not Milestone 7 completion. It has no live WebSocket/game observation,
+  legal-action controls, replay state, or persistence yet. The browser must continue to consume public
+  observations when those surfaces are wired in; opponent hands must remain face-down until an engine
+  event makes a tile public.
+
 ## Commands
 
 ```bash
