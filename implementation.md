@@ -15,8 +15,8 @@
 
 ## Current milestone
 
-Milestone 5 is complete on the validated dirty checkpoint; Milestone 6 (CLI and JSONL protocol) is
-the next implementation milestone.
+Milestones 6–9 are implemented as local vertical slices. Milestone 10 release hardening and the
+remaining external/release evidence are still open.
 
 ## Completed
 
@@ -85,16 +85,34 @@ the next implementation milestone.
 - The exact dirty SHA also passes serialized format, lint, typecheck, full tests, coverage, the
   500-hand fast simulation, build, and production smoke.
 
+## Milestones 6–9 evidence
+
+- The CLI dispatches human, JSONL stdio, replay, analysis, drill, rules, and profile commands. The
+  JSONL host validates envelopes and action IDs, keeps stdout machine-clean, reports structured
+  rejections, and applies a bounded deterministic fallback after malformed responses.
+- The Fastify server composes the session controller behind validated HTTP/WebSocket routes. The
+  browser now renders the existing first-person Three.js penthouse table over the local game flow,
+  with keyboard-safe legal actions, save/resume, replay, hints, drills, profile, and rules views.
+- Scene state is observation-derived: the exact learner hand is face-up, opponent concealed hands
+  are backs/counts only, and public melds/discards are synchronized on every accepted revision.
+- Offline coaching, learner evidence, curriculum progression, spaced drills, and all fourteen drill
+  families are wired through the session and web surfaces. The optional Responses narrator is
+  server-only, validates grounded structured output, caches by prompt identity, and falls back to
+  templates on provider errors or timeouts.
+- `pnpm test` passes 336 tests; the seeded Playwright browser flow passes against the isolated
+  temporary-database fixture; `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and
+  `pnpm smoke` pass on this dirty canonical state.
+
 ## Blockers and remaining scope
 
-- CLI remains a usage-only placeholder; the server currently exposes health/static content only;
-  the browser remains a placeholder. These are the explicit M6–M10 work items, not M5 failures.
-- The remote natural-wall 500-hand receipt and separate 10,000-hand release simulation remain
-  unrun. No production deployment or browser/E2E acceptance is claimed.
+- JSONL timeout/deadline handling still needs a dedicated isolated subprocess acceptance fixture.
+- Production provider composition/no-key attestation, the remote natural-wall receipt, and the
+  separate 10,000-hand release simulation remain unrun.
+- Milestone 10 replay branch comparison, accessibility polish, screenshots, and the full `pnpm
+verify` release gate remain open. This is a working local prototype, not a production claim.
 
 ## Next action
 
-Implement the first coherent M6 vertical slice: a real CLI command dispatcher plus JSONL stdio host
-that creates a seeded game, emits schema-validated observations/action requests, accepts only
-emitted action IDs, persists accepted commands, and reports structured rejections without stdout
-contamination. Keep it on this canonical branch and validate it through the real process.
+Run the remaining Milestone 10 release checks on the exact canonical SHA, beginning with the isolated
+CLI JSONL acceptance and then the full verification/simulation gates. Preserve the dirty worktree
+until that evidence is recorded.

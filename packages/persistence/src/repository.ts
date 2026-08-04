@@ -931,6 +931,18 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     return this.database.transaction(() => this.loadGameAtRevisionInternal(key, revision))();
   }
 
+  listHistory(key: GameKey): readonly StoredGameEvent[] {
+    return this.database.transaction(() => {
+      const branch = this.requireBranchInternal(key);
+      this.validateBranchJournalBoundsInternal(branch);
+      return this.collectHistoryInternal(key, branch.currentRevision).events.map((event) => ({
+        ...event,
+        key: { ...event.key },
+        event: structuredClone(event.event),
+      }));
+    })();
+  }
+
   replayToTerminal(key: GameKey): ReplayResult {
     return this.database.transaction(() => {
       const branch = this.requireBranchInternal(key);

@@ -126,6 +126,24 @@
   87.97% statements; coach 95.30%; protocol 100% statements/96.96% branches), 500-hand fast
   simulation with zero failures, production build, and smoke.
 
+## 2026-08-04 — CLI, local web composition, and observation-driven 3D table
+
+- The CLI now owns human rendering and a schema-versioned JSONL stdio host. Agent messages are
+  sequence-checked and restricted to emitted legal action IDs; malformed/rejected input is reported
+  as structured protocol errors and reaches a bounded deterministic fallback.
+- The local Fastify server composes game, WebSocket, replay, hint, profile, curriculum, drill, and
+  import/export routes. Playwright now starts the existing temporary-database fixture instead of the
+  user database, so seeded E2E runs are isolated and repeatable.
+- The browser uses the existing first-person Three.js penthouse scene for setup and active hands.
+  `MahjongTableGameState` is derived from the redacted observation: the learner's face-up hand and
+  drawn-tile spacing are exact; opponent hands expose only concealed counts and backs; public melds,
+  discards, active-seat labels, and relative seat placement synchronize on every accepted action.
+- The scene remains presentation-only for movement/camera; legal actions and game truth stay in the
+  DOM observation overlay and authoritative session engine. WebGL is intentionally skipped in
+  automation browsers whose SwiftShader renderer stalls; headed browsers mount the full scene.
+- Validation on this dirty state: 336 unit/integration tests, isolated seeded Playwright acceptance,
+  `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm smoke` pass.
+
 ## Commands
 
 ```bash
@@ -139,13 +157,14 @@ pnpm start
 
 ## Material deviations
 
-None.
+- The scene uses procedural Three.js geometry and canvas tile textures rather than external SVG or
+  photorealistic assets; this matches the local-first, non-photorealistic product boundary.
+- The default browser automation path omits WebGL mounting when `navigator.webdriver` is true because
+  the available SwiftShader renderer can stall. Semantic controls remain fully testable there.
 
 ## Known limitations
 
-- Milestones 0–5 are complete on the canonical takeover checkpoint. Milestones 6–10 remain pending.
-- Persistence, protocol, coach, and tile UI package slices exist, but protocol/coach package tests
-  are not product integration evidence until the CLI, server, and browser compose them.
-- CLI command dispatch, JSONL process hosting, HTTP/WebSocket game composition, persistent coaching,
-  optional provider wiring, browser/E2E accessibility flows, remote natural simulation, and the
-  10,000-hand release gate remain to be implemented and verified.
+- Milestones 0–5 are complete; M6 and M9 still need dedicated timeout/provider release evidence,
+  while M7–M8 are composed local slices. M10 remains the release-hardening milestone.
+- The remote natural-wall receipt, 10,000-hand simulation, full `pnpm verify`, accessibility/replay
+  polish, screenshots, and production deployment attestation remain open.

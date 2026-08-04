@@ -33,7 +33,8 @@
       "@hk-mahjong/coach": ["./packages/coach/src/index.ts"],
       "@hk-mahjong/protocol": ["./packages/protocol/src/index.ts"],
       "@hk-mahjong/persistence": ["./packages/persistence/src/index.ts"],
-      "@hk-mahjong/tile-ui": ["./packages/tile-ui/src/index.ts"],
+      "@hk-mahjong/session": ["./packages/session/src/index.ts"],
+      "@hk-mahjong/tile-ui": ["./packages/tile-ui/src/index.tsx"],
       "@hk-mahjong/test-fixtures": ["./packages/test-fixtures/src/index.ts"]
     }
   },

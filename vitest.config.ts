@@ -17,6 +17,7 @@ export default defineConfig({
       "@hk-mahjong/coach": fromRoot("./packages/coach/src/index.ts"),
       "@hk-mahjong/protocol": fromRoot("./packages/protocol/src/index.ts"),
       "@hk-mahjong/persistence": fromRoot("./packages/persistence/src/index.ts"),
+      "@hk-mahjong/session": fromRoot("./packages/session/src/index.ts"),
       "@hk-mahjong/tile-ui": fromRoot("./packages/tile-ui/src/index.ts"),
       "@hk-mahjong/test-fixtures": fromRoot("./packages/test-fixtures/src/index.ts"),
     },

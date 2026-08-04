@@ -10,10 +10,10 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "pnpm build && pnpm start",
+    command: "pnpm build && pnpm exec tsx tests/fixtures/e2e-server.ts",
     url: "http://127.0.0.1:4173/api/health",
     reuseExistingServer: false,
-    timeout: 120_000,
+    timeout: 240_000,
   },
   projects: [
     {

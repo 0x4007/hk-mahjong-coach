@@ -17,6 +17,7 @@
     "@hk-mahjong/core": "workspace:*",
     "@hk-mahjong/hk-rules": "workspace:*",
     "@hk-mahjong/persistence": "workspace:*",
-    "@hk-mahjong/protocol": "workspace:*"
+    "@hk-mahjong/protocol": "workspace:*",
+    "@hk-mahjong/session": "workspace:*"
   }
 }

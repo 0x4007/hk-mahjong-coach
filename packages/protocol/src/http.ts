@@ -23,7 +23,6 @@ import {
   playerObservationSchema,
   protocolErrorSchema,
   publicGameEventSchema,
-  publicHandResultSchema,
 } from "./schemas.js";
 
 export const rulesetSummarySchema = z
@@ -83,7 +82,14 @@ export const createGameResponseSchema = z
 export const observationQuerySchema = z
   .object({
     playerId: playerIdSchema,
-    branchId: branchIdSchema,
+    branchId: branchIdSchema.default("main"),
+  })
+  .strict();
+
+export const replayQuerySchema = z
+  .object({
+    playerId: playerIdSchema,
+    branchId: branchIdSchema.default("main"),
   })
   .strict();
 
@@ -194,14 +200,76 @@ export const drillAnswerRequestSchema = z
   })
   .strict();
 
+const drillItemResponseSchema = z
+  .object({
+    id: identifierSchema,
+    source: z.enum(["bundled", "generated", "replay"]),
+    type: identifierSchema,
+    conceptIds: z.array(conceptIdSchema),
+    difficulty: z.number().min(0).max(1),
+    prompt: z.string().min(1).max(4000),
+    choices: z.array(z.string().min(1).max(512)),
+    tile: z.string().optional(),
+  })
+  .strict();
+
+export const drillSessionResponseSchema = z
+  .object({
+    sessionId: identifierSchema,
+    items: z.array(drillItemResponseSchema).min(1),
+  })
+  .strict();
+
+export const drillAnswerResponseSchema = z
+  .object({
+    sessionId: identifierSchema,
+    drillItemId: identifierSchema,
+    correct: z.boolean(),
+    nextReviewAt: z.iso.datetime(),
+  })
+  .strict();
+
+export const importRequestSchema = z
+  .object({
+    document: z.unknown(),
+    mode: z.enum(["merge", "replace"]).optional(),
+  })
+  .strict();
+
 export const reviewSchema = z
   .object({
     handId: handIdSchema,
-    result: publicHandResultSchema,
+    finalScoreSummary: z.string().min(1).max(4000),
+    timelineDecisionIds: z.array(decisionIdSchema),
     highImpactDecisionIds: z.array(decisionIdSchema).max(3),
     positiveDecisionId: decisionIdSchema.nullable(),
+    counterfactualActionIds: z.array(identifierSchema),
+    conceptIds: z.array(conceptIdSchema),
     nextDrillConceptId: conceptIdSchema.nullable(),
     omniscientAvailable: z.boolean(),
+  })
+  .strict();
+
+export const masteryResponseSchema = z
+  .object({
+    learnerId: identifierSchema,
+    mastery: z.array(conceptMasterySchema),
+  })
+  .strict();
+
+export const curriculumResponseSchema = z
+  .object({
+    current: z
+      .object({
+        stage: nonNegativeIntegerSchema,
+        id: identifierSchema,
+        name: z.string().min(1).max(256),
+        outcomes: z.array(z.string().min(1).max(2000)),
+        suggestedUnlock: z.string().min(1).max(2000),
+        conceptIds: z.array(conceptIdSchema),
+      })
+      .strict(),
+    mastery: z.array(conceptMasterySchema),
   })
   .strict();
 

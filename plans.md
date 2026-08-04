@@ -132,29 +132,63 @@ Evidence recorded 2026-08-03:
   `pnpm test:coverage`, `pnpm test:sim:fast` (500 hands), `pnpm build`, and `pnpm smoke` pass on
   the exact dirty takeover SHA.
 
-## Milestone 6 — CLI and JSONL protocol (`pending`)
+## Milestone 6 — CLI and JSONL protocol (`in progress`)
 
 - Implement all required human commands, ANSI/plain/narrow rendering, schema-versioned JSONL stdio,
   external-process player validation, timeout handling, and deterministic bot fallback.
 - Acceptance: scripted JSONL hand, clean stdout, structured rejection, and safe fallback.
 
-## Milestone 7 — Local server and visual table (`pending`)
+Evidence recorded 2026-08-04:
+
+- The CLI now dispatches play, stdio serve, replay, analysis, drill, rules, and profile commands.
+- JSONL host envelopes are schema-validated, sequence-checked, emitted only on stdout, and route
+  malformed or rejected agent actions through bounded deterministic fallback.
+- Timeout/deadline behavior and an isolated subprocess acceptance fixture remain part of the final
+  release gate.
+
+## Milestone 7 — Local server and visual table (`complete`)
 
 - Implement the required HTTP/WebSocket API, setup/home/table/result screens, local SVG tile set,
   legal-action controls, save/resume, responsive layout, and keyboard operation.
 - Acceptance: seeded hand in browser, observation parity, and keyboard smoke test.
 
-## Milestone 8 — Teacher, learner model, curriculum, and drills (`pending`)
+Evidence recorded 2026-08-04:
+
+- Fastify exposes the local game, observation, action, WebSocket, replay, profile, curriculum, drill,
+  import/export, and health surfaces with protocol validation at every boundary.
+- The browser serves a first-person Three.js table with procedural room geometry, local tile-face
+  textures, pointer-lock/WASD movement, and semantic overlays for every legal action.
+- The scene now synchronizes from the redacted observation: the learner hand uses exact tile types,
+  opponents render concealed backs/counts only, and public melds/discards update per revision.
+- The isolated Playwright seeded-game flow passes after switching its web server to the existing
+  temporary-database fixture.
+
+## Milestone 8 — Teacher, learner model, curriculum, and drills (`complete`)
 
 - Implement analysis facts, calibrated templates, modes/hints, post-hand review, mastery/evidence
   queries, adaptive difficulty, spaced repetition, and all 14 required drill types.
 - Acceptance: fully offline coaching, persistent evidence, and relevant weak-concept scheduling.
 
-## Milestone 9 — Optional OpenAI narrator (`pending`)
+Evidence recorded 2026-08-04:
+
+- Offline template coaching, hint levels, learner-owned evidence, curriculum progression, mastery
+  updates, spaced review scheduling, replay review, and the fourteen bundled drill families compose
+  through SessionController and the browser/server surfaces.
+- Focused coach/session/server tests cover grounded facts, mode behavior, ownership, and drill
+  answers; no network or provider key is required for the default flow.
+
+## Milestone 9 — Optional OpenAI narrator (`in progress`)
 
 - Implement a server-only Responses API adapter, schema/fact/action validation, bounded request
   behavior, cache/metadata, provider status, and immediate template fallback.
 - Acceptance: fake-provider tests, invalid-output fallback, no browser key exposure, no-key usability.
+
+Evidence recorded 2026-08-04:
+
+- `OpenAICoachNarrator` implements the server-only Responses contract, public-fact projection,
+  strict structured-output validation, bounded timeout, cache identity, and typed fallback reasons.
+- Fake-provider, invalid-output, timeout, provider-error, cache, and hidden-information tests pass.
+- Production provider composition and live no-key attestation remain release-gate work.
 
 ## Milestone 10 — Replay UI, accessibility, documentation, and release gates (`pending`)
 

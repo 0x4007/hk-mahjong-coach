@@ -736,6 +736,35 @@ describe("narrator validation and provider fallback", () => {
     expect(JSON.stringify(captured)).not.toContain("apiKey");
   });
 
+  it("projects runtime-tainted observations before sending provider input", async () => {
+    const input = narrationInput();
+    const taintedObservation = {
+      ...input.observation,
+      wallOrder: ["secret-wall-tile"],
+      private: {
+        ...input.observation.private,
+        opponentConcealedTiles: ["secret-opponent-tile"],
+      },
+    } as unknown as typeof input.observation;
+    let captured: Readonly<Record<string, unknown>> | null = null;
+    const narrator = new OpenAICoachNarrator({
+      model: "gpt-test",
+      client: {
+        responses: {
+          create: (request) => {
+            captured = request;
+            return Promise.resolve({ output_text: JSON.stringify(validatedNarration(input)) });
+          },
+        },
+      },
+    });
+    await narrator.explain({ ...input, observation: taintedObservation });
+    expect(JSON.stringify(captured)).not.toContain("wallOrder");
+    expect(JSON.stringify(captured)).not.toContain("secret-wall-tile");
+    expect(JSON.stringify(captured)).not.toContain("opponentConcealedTiles");
+    expect(JSON.stringify(captured)).not.toContain("secret-opponent-tile");
+  });
+
   it("classifies invalid output, provider failure, and timeout", async () => {
     const input = narrationInput();
     for (const response of [null, { output_text: "" }, { output_text: "not-json" }]) {

@@ -456,6 +456,8 @@ export interface PersistenceRepository {
   loadGame(key: GameKey): LoadedGame;
   loadLatestResumableGame(learnerId: string | null): LoadedResumableGame | null;
   loadGameAtRevision(key: GameKey, revision: number): LoadedGame;
+  /** Returns the authoritative parent-plus-child history for safe public replay projection. */
+  listHistory(key: GameKey): readonly StoredGameEvent[];
   replayToTerminal(key: GameKey): ReplayResult;
   forkPracticeBranch(input: ForkPracticeBranchInput): ForkPracticeBranchResult;
   ensureLearner(learnerId: string): void;

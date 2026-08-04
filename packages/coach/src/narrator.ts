@@ -161,7 +161,11 @@ const validateGroundedProse = (
   }
   const claimPattern =
     /\b(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen)\s+faan\b/giu;
-  for (const match of prose.matchAll(claimPattern)) {
+  const claims = [...prose.matchAll(claimPattern)];
+  if (claims.length > 0 && supportedValues.size === 0) {
+    throw new CoachNarratorFailure("invalid_output", "Narrator cited an unsupported faan value");
+  }
+  for (const match of claims) {
     const token = match[1]?.toLowerCase();
     const claimed = token === undefined ? undefined : (FAAN_WORD_VALUES[token] ?? Number(token));
     if (claimed === undefined || !Number.isFinite(claimed) || !supportedValues.has(claimed)) {
@@ -294,6 +298,111 @@ const outputSchema = {
   },
 } as const;
 
+const forbiddenFactKey =
+  /(?:wall|concealed|hidden|secret|replacement.*tile|opponent|seed|rng|state)/iu;
+
+const publicFactValue = (value: unknown, key = "", depth = 0): unknown => {
+  if (depth > 12 || forbiddenFactKey.test(key)) {
+    return undefined;
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => publicFactValue(item, key, depth + 1))
+      .filter((item): item is Exclude<typeof item, undefined> => item !== undefined);
+  }
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    const safeValue = publicFactValue(childValue, childKey, depth + 1);
+    if (safeValue !== undefined) {
+      result[childKey] = safeValue;
+    }
+  }
+  return result;
+};
+
+const publicFact = (fact: AnalysisFact): AnalysisFact => ({
+  id: fact.id,
+  kind: fact.kind,
+  summary: fact.summary,
+  data: (publicFactValue(fact.data) ?? {}) as Readonly<Record<string, unknown>>,
+});
+
+const publicObservation = (observation: CoachNarrationInput["observation"]) => ({
+  schemaVersion: observation.schemaVersion,
+  gameId: observation.gameId,
+  branchId: observation.branchId,
+  practiceBranch: observation.practiceBranch,
+  revision: observation.revision,
+  phase: observation.phase,
+  ruleset: { ...observation.ruleset },
+  viewer: { ...observation.viewer },
+  round: {
+    ...observation.round,
+    lastDiscard:
+      observation.round.lastDiscard === null ? null : { ...observation.round.lastDiscard },
+  },
+  players: observation.players.map((player) => ({
+    ...player,
+    melds: player.melds.map((meld) => ({ ...meld, tileTypes: [...meld.tileTypes] })),
+    bonusTiles: [...player.bonusTiles],
+    discards: player.discards.map((discard) => ({
+      ...discard,
+      winningPlayerIds: [...discard.winningPlayerIds],
+    })),
+  })),
+  pending: observation.pending === null ? null : { ...observation.pending },
+  result: observation.result,
+  private: {
+    concealedTiles: [...observation.private.concealedTiles],
+    drawnTileId: observation.private.drawnTileId,
+    temporaryRestrictions: observation.private.temporaryRestrictions.map((restriction) => ({
+      ...restriction,
+    })),
+  },
+  legalActions: observation.legalActions,
+  winAssessment: observation.winAssessment,
+  claimWinAssessment: observation.claimWinAssessment,
+});
+
+const publicAnalysis = (analysis: CoachNarrationInput["analysis"]) => ({
+  analysisVersion: analysis.analysisVersion,
+  weightingVersion: analysis.weightingVersion,
+  recommendedActionId: analysis.recommendedActionId,
+  candidates: analysis.candidates.map((candidate) => ({
+    actionId: candidate.actionId,
+    rank: candidate.rank,
+    totalScore: candidate.totalScore,
+    confidence: candidate.confidence,
+    distanceAfterAction: candidate.distanceAfterAction,
+    visibleImprovingCopies: candidate.visibleImprovingCopies,
+    likelyFaanPathIds: [...candidate.likelyFaanPathIds],
+    facts: candidate.facts.map(publicFact),
+  })),
+  facts: analysis.facts.map(publicFact),
+  rollout: analysis.rollout === null ? null : { ...analysis.rollout },
+});
+
+const publicLearner = (learner: CoachNarrationInput["learner"]) => ({
+  learnerId: learner.learnerId,
+  mode: learner.mode,
+  currentObjective: learner.currentObjective,
+  mastery: learner.mastery.map((mastery) => ({ ...mastery })),
+  patterns: learner.patterns.map((pattern) => ({
+    ...pattern,
+    relevantDecisionIds: [...pattern.relevantDecisionIds],
+  })),
+  verbosity: learner.verbosity,
+});
+
 const promptFor = (input: CoachNarrationInput): readonly Record<string, unknown>[] => [
   {
     role: "developer",
@@ -305,11 +414,11 @@ const promptFor = (input: CoachNarrationInput): readonly Record<string, unknown>
     content: JSON.stringify({
       promptVersion: NARRATOR_PROMPT_VERSION,
       hintLevel: input.hintLevel,
-      ruleset: input.observation.ruleset,
-      observation: input.observation,
+      ruleset: { ...input.observation.ruleset },
+      observation: publicObservation(input.observation),
       legalActions: input.observation.legalActions,
-      analysis: input.analysis,
-      learner: input.learner,
+      analysis: publicAnalysis(input.analysis),
+      learner: publicLearner(input.learner),
       allowStylisticAlternative: input.allowStylisticAlternative ?? false,
     }),
   },
