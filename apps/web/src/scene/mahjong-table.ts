@@ -7,13 +7,15 @@ import { BokehPass } from "three/examples/jsm/postprocessing/BokehPass.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
+
+import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
 
 import {
   createMahjongPhysics,
   type MahjongPhysicsRuntime,
+  type PhysicsBodyState,
   type PhysicsBox,
   type PhysicsVector,
 } from "./mahjong-physics.js";
@@ -59,13 +61,15 @@ export interface VisualSceneState {
 }
 
 export type VisualCameraPreset =
-  "table" | "roomReveal" | "skylineReview" | "assetReview" | "focusCalibration";
+  | "table"
+  | "roomReveal"
+  | "assetReview"
+  | "focusCalibration"
+  | "climbingGym";
 
 export type VisualToneMapper = "agx" | "neutral" | "cineon" | "linear";
 
 export type VisualShadowQuality = "off" | "medium" | "high";
-
-export type VisualSkylineLayer = "near" | "hero" | "fillers" | "distant";
 
 export type MotionLookStatus =
   "unsupported" | "needs-permission" | "requesting" | "ready" | "denied";
@@ -91,12 +95,43 @@ export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
 
 const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
 const VISUAL_SCENE_FALL_RESET_Y = -2;
+const EXPLORATION_CHUNK_SIZE = 50;
+const EXPLORATION_CHUNKS_PER_SIDE = 5;
+const EXPLORATION_DENSITY_SCALE = Math.sqrt(EXPLORATION_CHUNK_SIZE / 8);
+const EXPLORATION_WORLD_HALF_SIZE = EXPLORATION_CHUNK_SIZE * EXPLORATION_CHUNKS_PER_SIDE;
 const WORLD_BOUNDS = {
-  minX: -60,
-  maxX: 60,
-  minZ: -52,
-  maxZ: 52,
+  minX: -EXPLORATION_WORLD_HALF_SIZE,
+  maxX: EXPLORATION_WORLD_HALF_SIZE,
+  minZ: -EXPLORATION_WORLD_HALF_SIZE,
+  maxZ: EXPLORATION_WORLD_HALF_SIZE,
 } as const;
+export const PLAY_AREA_SIZE_METERS = 50;
+const PLAY_AREA_GAP_METERS = 10;
+const PLAY_AREA_SPACING_METERS = PLAY_AREA_SIZE_METERS + PLAY_AREA_GAP_METERS;
+export const PLAY_AREA_ORIGINS = {
+  climbingGym: { x: -PLAY_AREA_SPACING_METERS, z: 0 },
+  penthouse: { x: 0, z: 0 },
+  lookingFocusRoom: { x: PLAY_AREA_SPACING_METERS, z: 0 },
+} as const;
+const PLAY_AREA_HALF_SIZE = PLAY_AREA_SIZE_METERS / 2;
+const PENTHOUSE_FLOOR_WIDTH_METERS = PLAY_AREA_SIZE_METERS;
+const PENTHOUSE_FLOOR_DEPTH_METERS = PLAY_AREA_SIZE_METERS;
+const PENTHOUSE_INTERIOR_FLOOR_WIDTH_METERS = PENTHOUSE_FLOOR_WIDTH_METERS - 2;
+const PENTHOUSE_INTERIOR_FLOOR_DEPTH_METERS = PENTHOUSE_FLOOR_DEPTH_METERS - 2;
+const PENTHOUSE_CEILING_HEIGHT_METERS = 5;
+const PENTHOUSE_CEILING_SLAB_THICKNESS_METERS = 0.34;
+const PENTHOUSE_WALL_THICKNESS_METERS = 0.34;
+const PENTHOUSE_HALF_WIDTH_METERS = PENTHOUSE_FLOOR_WIDTH_METERS / 2;
+const PENTHOUSE_HALF_DEPTH_METERS = PENTHOUSE_FLOOR_DEPTH_METERS / 2;
+const PENTHOUSE_SIDE_WALL_X =
+  PENTHOUSE_HALF_WIDTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2;
+const PENTHOUSE_NORTH_WALL_Z =
+  -(PENTHOUSE_HALF_DEPTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2);
+const PENTHOUSE_WINDOW_HEIGHT_METERS = PENTHOUSE_CEILING_HEIGHT_METERS - 0.12;
+const PENTHOUSE_WINDOW_CENTER_Y = PENTHOUSE_WINDOW_HEIGHT_METERS / 2 + 0.04;
+const PENTHOUSE_NORTH_GLASS_WIDTH_METERS =
+  PENTHOUSE_FLOOR_WIDTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS * 2;
+const PENTHOUSE_NORTH_GLASS_Z = PENTHOUSE_NORTH_WALL_Z + 0.015;
 const OUTSIDE_PLAY_GRID_UNIT = 0.5;
 const OUTSIDE_PLAY_GRID_ROTATION_STEP = Math.PI / 4;
 
@@ -161,9 +196,9 @@ const isSceneView = (value: unknown): value is SceneView =>
 const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "table" ||
   value === "roomReveal" ||
-  value === "skylineReview" ||
   value === "assetReview" ||
-  value === "focusCalibration";
+  value === "focusCalibration" ||
+  value === "climbingGym";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -278,8 +313,6 @@ export interface VisualDebugPreferences {
   readonly exposure: number;
   readonly toneMapper: VisualToneMapper;
   readonly fogDensity: number;
-  readonly skylineVisible: boolean;
-  readonly skylineLayers: Readonly<Record<VisualSkylineLayer, boolean>>;
   readonly sunYaw: number;
   readonly sunElevation: number;
   readonly sunIntensity: number;
@@ -301,6 +334,136 @@ export interface VisualDebugPreferences {
   readonly cameraShiftEnabled: boolean;
   readonly cameraBobEnabled: boolean;
 }
+
+export const VISUAL_MAP_DOCUMENT_VERSION = 1 as const;
+
+export type VisualMapEntityKind =
+  | "planter"
+  | "divider"
+  | "wallPanel"
+  | "lightBar"
+  | "sculpture";
+
+export type VisualMapEntityPosition = readonly [number, number, number];
+
+export interface VisualMapEntity {
+  readonly id: string;
+  readonly kind: VisualMapEntityKind;
+  readonly position: VisualMapEntityPosition;
+  readonly rotationDegrees?: number;
+  readonly scale?: number;
+}
+
+export interface VisualMapDocument {
+  readonly version: typeof VISUAL_MAP_DOCUMENT_VERSION;
+  readonly floor: {
+    readonly width: number;
+    readonly depth: number;
+    readonly rotationDegrees?: number;
+  };
+  /** The complete room layout. Omitting an entity removes it from the generated room. */
+  readonly entities: readonly VisualMapEntity[];
+}
+
+const VISUAL_MAP_ENTITY_ID = /^[a-z][a-z0-9-]{0,31}$/u;
+const VISUAL_MAP_ENTITY_LIMIT = 64;
+
+const isVisualMapEntityKind = (value: unknown): value is VisualMapEntityKind =>
+  value === "planter" ||
+  value === "divider" ||
+  value === "wallPanel" ||
+  value === "lightBar" ||
+  value === "sculpture";
+
+const isVisualMapPosition = (value: unknown): value is VisualMapEntityPosition =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  value.every((entry: unknown) => isBoundedNumber(entry, -40, 40));
+
+const isVisualMapEntity = (value: unknown): value is VisualMapEntity => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.id === "string" &&
+    VISUAL_MAP_ENTITY_ID.test(value.id) &&
+    isVisualMapEntityKind(value.kind) &&
+    isVisualMapPosition(value.position) &&
+    (value.rotationDegrees === undefined ||
+      isBoundedNumber(value.rotationDegrees, -180, 180)) &&
+    (value.scale === undefined || isBoundedNumber(value.scale, 0.25, 3))
+  );
+};
+
+const isVisualMapDocument = (value: unknown): value is VisualMapDocument => {
+  if (!isRecord(value) || value.version !== VISUAL_MAP_DOCUMENT_VERSION) {
+    return false;
+  }
+  const floor = value.floor;
+  const entities = value.entities;
+  if (
+    !isRecord(floor) ||
+    !isBoundedNumber(floor.width, 2.8, PENTHOUSE_INTERIOR_FLOOR_WIDTH_METERS) ||
+    !isBoundedNumber(floor.depth, 2.4, PENTHOUSE_INTERIOR_FLOOR_DEPTH_METERS) ||
+    (floor.rotationDegrees !== undefined &&
+      !isBoundedNumber(floor.rotationDegrees, -180, 180)) ||
+    !Array.isArray(entities) ||
+    entities.length > VISUAL_MAP_ENTITY_LIMIT ||
+    !entities.every((entity: unknown) => isVisualMapEntity(entity))
+  ) {
+    return false;
+  }
+  const ids = new Set(
+    entities.map((entity: VisualMapEntity) => entity.id),
+  );
+  return ids.size === entities.length;
+};
+
+const normalizeVisualMapDocument = (document: VisualMapDocument): VisualMapDocument => ({
+  version: VISUAL_MAP_DOCUMENT_VERSION,
+  floor: {
+    width: document.floor.width,
+    depth: document.floor.depth,
+    rotationDegrees: document.floor.rotationDegrees ?? 0,
+  },
+  entities: document.entities.map((entity) => ({
+    id: entity.id,
+    kind: entity.kind,
+    position: [...entity.position] as VisualMapEntityPosition,
+    rotationDegrees: entity.rotationDegrees ?? 0,
+    scale: entity.scale ?? 1,
+  })),
+});
+
+export const parseVisualMapDocument = (serialized: string): VisualMapDocument | null => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isVisualMapDocument(parsed)) {
+    return null;
+  }
+  return normalizeVisualMapDocument(parsed);
+};
+
+export const serializeVisualMapDocument = (
+  document: VisualMapDocument | null | undefined,
+): string => {
+  if (document === null || document === undefined || !isVisualMapDocument(document)) {
+    return "{}";
+  }
+  return JSON.stringify(normalizeVisualMapDocument(document), null, 2);
+};
+
+const getAuthoredVisualMapDocument = (): VisualMapDocument => {
+  const document = parseVisualMapDocument(JSON.stringify(authoredVisualMapInput));
+  if (document === null) {
+    throw new Error("The authored penthouse map is invalid");
+  }
+  return document;
+};
 
 const getVisualDebugPreferencesStorage = (): Storage | null => {
   if (!import.meta.env.DEV || typeof window === "undefined") {
@@ -330,31 +493,20 @@ const isBoolean = (value: unknown): value is boolean => typeof value === "boolea
 const isBoundedNumber = (value: unknown, min: number, max: number): value is number =>
   isFiniteNumber(value) && value >= min && value <= max;
 
-const isSkylineLayerPreferences = (
-  value: unknown,
-): value is Readonly<Record<VisualSkylineLayer, boolean>> => {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return ["near", "hero", "fillers", "distant"].every((layer) => isBoolean(value[layer]));
-};
-
 const isVisualDebugPreferences = (value: unknown): value is VisualDebugPreferences => {
   if (!isRecord(value)) {
     return false;
   }
   return (
-    value.version === VISUAL_DEBUG_PREFERENCES_VERSION &&
-    (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
-    isBoundedNumber(value.fov, 30, 100) &&
-    isBoundedNumber(value.exposure, 0.5, 2.2) &&
-    isVisualToneMapper(value.toneMapper) &&
-    isBoundedNumber(value.fogDensity, 0.004, 0.04) &&
-    isBoolean(value.skylineVisible) &&
-    isSkylineLayerPreferences(value.skylineLayers) &&
-    isBoundedNumber(value.sunYaw, -Math.PI, Math.PI) &&
-    isBoundedNumber(value.sunElevation, 0.25, 1.45) &&
-    isBoundedNumber(value.sunIntensity, 0, 6) &&
+  value.version === VISUAL_DEBUG_PREFERENCES_VERSION &&
+  (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
+  isBoundedNumber(value.fov, 30, 100) &&
+  isBoundedNumber(value.exposure, 0.5, 2.2) &&
+  isVisualToneMapper(value.toneMapper) &&
+  isBoundedNumber(value.fogDensity, 0, 0.04) &&
+  isBoundedNumber(value.sunYaw, -Math.PI, Math.PI) &&
+  isBoundedNumber(value.sunElevation, 0.25, 1.45) &&
+  isBoundedNumber(value.sunIntensity, 0, 6) &&
     isBoundedNumber(value.environmentIntensity, 0, 2.5) &&
     isBoundedNumber(value.environmentRotation, -Math.PI, Math.PI) &&
     isBoundedNumber(value.redAccentIntensity, 0, 2.5) &&
@@ -453,8 +605,6 @@ export interface SceneDebugSnapshot {
   readonly exposure: number;
   readonly toneMapper: VisualToneMapper;
   readonly fogDensity: number;
-  readonly skylineVisible: boolean;
-  readonly skylineLayers: Readonly<Record<VisualSkylineLayer, boolean>>;
   readonly sunYaw: number;
   readonly sunElevation: number;
   readonly sunIntensity: number;
@@ -497,8 +647,6 @@ export interface MahjongTableDebugControls {
   readonly setExposure: (exposure: number) => void;
   readonly setToneMapper: (toneMapper: VisualToneMapper) => void;
   readonly setFogDensity: (density: number) => void;
-  readonly setSkylineVisible: (visible: boolean) => void;
-  readonly setSkylineLayerVisible: (layer: VisualSkylineLayer, visible: boolean) => void;
   readonly setSunDirection: (yaw: number, elevation: number) => void;
   readonly setSunIntensity: (intensity: number) => void;
   readonly setEnvironmentIntensity: (intensity: number) => void;
@@ -517,6 +665,7 @@ export interface MahjongTableDebugControls {
   readonly setCameraBobEnabled: (enabled: boolean) => void;
   readonly setWireframe: (enabled: boolean) => void;
   readonly setBoundsVisible: (visible: boolean) => void;
+  readonly teleportToFocusLab: () => void;
   readonly resetDefaults: () => void;
   readonly getSnapshot: () => SceneDebugSnapshot;
 }
@@ -538,6 +687,7 @@ interface TileOptions {
 interface TileTextureCache {
   readonly face: Map<TileTypeId, THREE.CanvasTexture>;
   readonly back: THREE.CanvasTexture;
+  readonly detail: THREE.CanvasTexture;
   readonly bodyGeometry: Map<string, RoundedBoxGeometry>;
   readonly faceGeometry: Map<string, THREE.PlaneGeometry>;
   readonly bodyMaterial: Map<string, THREE.MeshStandardMaterial>;
@@ -552,19 +702,12 @@ interface SceneQuality {
   readonly shadowMapSize: 0 | 1024 | 2048;
   readonly ambientOcclusion: boolean;
   readonly glassMode: VisualGlassMode;
-  readonly skylineLodBias: number;
   readonly ambientAnimationRate: number;
 }
 
 interface SceneAmbientResources {
   readonly cyanMaterials: readonly THREE.MeshStandardMaterial[];
   readonly redMaterials: readonly THREE.MeshStandardMaterial[];
-  readonly skylineMaterials: readonly THREE.MeshStandardMaterial[];
-}
-
-interface SkylineResources {
-  readonly texture: THREE.CanvasTexture;
-  readonly ambient: SceneAmbientResources;
 }
 
 interface ArchitectureResources {
@@ -573,6 +716,16 @@ interface ArchitectureResources {
   readonly glassSurfaces: readonly THREE.Mesh[];
   readonly simpleGlassMaterial: THREE.MeshStandardMaterial;
   readonly physicalGlassMaterial: THREE.MeshPhysicalMaterial;
+  readonly surfaceTextures: InteriorSurfaceTextures;
+}
+
+interface InteriorSurfaceTextures {
+  readonly floor: THREE.CanvasTexture;
+  readonly wall: THREE.CanvasTexture;
+  readonly table: THREE.CanvasTexture;
+  readonly wood: THREE.CanvasTexture;
+  readonly fabric: THREE.CanvasTexture;
+  readonly detail: THREE.CanvasTexture;
 }
 
 const TABLE_TOP_Y = 0.78;
@@ -591,17 +744,18 @@ const TILE_BLUE = "#315b86";
 const TILE_INK = "#253237";
 
 const COLORS = {
-  sky: 0xdde9ea,
-  architecturalWhite: 0xe9ece8,
-  whiteLacquer: 0xf3f4f0,
-  structuralGray: 0xb9bec0,
-  charcoal: 0x151a1d,
-  glass: 0xc8e2e7,
-  paleOak: 0xc8b69e,
-  red: 0xe94136,
-  cyan: 0x73dce8,
-  aluminum: 0xb8bec2,
-  tileIvory: 0xf2eee3,
+  sky: 0x102b3c,
+  haze: 0x8fa8b1,
+  architecturalWhite: 0xe7eeed,
+  whiteLacquer: 0xf4f6f2,
+  structuralGray: 0x52636b,
+  charcoal: 0x101a21,
+  glass: 0x78b7c8,
+  paleOak: 0x9a8068,
+  red: 0xf04438,
+  cyan: 0x62dce6,
+  aluminum: 0xa9bbc0,
+  tileIvory: 0xf1e8d9,
 } as const;
 
 const PIP_POSITIONS: Readonly<Record<number, readonly (readonly [number, number])[]>> = {
@@ -720,10 +874,6 @@ const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, Camera
     position: new THREE.Vector3(6.3, 4.55, 6.8),
     target: new THREE.Vector3(0, 1.15, -1.45),
   },
-  skylineReview: {
-    position: new THREE.Vector3(-2.6, 3.25, 4.15),
-    target: new THREE.Vector3(-1.75, 2.55, -6.55),
-  },
   assetReview: cameraPresets.overhead,
   focusCalibration: {
     position: new THREE.Vector3(
@@ -737,6 +887,18 @@ const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, Camera
       0,
     ),
   },
+  climbingGym: {
+    position: new THREE.Vector3(
+      CLIMBING_GYM_PRESET_START_X,
+      CLIMBING_GYM_RUN_Y + STANDING_EYE_HEIGHT,
+      CLIMBING_GYM_PRESET_START_Z,
+    ),
+    target: new THREE.Vector3(
+      CLIMBING_GYM_PRESET_TARGET_X,
+      CLIMBING_GYM_RUN_Y + STANDING_EYE_HEIGHT,
+      CLIMBING_GYM_PRESET_TARGET_Z,
+    ),
+  },
 });
 
 const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
@@ -747,6 +909,12 @@ const DEBUG_SEATED_FOV = 68;
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
+const LEDGE_GRAB_MIN_HEIGHT = 0.3;
+const LEDGE_GRAB_MAX_HEIGHT = 1.6;
+const LEDGE_GRAB_APPROACH_DISTANCE = 1;
+const LEDGE_GRAB_SIDE_DISTANCE = 0.4;
+const LEDGE_GRAB_PLATFORM_TOLERANCE = 0.01;
+const LEDGE_GRAB_PLATFORM_INSET = 0.08;
 const SPRINT_MULTIPLIER = 3;
 const PLAYER_COLLIDER_RADIUS = 0.26;
 const PLAYER_COLLIDER_HALF_HEIGHT = 0.6;
@@ -801,30 +969,40 @@ const BOKEH_NEAR_ACCOMMODATION_DAMPING = 7;
 const BOKEH_FAR_ACCOMMODATION_DAMPING = 4.5;
 const BOKEH_PUPIL_ADAPTATION_DAMPING = 2.4;
 const BOKEH_TILE_SAMPLE_OFFSET = 0.028;
-const FOCUS_CALIBRATION_START_X = 9.2;
+const FOCUS_CALIBRATION_START_X =
+  PLAY_AREA_ORIGINS.lookingFocusRoom.x - PLAY_AREA_SIZE_METERS / 4;
 const FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE = HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE;
 const FOCUS_CALIBRATION_LENGTH = FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE * 2;
 const FOCUS_CALIBRATION_ENTRY_MARGIN = 1.6;
 const FOCUS_CALIBRATION_HALL_WIDTH = 6.4;
 const FOCUS_CALIBRATION_PLATFORM_WIDTH = 16;
-const FOCUS_CALIBRATION_BACK_EXTENSION = 12;
-const FOCUS_CALIBRATION_DECK_HEIGHT = 7.5;
+const FOCUS_CALIBRATION_BACK_EXTENSION = 10;
+const FOCUS_CALIBRATION_DECK_HEIGHT = 0;
 const FOCUS_CALIBRATION_RAMP_RUN = 24;
 const FOCUS_CALIBRATION_RAMP_WIDTH = 8;
 const FOCUS_CALIBRATION_RAMP_TOP_Z = FOCUS_CALIBRATION_PLATFORM_WIDTH / 2;
-const EXPLORATION_CHUNK_SIZE = 8;
+const CLIMBING_GYM_RUN_Y = 0.11;
+// Keep the training lane centered in its own ground-level 50 m play area.
+const CLIMBING_GYM_ZONE_ORIGIN_X = PLAY_AREA_ORIGINS.climbingGym.x;
+const CLIMBING_GYM_ZONE_ORIGIN_Z = PLAY_AREA_ORIGINS.climbingGym.z;
+const CLIMBING_GYM_PRESET_START_X = CLIMBING_GYM_ZONE_ORIGIN_X - 0.55;
+const CLIMBING_GYM_PRESET_START_Z = CLIMBING_GYM_ZONE_ORIGIN_Z - 0.23;
+const CLIMBING_GYM_PRESET_TARGET_X = CLIMBING_GYM_ZONE_ORIGIN_X + 1.85;
+const CLIMBING_GYM_PRESET_TARGET_Z = CLIMBING_GYM_ZONE_ORIGIN_Z + 0.62;
+const EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET = EXPLORATION_CHUNK_SIZE * (2.45 / 8);
+const EXPLORATION_CHUNK_BUILDING_EDGE_JITTER = EXPLORATION_CHUNK_SIZE * (2.3 / 8);
 
 /**
- * The room is larger than one streamed block, so the first city blocks at
- * the gateway straddle it. Keep this exclusion slightly outside the visible
- * shell; city geometry may touch the gateway, but it must never be authored
- * under the penthouse floor or through its walls.
+ * The room occupies the full streamed block at the gateway. Keep this
+ * exclusion slightly outside the visible shell; city geometry may touch the
+ * gateway, but it must never be authored under the penthouse floor or through
+ * its walls.
  */
 export const EXPLORATION_PENTHOUSE_BOUNDS = {
-  minX: -8.72,
-  maxX: 8.72,
-  minZ: -6.98,
-  maxZ: 6.98,
+  minX: -(PENTHOUSE_HALF_WIDTH_METERS + 0.25),
+  maxX: PENTHOUSE_HALF_WIDTH_METERS + 0.25,
+  minZ: -(PENTHOUSE_HALF_DEPTH_METERS + 0.25),
+  maxZ: PENTHOUSE_HALF_DEPTH_METERS + 0.25,
 } as const;
 
 export interface ExplorationRect {
@@ -834,6 +1012,35 @@ export interface ExplorationRect {
   readonly maxZ: number;
 }
 
+const PLAY_AREA_DEFINITIONS = [
+  {
+    id: "penthouse",
+    label: "Penthouse",
+    origin: PLAY_AREA_ORIGINS.penthouse,
+    accent: "#73dce8",
+  },
+  {
+    id: "lookingFocusRoom",
+    label: "Looking focus room",
+    origin: PLAY_AREA_ORIGINS.lookingFocusRoom,
+    accent: "#d8a85c",
+  },
+  {
+    id: "climbingGym",
+    label: "Climbing gym",
+    origin: PLAY_AREA_ORIGINS.climbingGym,
+    accent: "#db5c67",
+  },
+] as const;
+
+const PLAY_AREA_BOUNDS = PLAY_AREA_DEFINITIONS.map(({ label, origin }) => ({
+  label,
+  minX: origin.x - PLAY_AREA_HALF_SIZE,
+  maxX: origin.x + PLAY_AREA_HALF_SIZE,
+  minZ: origin.z - PLAY_AREA_HALF_SIZE,
+  maxZ: origin.z + PLAY_AREA_HALF_SIZE,
+}));
+
 /** Return true when a horizontal city rectangle does not enter the room. */
 export const isExplorationRectOutsidePenthouse = (rect: ExplorationRect): boolean =>
   rect.maxX <= EXPLORATION_PENTHOUSE_BOUNDS.minX ||
@@ -841,21 +1048,37 @@ export const isExplorationRectOutsidePenthouse = (rect: ExplorationRect): boolea
   rect.maxZ <= EXPLORATION_PENTHOUSE_BOUNDS.minZ ||
   rect.minZ >= EXPLORATION_PENTHOUSE_BOUNDS.maxZ;
 
+/** Return true when a rectangle stays outside all three reserved play areas. */
+export const isExplorationRectOutsidePlayAreas = (rect: ExplorationRect): boolean =>
+  PLAY_AREA_BOUNDS.every(
+    (bounds) =>
+      rect.maxX <= bounds.minX ||
+      rect.minX >= bounds.maxX ||
+      rect.maxZ <= bounds.minZ ||
+      rect.minZ >= bounds.maxZ,
+  );
+const isExplorationRectOutsideWorld = (rect: ExplorationRect): boolean =>
+  rect.maxX <= WORLD_BOUNDS.minX ||
+  rect.minX >= WORLD_BOUNDS.maxX ||
+  rect.maxZ <= WORLD_BOUNDS.minZ ||
+  rect.minZ >= WORLD_BOUNDS.maxZ;
+
 const isExplorationRectOutsideFocusCalibrationRamp = (rect: ExplorationRect): boolean =>
   rect.maxX <= FOCUS_CALIBRATION_START_X - FOCUS_CALIBRATION_RAMP_WIDTH / 2 ||
   rect.minX >= FOCUS_CALIBRATION_START_X + FOCUS_CALIBRATION_RAMP_WIDTH / 2 ||
   rect.maxZ <= FOCUS_CALIBRATION_RAMP_TOP_Z ||
   rect.minZ >= FOCUS_CALIBRATION_RAMP_TOP_Z + FOCUS_CALIBRATION_RAMP_RUN;
 
-/**
- * Subtract the penthouse rectangle from one city rectangle. The result is at
- * most four rectangles and is used for shared-geometry ground/path meshes so
- * a boundary chunk remains walkable without putting a mesh through the room.
- */
-export const clipExplorationRectAroundPenthouse = (
+const clipExplorationRectAroundBounds = (
   rect: ExplorationRect,
+  bounds: ExplorationRect,
 ): readonly ExplorationRect[] => {
-  if (isExplorationRectOutsidePenthouse(rect)) {
+  if (
+    rect.maxX <= bounds.minX ||
+    rect.minX >= bounds.maxX ||
+    rect.maxZ <= bounds.minZ ||
+    rect.minZ >= bounds.maxZ
+  ) {
     return [rect];
   }
 
@@ -867,34 +1090,259 @@ export const clipExplorationRectAroundPenthouse = (
     clipped.push({ minX, maxX, minZ, maxZ });
   };
 
-  if (rect.minX < EXPLORATION_PENTHOUSE_BOUNDS.minX) {
-    add(rect.minX, Math.min(rect.maxX, EXPLORATION_PENTHOUSE_BOUNDS.minX), rect.minZ, rect.maxZ);
+  if (rect.minX < bounds.minX) {
+    add(rect.minX, Math.min(rect.maxX, bounds.minX), rect.minZ, rect.maxZ);
   }
-  if (rect.maxX > EXPLORATION_PENTHOUSE_BOUNDS.maxX) {
-    add(Math.max(rect.minX, EXPLORATION_PENTHOUSE_BOUNDS.maxX), rect.maxX, rect.minZ, rect.maxZ);
+  if (rect.maxX > bounds.maxX) {
+    add(Math.max(rect.minX, bounds.maxX), rect.maxX, rect.minZ, rect.maxZ);
   }
 
-  const overlapMinX = Math.max(rect.minX, EXPLORATION_PENTHOUSE_BOUNDS.minX);
-  const overlapMaxX = Math.min(rect.maxX, EXPLORATION_PENTHOUSE_BOUNDS.maxX);
+  const overlapMinX = Math.max(rect.minX, bounds.minX);
+  const overlapMaxX = Math.min(rect.maxX, bounds.maxX);
   if (overlapMaxX > overlapMinX) {
-    if (rect.minZ < EXPLORATION_PENTHOUSE_BOUNDS.minZ) {
-      add(
-        overlapMinX,
-        overlapMaxX,
-        rect.minZ,
-        Math.min(rect.maxZ, EXPLORATION_PENTHOUSE_BOUNDS.minZ),
-      );
+    if (rect.minZ < bounds.minZ) {
+      add(overlapMinX, overlapMaxX, rect.minZ, Math.min(rect.maxZ, bounds.minZ));
     }
-    if (rect.maxZ > EXPLORATION_PENTHOUSE_BOUNDS.maxZ) {
-      add(
-        overlapMinX,
-        overlapMaxX,
-        Math.max(rect.minZ, EXPLORATION_PENTHOUSE_BOUNDS.maxZ),
-        rect.maxZ,
-      );
+    if (rect.maxZ > bounds.maxZ) {
+      add(overlapMinX, overlapMaxX, Math.max(rect.minZ, bounds.maxZ), rect.maxZ);
     }
   }
   return clipped;
+};
+
+/** Keep the existing penthouse clipping helper stable for map consumers. */
+export const clipExplorationRectAroundPenthouse = (
+  rect: ExplorationRect,
+): readonly ExplorationRect[] => clipExplorationRectAroundBounds(rect, EXPLORATION_PENTHOUSE_BOUNDS);
+
+/** Keep streamed ground and paths out of every authored play-area footprint. */
+export const clipExplorationRectAroundPlayAreas = (
+  rect: ExplorationRect,
+): readonly ExplorationRect[] => {
+  let pieces: readonly ExplorationRect[] = [rect];
+  for (const bounds of PLAY_AREA_BOUNDS) {
+    pieces = pieces.flatMap((piece) => clipExplorationRectAroundBounds(piece, bounds));
+  }
+  return pieces;
+};
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+const smoothStep = (value: number): number => value * value * (3 - 2 * value);
+
+const hashNoise = (seed: string, x: number, z: number, salt: string): number => {
+  const random = createSeededRandom(`${seed}|${salt}|${String(x)}|${String(z)}`);
+  return random.nextFloat();
+};
+
+const sampleExplorationNoise = (
+  seed: string,
+  worldX: number,
+  worldZ: number,
+  scale: number,
+  salt: string,
+): number => {
+  const scaledX = worldX * scale;
+  const scaledZ = worldZ * scale;
+  const x0 = Math.floor(scaledX);
+  const z0 = Math.floor(scaledZ);
+  const x1 = x0 + 1;
+  const z1 = z0 + 1;
+  const tx = smoothStep(scaledX - x0);
+  const tz = smoothStep(scaledZ - z0);
+  const n00 = hashNoise(seed, x0, z0, salt);
+  const n10 = hashNoise(seed, x1, z0, salt);
+  const n01 = hashNoise(seed, x0, z1, salt);
+  const n11 = hashNoise(seed, x1, z1, salt);
+  const xA = n00 + (n10 - n00) * tx;
+  const xB = n01 + (n11 - n01) * tx;
+  return xA + (xB - xA) * tz;
+};
+
+const sampleExplorationBiomeNoise = (
+  seed: string,
+  chunkX: number,
+  chunkZ: number,
+  salt: string,
+): number => {
+  const worldX = chunkX * EXPLORATION_CHUNK_SIZE;
+  const worldZ = chunkZ * EXPLORATION_CHUNK_SIZE;
+  const coarse = sampleExplorationNoise(seed, worldX, worldZ, 0.022, salt);
+  const fine = sampleExplorationNoise(seed, worldX, worldZ, 0.11, salt);
+  return clamp01(0.72 * coarse + 0.28 * fine);
+};
+
+interface ExplorationBiomeStyle {
+  readonly label: string;
+  readonly ground: number;
+  readonly path: number;
+  readonly prop: number;
+  readonly accent: number;
+  readonly preferredTemperature: number;
+  readonly preferredHumidity: number;
+  readonly preferredElevation: number;
+  readonly temperatureTolerance: number;
+  readonly humidityTolerance: number;
+  readonly elevationTolerance: number;
+  readonly buildingDensity: number;
+  readonly buildingHeightMin: number;
+  readonly buildingHeightMax: number;
+  readonly windowHeight: number;
+  readonly pathFrequency: number;
+  readonly bridgeDensity: number;
+  readonly propDensity: number;
+  readonly beaconDensity: number;
+  readonly citySignDensity: number;
+  readonly utilityPostDensity: number;
+}
+
+interface ResolvedExplorationBiome {
+  readonly style: ExplorationBiomeStyle;
+  readonly styleIndex: number;
+  readonly temperature: number;
+  readonly humidity: number;
+  readonly elevation: number;
+  readonly featureNoise: number;
+}
+
+const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
+  {
+    label: "South courtyard",
+    ground: 0x545f67,
+    path: 0x3a4852,
+    prop: 0x72818d,
+    accent: 0x93a0ad,
+    preferredTemperature: 0.52,
+    preferredHumidity: 0.48,
+    preferredElevation: 0.3,
+    temperatureTolerance: 0.2,
+    humidityTolerance: 0.22,
+    elevationTolerance: 0.24,
+    buildingDensity: 1.45,
+    buildingHeightMin: 1.5,
+    buildingHeightMax: 5.6,
+    windowHeight: 3.8,
+    pathFrequency: 0.55,
+    bridgeDensity: 0.15,
+    propDensity: 1.05,
+    beaconDensity: 0.22,
+    citySignDensity: 1.2,
+    utilityPostDensity: 1.0,
+  },
+  {
+    label: "West tea garden",
+    ground: 0x505c65,
+    path: 0x37434d,
+    prop: 0x6e7b88,
+    accent: 0x8a96a2,
+    preferredTemperature: 0.46,
+    preferredHumidity: 0.63,
+    preferredElevation: 0.48,
+    temperatureTolerance: 0.23,
+    humidityTolerance: 0.2,
+    elevationTolerance: 0.25,
+    buildingDensity: 1.0,
+    buildingHeightMin: 1,
+    buildingHeightMax: 4.2,
+    windowHeight: 2.8,
+    pathFrequency: 0.45,
+    bridgeDensity: 0.12,
+    propDensity: 1.36,
+    beaconDensity: 0.3,
+    citySignDensity: 1.0,
+    utilityPostDensity: 1.15,
+  },
+  {
+    label: "East practice court",
+    ground: 0x5a656f,
+    path: 0x3e4a54,
+    prop: 0x7a8794,
+    accent: 0x97a3ae,
+    preferredTemperature: 0.63,
+    preferredHumidity: 0.42,
+    preferredElevation: 0.56,
+    temperatureTolerance: 0.21,
+    humidityTolerance: 0.22,
+    elevationTolerance: 0.22,
+    buildingDensity: 1.95,
+    buildingHeightMin: 1.8,
+    buildingHeightMax: 5.9,
+    windowHeight: 4.2,
+    pathFrequency: 0.52,
+    bridgeDensity: 0.2,
+    propDensity: 1.0,
+    beaconDensity: 0.18,
+    citySignDensity: 1.3,
+    utilityPostDensity: 1.25,
+  },
+  {
+    label: "North skybridge",
+    ground: 0x515a63,
+    path: 0x394450,
+    prop: 0x6f7d89,
+    accent: 0x91a0ad,
+    preferredTemperature: 0.58,
+    preferredHumidity: 0.54,
+    preferredElevation: 0.68,
+    temperatureTolerance: 0.21,
+    humidityTolerance: 0.21,
+    elevationTolerance: 0.2,
+    buildingDensity: 1.15,
+    buildingHeightMin: 2.8,
+    buildingHeightMax: 7,
+    windowHeight: 4.6,
+    pathFrequency: 0.58,
+    bridgeDensity: 0.35,
+    propDensity: 0.85,
+    beaconDensity: 0.18,
+    citySignDensity: 1.4,
+    utilityPostDensity: 1.1,
+  },
+] as const;
+
+const resolveExplorationBiome = (
+  seed: string,
+  chunkX: number,
+  chunkZ: number,
+): ResolvedExplorationBiome => {
+  const temperature = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "temp");
+  const humidity = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "humidity");
+  const elevation = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "elevation");
+  const featureNoise = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "feature");
+
+  let resolvedStyle = EXPLORATION_BIOMES[0] as ExplorationBiomeStyle;
+  let resolvedStyleIndex = 0;
+  let highestScore = -Infinity;
+
+  for (let index = 0; index < EXPLORATION_BIOMES.length; index += 1) {
+    const style = EXPLORATION_BIOMES[index];
+    if (style === undefined) {
+      continue;
+    }
+    const tempScore = clamp01(
+      1 - Math.abs(temperature - style.preferredTemperature) / style.temperatureTolerance,
+    );
+    const humidityScore = clamp01(
+      1 - Math.abs(humidity - style.preferredHumidity) / style.humidityTolerance,
+    );
+    const elevationScore = clamp01(
+      1 - Math.abs(elevation - style.preferredElevation) / style.elevationTolerance,
+    );
+    const score = tempScore * 0.48 + humidityScore * 0.34 + elevationScore * 0.18;
+    if (score > highestScore) {
+      highestScore = score;
+      resolvedStyle = style;
+      resolvedStyleIndex = index;
+    }
+  }
+
+  return {
+    style: resolvedStyle,
+    styleIndex: resolvedStyleIndex,
+    temperature,
+    humidity,
+    elevation,
+    featureNoise,
+  };
 };
 
 const PHYSICS_COLLISION_ROOT_NAMES: ReadonlySet<string> = new Set([
@@ -933,11 +1381,158 @@ const isPhysicsIgnored = (object: THREE.Object3D): boolean => {
   return PHYSICS_IGNORED_OBJECT_NAMES.has(object.name);
 };
 
+const createWallPhysicsBoxes = (wallRoot: THREE.Object3D | null): readonly PhysicsBox[] => {
+  if (wallRoot === null) {
+    return [];
+  }
+  const wallOffset = TABLE_WIDTH / 2 + 0.19;
+  const wallRunHalfLength = ((WALL_COUNT - 1) * WALL_SPACING) / 2 + 0.06;
+  const wallHeightCenterY = TABLE_TOP_Y + 0.165;
+  const wallHalfHeight = 0.15;
+  const wallSideHalfThickness = 0.07;
+  const wallEndHalfThickness = 0.08;
+  return [
+    {
+      center: { x: 0, y: wallHeightCenterY, z: -wallOffset },
+      halfExtents: {
+        x: wallRunHalfLength,
+        y: wallHalfHeight,
+        z: wallEndHalfThickness,
+      },
+    },
+    {
+      center: { x: 0, y: wallHeightCenterY, z: wallOffset },
+      halfExtents: {
+        x: wallRunHalfLength,
+        y: wallHalfHeight,
+        z: wallEndHalfThickness,
+      },
+    },
+    {
+      center: { x: wallOffset, y: wallHeightCenterY, z: 0 },
+      halfExtents: {
+        x: wallSideHalfThickness,
+        y: wallHalfHeight,
+        z: wallRunHalfLength,
+      },
+    },
+    {
+      center: { x: -wallOffset, y: wallHeightCenterY, z: 0 },
+      halfExtents: {
+        x: wallSideHalfThickness,
+        y: wallHalfHeight,
+        z: wallRunHalfLength,
+      },
+    },
+  ];
+};
+
+const createClimbingGymPhysicsBoxes = (): readonly PhysicsBox[] => {
+  return [
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X,
+        y: CLIMBING_GYM_RUN_Y,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z,
+      },
+      halfExtents: {
+        x: 3.25 / 2,
+        y: 0.22 / 2,
+        z: 1.9 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
+        y: 0.95 - 0.08,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z - 0.3,
+      },
+      halfExtents: {
+        x: 1.55 / 2,
+        y: 0.16 / 2,
+        z: 1.35 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.9,
+        y: 1.54 - 0.08,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+      },
+      halfExtents: {
+        x: 1.4 / 2,
+        y: 0.16 / 2,
+        z: 1.28 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.58,
+        y: 2.12 - 0.08,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.44,
+      },
+      halfExtents: {
+        x: 1.25 / 2,
+        y: 0.16 / 2,
+        z: 1.12 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.95,
+        y: 1.07,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+      },
+      halfExtents: {
+        x: 0.18 / 2,
+        y: 1.95 / 2,
+        z: 1.45 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X - 0.95,
+        y: 1.4,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z - 0.06,
+      },
+      halfExtents: {
+        x: 0.11 / 2,
+        y: 0.15 / 2,
+        z: 2.2 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
+        y: 1.98,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+      },
+      halfExtents: {
+        x: 0.11 / 2,
+        y: 0.15 / 2,
+        z: 2.2 / 2,
+      },
+    },
+    {
+      center: {
+        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.35,
+        y: 2.56,
+        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.32,
+      },
+      halfExtents: {
+        x: 0.11 / 2,
+        y: 0.15 / 2,
+        z: 2.2 / 2,
+      },
+    },
+  ];
+};
+
 /**
  * Builds deliberately coarse AABB colliders from selected render roots. The
  * renderer remains the source of geometry, while the physics world receives
  * one inexpensive box per meaningful mesh instead of every triangle. Roots
- * such as the table, tiles, skyline, and streamed chunks are excluded here so
+ * such as the table, tiles, and streamed chunks are excluded here so
  * they can use their own explicit or dynamic collider descriptions.
  */
 export const collectScenePhysicsBoxes = (
@@ -990,8 +1585,12 @@ export const collectScenePhysicsBoxes = (
 
 const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => {
   const focusRamp = scene.getObjectByName("FocusCalibrationRamp");
+  const wallRoot = scene.getObjectByName("WallRoot");
+  const climbingGymRoot = scene.getObjectByName("ClimbingGym");
+  const wallPhysicsBoxes = createWallPhysicsBoxes(wallRoot);
+  const climbingGymPhysicsBoxes = climbingGymRoot === null ? [] : createClimbingGymPhysicsBoxes();
   const focusRampPhysicsBoxes: readonly PhysicsBox[] =
-    focusRamp?.visible === true
+    focusRamp !== null
       ? [
           {
             center: {
@@ -1013,13 +1612,15 @@ const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => 
       center: { x: 0, y: -0.1, z: 0 },
       halfExtents: { x: WORLD_BOUNDS.maxX, y: 0.1, z: WORLD_BOUNDS.maxZ },
     },
-    {
-      center: { x: 0, y: 0.39, z: 0 },
-      halfExtents: { x: 0.92, y: 0.39, z: 0.92 },
-    },
-    ...focusRampPhysicsBoxes,
-    ...collectScenePhysicsBoxes(scene),
-  ];
+      {
+        center: { x: 0, y: 0.39, z: 0 },
+        halfExtents: { x: 0.92, y: 0.39, z: 0.92 },
+      },
+      ...focusRampPhysicsBoxes,
+      ...wallPhysicsBoxes,
+      ...climbingGymPhysicsBoxes,
+      ...collectScenePhysicsBoxes(scene),
+    ];
 };
 
 const getTouchSprintCap = (forwardDirection: number): number => {
@@ -1084,7 +1685,6 @@ const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "
     shadowMapSize: 2048,
     ambientOcclusion: false,
     glassMode: "physical",
-    skylineLodBias: 1,
     ambientAnimationRate: 1,
   },
   medium: {
@@ -1093,7 +1693,6 @@ const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "
     shadowMapSize: 1024,
     ambientOcclusion: false,
     glassMode: "simple",
-    skylineLodBias: 0.78,
     ambientAnimationRate: 0.75,
   },
   low: {
@@ -1102,7 +1701,6 @@ const QUALITY_PRESETS: Readonly<Record<VisualQualityPreset, Omit<SceneQuality, "
     shadowMapSize: 0,
     ambientOcclusion: false,
     glassMode: "simple",
-    skylineLodBias: 0.56,
     ambientAnimationRate: 0.45,
   },
 };
@@ -1172,6 +1770,188 @@ const createCanvasTexture = (canvas: HTMLCanvasElement): THREE.CanvasTexture => 
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.anisotropy = 4;
   return texture;
+};
+
+const clamp01ForNoise = (value: number): number => Math.max(0, Math.min(1, value));
+
+const lerp = (start: number, end: number, t: number): number => start + (end - start) * t;
+
+const hexToRgb = (color: number): readonly [number, number, number] => {
+  const normalized = color & 0xffffff;
+  return [
+    (normalized >> 16) & 0xff,
+    (normalized >> 8) & 0xff,
+    normalized & 0xff,
+  ];
+};
+
+const hashNoise2d = (x: number, y: number, seed: number): number => {
+  const value = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+  return value - Math.floor(value);
+};
+
+const fadeNoise = (value: number): number => value * value * (3 - 2 * value);
+
+const valueNoise = (x: number, y: number, seed: number): number => {
+  const xFloor = Math.floor(x);
+  const yFloor = Math.floor(y);
+  const xFract = x - xFloor;
+  const yFract = y - yFloor;
+  const xWrapped = fadeNoise(xFract);
+  const yWrapped = fadeNoise(yFract);
+  const n00 = hashNoise2d(xFloor, yFloor, seed);
+  const n10 = hashNoise2d(xFloor + 1, yFloor, seed);
+  const n01 = hashNoise2d(xFloor, yFloor + 1, seed);
+  const n11 = hashNoise2d(xFloor + 1, yFloor + 1, seed);
+  const xInter = lerp(n00, n10, xWrapped);
+  const yInter = lerp(n01, n11, xWrapped);
+  return lerp(xInter, yInter, yWrapped);
+};
+
+const fbmNoise = (x: number, y: number, seed: number): number => {
+  let total = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  for (let index = 0; index < 4; index += 1) {
+    total += valueNoise(x * frequency, y * frequency, seed + index * 13) * amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return clamp01ForNoise(total / 1.875);
+};
+
+const configureSurfaceTexture = (texture: THREE.CanvasTexture, repeatX: number, repeatY: number): void => {
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(repeatX, repeatY);
+  texture.needsUpdate = true;
+};
+
+const createProceduralSurfaceTexture = (
+  seed: number,
+  baseColor: number,
+  secondaryColor: number,
+  grainSize: number,
+  microLineDepth: number,
+): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 256;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create canvas for a procedural surface");
+  }
+
+  const base = hexToRgb(baseColor);
+  const secondary = hexToRgb(secondaryColor);
+  const imageData = context.createImageData(canvas.width, canvas.height);
+  const data = imageData.data;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const pixelIndex = (y * canvas.width + x) * 4;
+      const coarseNoise = fbmNoise(x / grainSize, y / grainSize, seed);
+      const microNoise = fbmNoise(x / 10 + seed * 0.01, y / 10 + seed * 0.02, seed + 100);
+      const contrast = fbmNoise(x / 24 + seed * 0.03, y / 24 + seed * 0.04, seed + 300);
+      const mix = clamp01ForNoise(0.3 + coarseNoise * 0.4 + (microNoise - 0.5) * 0.04);
+      const lineMark =
+        (Math.sin((x * 2.2 + y * 3.3 + seed) / 9) + 1) * 0.5 * 0.012 * microLineDepth;
+      const channelMix = THREE.MathUtils.clamp(0.5 + contrast * 0.22 + lineMark, 0.18, 0.82);
+      const valueLift = clamp01ForNoise(0.91 + coarseNoise * 0.065 + microNoise * 0.025);
+
+      data[pixelIndex] = Math.round(
+        clamp01ForNoise((base[0] / 255 * channelMix + secondary[0] / 255 * (1 - channelMix)) * valueLift) *
+          255,
+      );
+      data[pixelIndex + 1] = Math.round(
+        clamp01ForNoise((base[1] / 255 * channelMix + secondary[1] / 255 * (1 - channelMix)) * valueLift) *
+          255,
+      );
+      data[pixelIndex + 2] = Math.round(
+        clamp01ForNoise((base[2] / 255 * channelMix + secondary[2] / 255 * (1 - channelMix)) * valueLift) *
+          255,
+      );
+      data[pixelIndex + 3] = 255;
+    }
+  }
+  context.putImageData(imageData, 0, 0);
+
+  context.strokeStyle = "rgba(14, 20, 28, 0.075)";
+  for (let index = 0; index < 180; index += 1) {
+    const randomX = hashNoise2d(index * 2.13, index * 3.89, seed) * canvas.width;
+    const randomY = hashNoise2d(index * 1.77, index * 4.11, seed) * canvas.height;
+    const length = 6 + hashNoise2d(index * 0.61, index * 0.88, seed) * 18;
+    const angle = hashNoise2d(index * 5.13, index * 2.9, seed) * Math.PI * 2;
+    context.beginPath();
+    context.lineWidth = 0.55;
+    context.moveTo(randomX, randomY);
+    context.lineTo(randomX + Math.cos(angle) * length, randomY + Math.sin(angle) * length);
+    context.stroke();
+  }
+
+  return createCanvasTexture(canvas);
+};
+
+const createProceduralDetailTexture = (seed: number): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 256;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create canvas for a procedural detail texture");
+  }
+
+  const imageData = context.createImageData(canvas.width, canvas.height);
+  const data = imageData.data;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const pixelIndex = (y * canvas.width + x) * 4;
+      const broad = fbmNoise(x / 34, y / 34, seed);
+      const grain = fbmNoise(x / 9, y / 9, seed + 17);
+      const value = Math.round(112 + (broad * 0.72 + grain * 0.28) * 34);
+      data[pixelIndex] = value;
+      data[pixelIndex + 1] = value;
+      data[pixelIndex + 2] = value;
+      data[pixelIndex + 3] = 255;
+    }
+  }
+  context.putImageData(imageData, 0, 0);
+  const texture = createCanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  return texture;
+};
+
+const createInteriorSurfaceTextures = (): InteriorSurfaceTextures => {
+  const floor = createProceduralSurfaceTexture(
+    1,
+    0xcbd9db,
+    0xb6c8cb,
+    180,
+    0.35,
+  );
+  const wall = createProceduralSurfaceTexture(
+    2,
+    0xe4ebea,
+    0xcbd8d8,
+    220,
+    0.18,
+  );
+  const table = createProceduralSurfaceTexture(
+    3,
+    0xf1f4ef,
+    0xdfe8e5,
+    150,
+    0.28,
+  );
+  const wood = createProceduralSurfaceTexture(4, COLORS.paleOak, 0xb29b83, 160, 0.28);
+  const fabric = createProceduralSurfaceTexture(5, 0x4a5961, COLORS.charcoal, 110, 0.22);
+  const detail = createProceduralDetailTexture(9);
+  configureSurfaceTexture(floor, 5, 5);
+  configureSurfaceTexture(wall, 4, 4);
+  configureSurfaceTexture(table, 5, 5);
+  configureSurfaceTexture(wood, 4, 4);
+  configureSurfaceTexture(fabric, 6, 6);
+  configureSurfaceTexture(detail, 24, 24);
+  return { floor, wall, table, wood, fabric, detail };
 };
 
 const roundedRect = (
@@ -1338,9 +2118,10 @@ const drawTileBack = (): THREE.CanvasTexture => {
   return createCanvasTexture(canvas);
 };
 
-const createTextureCache = (): TileTextureCache => ({
+const createTextureCache = (detail: THREE.CanvasTexture): TileTextureCache => ({
   face: new Map(),
   back: drawTileBack(),
+  detail,
   bodyGeometry: new Map(),
   faceGeometry: new Map(),
   bodyMaterial: new Map(),
@@ -1407,6 +2188,9 @@ const getTileBodyMaterial = (
     color: COLORS.tileIvory,
     roughness: 0.44,
     metalness: 0.03,
+    roughnessMap: cache.detail,
+    bumpMap: cache.detail,
+    bumpScale: 0.004,
   });
   cache.bodyMaterial.set(key, material);
   return material;
@@ -1427,6 +2211,9 @@ const getTileBackMaterial = (
     map: cache.back,
     roughness: 0.68,
     metalness: 0,
+    roughnessMap: cache.detail,
+    bumpMap: cache.detail,
+    bumpScale: 0.003,
   });
   cache.backMaterial.set(key, material);
   return material;
@@ -1448,6 +2235,9 @@ const getTileFaceMaterial = (
     map: getFaceTexture(cache, tile),
     roughness: 0.68,
     metalness: 0,
+    roughnessMap: cache.detail,
+    bumpMap: cache.detail,
+    bumpScale: 0.003,
   });
   cache.faceMaterial.set(key, material);
   return material;
@@ -1550,14 +2340,72 @@ const createMaterial = (
   color: number,
   roughness: number,
   metalness = 0,
-): THREE.MeshStandardMaterial => new THREE.MeshStandardMaterial({ color, roughness, metalness });
+  map?: THREE.CanvasTexture | null,
+  detailMap?: THREE.CanvasTexture | null,
+): THREE.MeshStandardMaterial => {
+  const material = new THREE.MeshStandardMaterial({
+    color,
+    roughness: THREE.MathUtils.clamp(roughness * 0.9, 0.04, 0.96),
+    metalness,
+    envMapIntensity: metalness > 0.5 ? 1.28 : 0.78,
+    dithering: true,
+    ...(map === undefined ? {} : { map }),
+    ...(detailMap === undefined || detailMap === null
+      ? {}
+      : {
+          roughnessMap: detailMap,
+          bumpMap: detailMap,
+          bumpScale: THREE.MathUtils.clamp(0.0015 + roughness * 0.006, 0.0015, 0.008),
+        }),
+  });
+  return material;
+};
 
-const createTable = (): THREE.Group => {
+const createAccentMaterial = (
+  color: number,
+  roughness: number,
+  metalness: number,
+  emissiveIntensity: number,
+  detailMap?: THREE.CanvasTexture | null,
+): THREE.MeshStandardMaterial => {
+  const material = createMaterial(color, roughness, metalness, undefined, detailMap);
+  material.emissive = new THREE.Color(color);
+  material.emissiveIntensity = emissiveIntensity;
+  return material;
+};
+
+const createEpoxyFloorMaterial = (
+  map?: THREE.CanvasTexture | null,
+  detailMap?: THREE.CanvasTexture | null,
+): THREE.MeshPhysicalMaterial => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: 0x9eafb2,
+    roughness: 0.12,
+    metalness: 0.16,
+    envMapIntensity: 1.22,
+    clearcoat: 0.78,
+    clearcoatRoughness: 0.08,
+    specularIntensity: 0.72,
+    reflectivity: 0.88,
+    ior: 1.58,
+    ...(map === undefined ? {} : { map }),
+    ...(detailMap === undefined || detailMap === null
+      ? {}
+      : {
+          roughnessMap: detailMap,
+          bumpMap: detailMap,
+          bumpScale: 0.0015,
+        }),
+  });
+  return material;
+};
+
+const createTable = (surfaceTextures: InteriorSurfaceTextures): THREE.Group => {
   const table = new THREE.Group();
   table.name = "TableRoot";
   const base = new THREE.Mesh(
     new RoundedBoxGeometry(TABLE_WIDTH + 0.22, 0.58, TABLE_DEPTH + 0.22, 5, 0.12),
-    createMaterial(COLORS.structuralGray, 0.58),
+    createMaterial(COLORS.structuralGray, 0.58, 0, surfaceTextures.wall, surfaceTextures.detail),
   );
   base.name = "TableBody";
   base.position.y = 0.29;
@@ -1567,7 +2415,7 @@ const createTable = (): THREE.Group => {
 
   const shellTop = new THREE.Mesh(
     new RoundedBoxGeometry(TABLE_WIDTH, 0.14, TABLE_DEPTH, 5, 0.08),
-    createMaterial(COLORS.whiteLacquer, 0.32),
+    createMaterial(COLORS.whiteLacquer, 0.32, 0, surfaceTextures.table, surfaceTextures.detail),
   );
   shellTop.name = "TableShell";
   shellTop.position.y = TABLE_TOP_Y - 0.07;
@@ -1577,11 +2425,7 @@ const createTable = (): THREE.Group => {
 
   const felt = new THREE.Mesh(
     new RoundedBoxGeometry(TABLE_WIDTH - 0.2, 0.045, TABLE_DEPTH - 0.2, 5, 0.035),
-    new THREE.MeshStandardMaterial({
-      color: COLORS.charcoal,
-      roughness: 0.84,
-      metalness: 0,
-    }),
+    createMaterial(COLORS.charcoal, 0.84, 0, surfaceTextures.fabric, surfaceTextures.detail),
   );
   felt.name = "PlayingSurface";
   // Keep the playing surface, inlay, and shell on distinct depth layers; coplanar faces flicker in WebGL.
@@ -1676,11 +2520,11 @@ const createWall = (cache: TileTextureCache): THREE.Group => {
   return wall;
 };
 
-const createRack = (width: number): THREE.Group => {
+const createRack = (width: number, surfaceTextures?: InteriorSurfaceTextures): THREE.Group => {
   const rack = new THREE.Group();
   const base = new THREE.Mesh(
     new RoundedBoxGeometry(width, 0.1, 0.16, 3, 0.025),
-    createMaterial(COLORS.charcoal, 0.62),
+    createMaterial(COLORS.charcoal, 0.62, 0, surfaceTextures?.wall, surfaceTextures?.detail),
   );
   base.position.y = TABLE_TOP_Y + 0.1;
   base.castShadow = true;
@@ -1698,6 +2542,7 @@ const createRack = (width: number): THREE.Group => {
 const addHand = (
   parent: THREE.Object3D,
   cache: TileTextureCache,
+  surfaceTextures: InteriorSurfaceTextures,
   seatPosition: THREE.Vector3,
   rotation: number,
   faceUp: boolean,
@@ -1707,7 +2552,7 @@ const addHand = (
   hand.name = "PlayerHand";
   hand.position.copy(seatPosition);
   hand.rotation.y = rotation;
-  hand.add(createRack(1.48));
+  hand.add(createRack(1.48, surfaceTextures));
   const start = -((tiles.length - 1) * 0.115) / 2;
   if (!faceUp) {
     const placements = tiles.map((_, index): BackTilePlacement => ({
@@ -1792,318 +2637,6 @@ const addDiscardRivers = (parent: THREE.Object3D, cache: TileTextureCache): void
   });
 };
 
-const createSkyTexture = (): THREE.CanvasTexture => {
-  const canvas = document.createElement("canvas");
-  canvas.width = 1200;
-  canvas.height = 600;
-  const context = canvas.getContext("2d");
-  if (context === null) {
-    throw new Error("Unable to create the skyline canvas");
-  }
-  const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, "#a9cedf");
-  gradient.addColorStop(0.45, "#e7f0ef");
-  gradient.addColorStop(0.78, "#f3eee8");
-  gradient.addColorStop(1, "#ded9e6");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = "rgba(255, 255, 255, 0.52)";
-  for (let index = 0; index < 22; index += 1) {
-    const x = (index * 317) % canvas.width;
-    const y = 38 + ((index * 127) % 250);
-    context.fillRect(x, y, index % 4 === 0 ? 5 : 3, index % 4 === 0 ? 5 : 3);
-  }
-  context.fillStyle = "#adb9ba";
-  context.fillRect(0, 486, canvas.width, 114);
-  return createCanvasTexture(canvas);
-};
-
-const createBuilding = (
-  skyline: THREE.Group,
-  x: number,
-  width: number,
-  height: number,
-  depth: number,
-  z: number,
-  color: number,
-  windowMaterial: THREE.MeshStandardMaterial,
-  accentWindowMaterial: THREE.MeshStandardMaterial,
-): void => {
-  const building = new THREE.Mesh(
-    new THREE.BoxGeometry(width, height, depth),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.02 }),
-  );
-  building.position.set(x, 0.72 + height / 2, z);
-  skyline.add(building);
-  const columns = Math.max(2, Math.floor(width / 0.46));
-  const rows = Math.max(2, Math.floor(height / 0.48));
-  const windowPositions: [THREE.Vector3[], THREE.Vector3[]] = [[], []];
-  for (let column = 0; column < columns; column += 1) {
-    for (let row = 0; row < rows; row += 1) {
-      if ((column * 3 + row * 5 + Math.round(height)) % 7 < 2) {
-        continue;
-      }
-      const position = new THREE.Vector3(
-        x - width / 2 + 0.23 + column * ((width - 0.46) / Math.max(1, columns - 1)),
-        0.96 + row * 0.44,
-        z + depth / 2 + 0.006,
-      );
-      const materialIndex = (column * 7 + row * 11 + Math.round(height)) % 13 === 0 ? 1 : 0;
-      windowPositions[materialIndex].push(position);
-    }
-  }
-  const addWindowInstances = (
-    name: string,
-    positions: readonly THREE.Vector3[],
-    material: THREE.MeshStandardMaterial,
-  ): void => {
-    if (positions.length === 0) {
-      return;
-    }
-    const windows = new THREE.InstancedMesh(
-      new THREE.PlaneGeometry(0.14, 0.2),
-      material,
-      positions.length,
-    );
-    windows.name = name;
-    const matrix = new THREE.Matrix4();
-    positions.forEach((position, index) => {
-      matrix.makeTranslation(position.x, position.y, position.z);
-      windows.setMatrixAt(index, matrix);
-    });
-    windows.instanceMatrix.needsUpdate = true;
-    windows.computeBoundingSphere();
-    skyline.add(windows);
-  };
-  addWindowInstances("WindowInstances", windowPositions[0], windowMaterial);
-  addWindowInstances("AccentWindowInstances", windowPositions[1], accentWindowMaterial);
-};
-
-const addSkyline = (scene: THREE.Scene, skylineLodBias = 1): SkylineResources => {
-  const skyline = new THREE.Group();
-  skyline.name = "SkylineRoot";
-  const nearRooftops = new THREE.Group();
-  nearRooftops.name = "NearRooftops";
-  const heroLandmarks = new THREE.Group();
-  heroLandmarks.name = "HeroLandmarks";
-  const skylineFillers = new THREE.Group();
-  skylineFillers.name = "SkylineFillers";
-  skyline.add(nearRooftops, heroLandmarks, skylineFillers);
-
-  const skyTexture = createSkyTexture();
-  const sky = new THREE.Mesh(
-    new THREE.PlaneGeometry(26, 11),
-    new THREE.MeshBasicMaterial({ map: skyTexture, transparent: false }),
-  );
-  sky.name = "DistantMatte";
-  sky.position.set(0, 5.7, -8.4);
-  skyline.add(sky);
-
-  const windowMaterial = new THREE.MeshStandardMaterial({
-    color: 0x50676d,
-    roughness: 0.7,
-    metalness: 0.08,
-  });
-  const accentWindowMaterial = new THREE.MeshStandardMaterial({
-    color: 0xc78d76,
-    emissive: 0x6f403c,
-    emissiveIntensity: 0.16,
-    roughness: 0.64,
-  });
-  const fillerBuildings = [
-    [-6.2, 1.45, 2.5, 0.54, 0xc2cbca, -6.22],
-    [-4.85, 1.1, 2.0, 0.5, 0xd8ddda, -6.18],
-    [-3.75, 1.55, 3.4, 0.58, 0xb4c0c0, -6.2],
-    [-1.8, 0.95, 2.1, 0.5, 0xc9d1cf, -6.16],
-    [0.25, 1.3, 2.7, 0.58, 0xb7c5c5, -6.2],
-    [4.45, 1.2, 2.6, 0.6, 0xc5cecd, -6.18],
-    [5.95, 1.7, 3.8, 0.55, 0xb9c4c4, -6.24],
-    [7.0, 1.35, 2.4, 0.58, 0xd6dcda, -6.2],
-  ] as const;
-  for (const [x, width, height, depth, color, z] of fillerBuildings) {
-    createBuilding(
-      skylineFillers,
-      x,
-      width,
-      height,
-      depth,
-      z,
-      color,
-      windowMaterial,
-      accentWindowMaterial,
-    );
-  }
-
-  const empire = new THREE.Group();
-  empire.name = "EmpireStateBuilding";
-  createBuilding(
-    empire,
-    -2.7,
-    1.1,
-    3.25,
-    0.64,
-    -6.82,
-    0xaebcbc,
-    windowMaterial,
-    accentWindowMaterial,
-  );
-  const empireUpper = new THREE.Mesh(
-    new THREE.BoxGeometry(0.82, 0.72, 0.62),
-    new THREE.MeshStandardMaterial({ color: 0xa4b3b4, roughness: 0.84 }),
-  );
-  empireUpper.position.set(-2.7, 4.05, -6.82);
-  empire.add(empireUpper);
-  const empireCrown = new THREE.Mesh(
-    new THREE.ConeGeometry(0.28, 0.6, 4),
-    new THREE.MeshStandardMaterial({ color: 0x8e9d9f, roughness: 0.72, metalness: 0.14 }),
-  );
-  empireCrown.position.set(-2.7, 4.7, -6.82);
-  empire.add(empireCrown);
-  const empireSpire = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.018, 0.045, 1.1, 8),
-    new THREE.MeshStandardMaterial({ color: 0x728287, roughness: 0.5, metalness: 0.35 }),
-  );
-  empireSpire.position.set(-2.7, 5.55, -6.82);
-  empire.add(empireSpire);
-  const empireLod = new THREE.LOD();
-  empireLod.name = "EmpireStateBuildingLOD";
-  empireLod.addLevel(empire, 0);
-  const empireSilhouette = new THREE.Mesh(
-    new THREE.BoxGeometry(1.08, 4.25, 0.42),
-    new THREE.MeshStandardMaterial({ color: 0x95a8a9, roughness: 0.9 }),
-  );
-  empireSilhouette.position.set(-2.7, 2.84, -6.82);
-  empireSilhouette.name = "EmpireStateBuildingSilhouette";
-  empireLod.addLevel(empireSilhouette, 14 * skylineLodBias);
-  heroLandmarks.add(empireLod);
-
-  const vanderbilt = new THREE.Mesh(
-    new THREE.ConeGeometry(0.52, 4.35, 4),
-    new THREE.MeshStandardMaterial({ color: 0xa9c1c5, roughness: 0.52, metalness: 0.16 }),
-  );
-  vanderbilt.name = "OneVanderbilt";
-  vanderbilt.position.set(-0.9, 2.9, -6.94);
-  vanderbilt.rotation.y = Math.PI / 4;
-  const vanderbiltLod = new THREE.LOD();
-  vanderbiltLod.name = "OneVanderbiltLOD";
-  vanderbiltLod.addLevel(vanderbilt, 0);
-  const vanderbiltSilhouette = new THREE.Mesh(
-    new THREE.ConeGeometry(0.38, 3.8, 4),
-    new THREE.MeshStandardMaterial({ color: 0xa1b8bc, roughness: 0.88 }),
-  );
-  vanderbiltSilhouette.position.set(-0.9, 2.62, -6.94);
-  vanderbiltSilhouette.rotation.y = Math.PI / 4;
-  vanderbiltLod.addLevel(vanderbiltSilhouette, 14 * skylineLodBias);
-  heroLandmarks.add(vanderbiltLod);
-
-  const chrysler = new THREE.Group();
-  chrysler.name = "ChryslerBuilding";
-  createBuilding(
-    chrysler,
-    2.6,
-    1.05,
-    2.85,
-    0.56,
-    -6.8,
-    0xb8c4c5,
-    windowMaterial,
-    accentWindowMaterial,
-  );
-  const chryslerCrown = new THREE.Mesh(
-    new THREE.ConeGeometry(0.52, 1.18, 12),
-    new THREE.MeshStandardMaterial({ color: 0x93a5a7, roughness: 0.42, metalness: 0.36 }),
-  );
-  chryslerCrown.position.set(2.6, 3.42, -6.8);
-  chrysler.add(chryslerCrown);
-  const chryslerSpire = new THREE.Mesh(
-    new THREE.ConeGeometry(0.035, 1.2, 8),
-    new THREE.MeshStandardMaterial({ color: 0x778d91, roughness: 0.42, metalness: 0.36 }),
-  );
-  chryslerSpire.position.set(2.6, 4.62, -6.8);
-  chrysler.add(chryslerSpire);
-  const chryslerLod = new THREE.LOD();
-  chryslerLod.name = "ChryslerBuildingLOD";
-  chryslerLod.addLevel(chrysler, 0);
-  const chryslerSilhouette = new THREE.Mesh(
-    new THREE.BoxGeometry(1.02, 3.9, 0.42),
-    new THREE.MeshStandardMaterial({ color: 0x9aabad, roughness: 0.88 }),
-  );
-  chryslerSilhouette.position.set(2.6, 2.67, -6.8);
-  chryslerLod.addLevel(chryslerSilhouette, 14 * skylineLodBias);
-  heroLandmarks.add(chryslerLod);
-
-  const slenderTower = new THREE.Mesh(
-    new THREE.BoxGeometry(0.55, 4.7, 0.45),
-    new THREE.MeshStandardMaterial({ color: 0xc1d1d2, roughness: 0.4, metalness: 0.18 }),
-  );
-  slenderTower.name = "NorthMidtownTower";
-  slenderTower.position.set(4.7, 3.05, -7.12);
-  heroLandmarks.add(slenderTower);
-
-  const sun = new THREE.Mesh(
-    new THREE.CircleGeometry(0.62, 32),
-    new THREE.MeshBasicMaterial({ color: 0xf2b69c }),
-  );
-  sun.name = "HazySun";
-  sun.position.set(-5.7, 7.25, -8.05);
-  skyline.add(sun);
-
-  const waterTank = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.18, 0.18, 0.3, 16),
-    new THREE.MeshStandardMaterial({ color: 0x636f70, roughness: 0.78 }),
-  );
-  waterTank.name = "RooftopWaterTower";
-  waterTank.position.set(5.85, 2.35, -6.3);
-  nearRooftops.add(waterTank);
-  const rooftopPlant = new THREE.Mesh(
-    new THREE.BoxGeometry(1.25, 0.34, 0.62),
-    new THREE.MeshStandardMaterial({ color: 0x6f7a7a, roughness: 0.84 }),
-  );
-  rooftopPlant.position.set(-5.45, 1.02, -6.32);
-  nearRooftops.add(rooftopPlant);
-
-  const rooftopMaterial = new THREE.MeshStandardMaterial({
-    color: 0x7f8a8b,
-    roughness: 0.88,
-    metalness: 0.03,
-  });
-  const rooftopCapMaterial = new THREE.MeshStandardMaterial({
-    color: 0x4e5d5f,
-    roughness: 0.8,
-    metalness: 0.08,
-  });
-  const rooftopMasses = [
-    [-6.05, 0.72, 0.72, 0.48, -5.82],
-    [-4.72, 0.48, 0.9, 0.62, -5.76],
-    [-3.18, 0.64, 0.65, 0.52, -5.84],
-    [1.42, 0.52, 0.82, 0.58, -5.8],
-    [3.62, 0.66, 0.7, 0.46, -5.86],
-    [5.62, 0.46, 1.02, 0.64, -5.78],
-  ] as const;
-  for (const [x, height, width, depth, z] of rooftopMasses) {
-    const mass = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), rooftopMaterial);
-    mass.name = "RooftopMass";
-    mass.position.set(x, 0.72 + height / 2, z);
-    nearRooftops.add(mass);
-    const cap = new THREE.Mesh(
-      new THREE.BoxGeometry(width + 0.06, 0.035, depth + 0.06),
-      rooftopCapMaterial,
-    );
-    cap.name = "RooftopParapet";
-    cap.position.set(x, 0.72 + height + 0.018, z);
-    nearRooftops.add(cap);
-  }
-
-  scene.add(skyline);
-  return {
-    texture: skyTexture,
-    ambient: {
-      cyanMaterials: [],
-      redMaterials: [],
-      skylineMaterials: [accentWindowMaterial],
-    },
-  };
-};
 
 const makeLabelTexture = (label: string, accent: string): THREE.CanvasTexture => {
   const canvas = document.createElement("canvas");
@@ -2157,7 +2690,10 @@ interface FocusCalibrationHallwayResources {
   readonly labels: readonly THREE.Sprite[];
 }
 
-const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHallwayResources => {
+const createFocusCalibrationHallway = (
+  scene: THREE.Scene,
+  surfaceTextures: InteriorSurfaceTextures,
+): FocusCalibrationHallwayResources => {
   const root = new THREE.Group();
   root.name = "FocusCalibrationRoot";
   // The lab is part of the development map, not a separate camera scene.
@@ -2175,39 +2711,27 @@ const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHall
   const centerX = (hallwayStartX + endX) / 2;
   const halfWidth = FOCUS_CALIBRATION_HALL_WIDTH / 2;
 
-  const floorMaterial = new THREE.MeshStandardMaterial({
-    color: 0x25363a,
-    roughness: 0.82,
-    metalness: 0.08,
-  });
+  const floorMaterial = createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail);
   floorMaterial.fog = false;
-  const wallMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe5e9e4,
-    roughness: 0.76,
-    metalness: 0.08,
-  });
+  const wallMaterial = createMaterial(0xe5e9e4, 0.76, 0.08, surfaceTextures.wall, surfaceTextures.detail);
   wallMaterial.fog = false;
-  const ceilingMaterial = new THREE.MeshStandardMaterial({
-    color: 0x5d6a6c,
-    roughness: 0.7,
-    metalness: 0.18,
-  });
+  const ceilingMaterial = createMaterial(0x5d6a6c, 0.7, 0.18, surfaceTextures.table, surfaceTextures.detail);
   ceilingMaterial.fog = false;
-  const cyanMaterial = new THREE.MeshStandardMaterial({
-    color: COLORS.cyan,
-    emissive: COLORS.cyan,
-    emissiveIntensity: 0.42,
-    roughness: 0.35,
-    metalness: 0.2,
-  });
+  const cyanMaterial = createAccentMaterial(
+    COLORS.cyan,
+    0.35,
+    0.2,
+    0.42,
+    surfaceTextures.detail,
+  );
   cyanMaterial.fog = false;
-  const redMaterial = new THREE.MeshStandardMaterial({
-    color: COLORS.red,
-    emissive: COLORS.red,
-    emissiveIntensity: 0.28,
-    roughness: 0.35,
-    metalness: 0.12,
-  });
+  const redMaterial = createAccentMaterial(
+    COLORS.red,
+    0.35,
+    0.12,
+    0.28,
+    surfaceTextures.detail,
+  );
   redMaterial.fog = false;
   const targetMaterials = [cyanMaterial, redMaterial] as const;
 
@@ -2237,28 +2761,25 @@ const createFocusCalibrationHallway = (scene: THREE.Scene): FocusCalibrationHall
   ceiling.receiveShadow = true;
   deck.add(ceiling);
 
-  const rampMaterial = new THREE.MeshStandardMaterial({
-    color: 0x34484c,
-    roughness: 0.78,
-    metalness: 0.12,
-  });
-  rampMaterial.fog = false;
-  const rampAngle = Math.atan2(FOCUS_CALIBRATION_DECK_HEIGHT, FOCUS_CALIBRATION_RAMP_RUN);
-  const ramp = new THREE.Mesh(
-    new THREE.BoxGeometry(FOCUS_CALIBRATION_RAMP_RUN + 0.12, 0.18, FOCUS_CALIBRATION_RAMP_WIDTH),
-    rampMaterial,
-  );
-  ramp.name = "FocusCalibrationRamp";
-  ramp.userData.physicsIgnore = true;
-  ramp.position.set(
-    startX + FOCUS_CALIBRATION_RAMP_RUN / 2,
-    FOCUS_CALIBRATION_DECK_HEIGHT / 2,
-    FOCUS_CALIBRATION_RAMP_TOP_Z,
-  );
-  ramp.rotation.z = -rampAngle;
-  ramp.castShadow = true;
-  ramp.receiveShadow = true;
-  root.add(ramp);
+  if (FOCUS_CALIBRATION_DECK_HEIGHT > 0) {
+    const rampMaterial = createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail);
+    rampMaterial.fog = false;
+    const rampAngle = Math.atan2(FOCUS_CALIBRATION_DECK_HEIGHT, FOCUS_CALIBRATION_RAMP_RUN);
+    const ramp = new THREE.Mesh(
+      new THREE.BoxGeometry(FOCUS_CALIBRATION_RAMP_RUN + 0.12, 0.18, FOCUS_CALIBRATION_RAMP_WIDTH),
+      rampMaterial,
+    );
+    ramp.name = "FocusCalibrationRamp";
+    ramp.position.set(
+      startX + FOCUS_CALIBRATION_RAMP_RUN / 2,
+      FOCUS_CALIBRATION_DECK_HEIGHT / 2,
+      FOCUS_CALIBRATION_RAMP_TOP_Z,
+    );
+    ramp.rotation.z = -rampAngle;
+    ramp.castShadow = true;
+    ramp.receiveShadow = true;
+    root.add(ramp);
+  }
 
   for (const z of [-1.9, 1.9] as const) {
     const strip = new THREE.Mesh(new THREE.BoxGeometry(hallwayLength, 0.035, 0.05), cyanMaterial);
@@ -2495,48 +3016,68 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   const ambientEffects = new THREE.Group();
   ambientEffects.name = "AmbientEffects";
   environment.add(shell, windows, furniture, accents, ambientEffects);
+  const surfaceTextures = createInteriorSurfaceTextures();
 
-  const architecturalWhite = createMaterial(COLORS.architecturalWhite, 0.76);
-  const whiteLacquer = createMaterial(COLORS.whiteLacquer, 0.3);
-  const structuralGray = createMaterial(COLORS.structuralGray, 0.58, 0.05);
-  const charcoal = createMaterial(COLORS.charcoal, 0.68);
-  const aluminum = createMaterial(COLORS.aluminum, 0.28, 0.9);
-  const paleOak = createMaterial(COLORS.paleOak, 0.66);
-  const red = new THREE.MeshStandardMaterial({
-    color: COLORS.red,
-    roughness: 0.38,
-    emissive: COLORS.red,
-    emissiveIntensity: 0.12,
-  });
-  const cyan = new THREE.MeshStandardMaterial({
-    color: COLORS.cyan,
-    roughness: 0.34,
-    emissive: COLORS.cyan,
-    emissiveIntensity: 0.28,
-  });
+  const architecturalWhite = createMaterial(
+    COLORS.architecturalWhite,
+    0.76,
+    0,
+    surfaceTextures.wall,
+    surfaceTextures.detail,
+  );
+  const whiteLacquer = createMaterial(
+    COLORS.whiteLacquer,
+    0.3,
+    0,
+    surfaceTextures.table,
+    surfaceTextures.detail,
+  );
+  const structuralGray = createMaterial(
+    COLORS.structuralGray,
+    0.58,
+    0.05,
+    surfaceTextures.wall,
+    surfaceTextures.detail,
+  );
+  const charcoal = createMaterial(COLORS.charcoal, 0.68, 0, surfaceTextures.wall, surfaceTextures.detail);
+  const aluminum = createMaterial(COLORS.aluminum, 0.28, 0.9, undefined, surfaceTextures.detail);
+  const paleOak = createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail);
+  const red = createAccentMaterial(COLORS.red, 0.38, 0, 0.12, surfaceTextures.detail);
+  const cyan = createAccentMaterial(COLORS.cyan, 0.34, 0, 0.28, surfaceTextures.detail);
   const physicalGlassMaterial = new THREE.MeshPhysicalMaterial({
     color: COLORS.glass,
     roughness: 0.055,
     metalness: 0,
+    envMapIntensity: 1.12,
     transmission: 0.24,
     transparent: true,
     opacity: 0.24,
     ior: 1.45,
     depthWrite: false,
     side: THREE.DoubleSide,
+    roughnessMap: surfaceTextures.detail,
+    bumpMap: surfaceTextures.detail,
+    bumpScale: 0.001,
   });
   const simpleGlassMaterial = new THREE.MeshStandardMaterial({
     color: COLORS.glass,
     roughness: 0.15,
     metalness: 0.05,
+    envMapIntensity: 0.9,
     transparent: true,
     opacity: 0.2,
     depthWrite: false,
     side: THREE.DoubleSide,
+    roughnessMap: surfaceTextures.detail,
+    bumpMap: surfaceTextures.detail,
+    bumpScale: 0.001,
   });
   const glass = quality.glassMode === "physical" ? physicalGlassMaterial : simpleGlassMaterial;
 
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(17.2, 13.4), architecturalWhite);
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(PENTHOUSE_FLOOR_WIDTH_METERS, PENTHOUSE_FLOOR_DEPTH_METERS),
+    createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail),
+  );
   floor.name = "PenthouseFloor";
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = 0;
@@ -2544,8 +3085,8 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   floor.receiveShadow = true;
   shell.add(floor);
   const floorInset = new THREE.Mesh(
-    new RoundedBoxGeometry(3.5, 0.035, 3.5, 5, 0.22),
-    new THREE.MeshStandardMaterial({ color: 0x343e41, roughness: 0.86 }),
+    new RoundedBoxGeometry(7.6, 0.035, 7.6, 5, 0.22),
+    createMaterial(0x343e41, 0.86, 0, surfaceTextures.wall, surfaceTextures.detail),
   );
   floorInset.name = "MahjongZoneInset";
   floorInset.position.y = 0.018;
@@ -2553,28 +3094,46 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   floorInset.receiveShadow = true;
   shell.add(floorInset);
 
-  const ceiling = new THREE.Mesh(new THREE.BoxGeometry(17.2, 0.34, 13.4), whiteLacquer);
+  const ceiling = new THREE.Mesh(
+    new THREE.BoxGeometry(
+      PENTHOUSE_FLOOR_WIDTH_METERS,
+      PENTHOUSE_CEILING_SLAB_THICKNESS_METERS,
+      PENTHOUSE_FLOOR_DEPTH_METERS,
+    ),
+    createMaterial(COLORS.whiteLacquer, 0.3, 0, surfaceTextures.table, surfaceTextures.detail),
+  );
   ceiling.name = "CeilingSlab";
-  ceiling.position.y = 5.12;
+  ceiling.position.y =
+    PENTHOUSE_CEILING_HEIGHT_METERS + PENTHOUSE_CEILING_SLAB_THICKNESS_METERS / 2;
   ceiling.receiveShadow = true;
   shell.add(ceiling);
   const cantilever = new THREE.Mesh(
     new RoundedBoxGeometry(6.1, 0.28, 2.35, 4, 0.08),
-    architecturalWhite,
+    createMaterial(COLORS.architecturalWhite, 0.76, 0, surfaceTextures.wall, surfaceTextures.detail),
   );
   cantilever.name = "CantileveredCeiling";
-  cantilever.position.set(-4.4, 4.7, -3.35);
+  cantilever.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS * 0.62,
+    PENTHOUSE_CEILING_HEIGHT_METERS - 0.3,
+    -PENTHOUSE_HALF_DEPTH_METERS * 0.58,
+  );
   cantilever.castShadow = true;
   cantilever.receiveShadow = true;
   shell.add(cantilever);
 
-  for (const x of [-8.45, 8.45]) {
+  for (const x of [-PENTHOUSE_SIDE_WALL_X, PENTHOUSE_SIDE_WALL_X]) {
     const sideWall = new THREE.Mesh(
-      new THREE.BoxGeometry(0.34, 5.1, 13.3),
-      x < 0 ? architecturalWhite : structuralGray,
+      new THREE.BoxGeometry(
+        PENTHOUSE_WALL_THICKNESS_METERS,
+        PENTHOUSE_CEILING_HEIGHT_METERS,
+        PENTHOUSE_FLOOR_DEPTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS * 2,
+      ),
+      x < 0
+        ? createMaterial(COLORS.architecturalWhite, 0.76, 0, surfaceTextures.wall, surfaceTextures.detail)
+        : createMaterial(COLORS.structuralGray, 0.58, 0.05, surfaceTextures.wall, surfaceTextures.detail),
     );
     sideWall.name = x < 0 ? "WestStructuralWall" : "EastStructuralWall";
-    sideWall.position.set(x, 2.55, 0);
+    sideWall.position.set(x, PENTHOUSE_CEILING_HEIGHT_METERS / 2, 0);
     sideWall.castShadow = true;
     sideWall.receiveShadow = true;
     shell.add(sideWall);
@@ -2582,59 +3141,87 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
 
   const sculpturalWall = new THREE.Mesh(
     new RoundedBoxGeometry(2.25, 4.25, 2.15, 5, 0.12),
-    whiteLacquer,
+    createMaterial(COLORS.whiteLacquer, 0.3, 0, surfaceTextures.table, surfaceTextures.detail),
   );
   sculpturalWall.name = "SculpturalWhiteWall";
-  sculpturalWall.position.set(-5.95, 2.12, 1.0);
+  sculpturalWall.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS + 4.8,
+    2.12,
+    PENTHOUSE_HALF_DEPTH_METERS * 0.35,
+  );
   sculpturalWall.castShadow = true;
   sculpturalWall.receiveShadow = true;
   shell.add(sculpturalWall);
-  const corridor = new THREE.Mesh(new THREE.BoxGeometry(0.05, 3.35, 1.75), charcoal);
+  const corridor = new THREE.Mesh(
+    new THREE.BoxGeometry(0.05, 3.35, 1.75),
+    createMaterial(COLORS.charcoal, 0.68, 0, surfaceTextures.wall, surfaceTextures.detail),
+  );
   corridor.name = "DarkCorridorInset";
-  corridor.position.set(8.25, 2.15, 2.38);
+  corridor.position.set(
+    PENTHOUSE_SIDE_WALL_X - 0.2,
+    2.15,
+    PENTHOUSE_HALF_DEPTH_METERS * 0.34,
+  );
   shell.add(corridor);
 
-  const northGlass = new THREE.Mesh(new THREE.PlaneGeometry(16.6, 4.42), glass);
+  const northGlass = new THREE.Mesh(
+    new THREE.PlaneGeometry(PENTHOUSE_NORTH_GLASS_WIDTH_METERS, PENTHOUSE_WINDOW_HEIGHT_METERS),
+    glass,
+  );
   northGlass.name = "NorthGlazing";
-  northGlass.position.set(0, 2.86, -5.62);
+  northGlass.position.set(0, PENTHOUSE_WINDOW_CENTER_Y, PENTHOUSE_NORTH_GLASS_Z);
   windows.add(northGlass);
-  const eastGlass = new THREE.Mesh(new THREE.PlaneGeometry(5.8, 4.42), glass);
+  const eastGlassReturnDepth = 9.5;
+  const eastGlass = new THREE.Mesh(
+    new THREE.PlaneGeometry(eastGlassReturnDepth, PENTHOUSE_WINDOW_HEIGHT_METERS),
+    glass,
+  );
   eastGlass.name = "EastGlassReturn";
   eastGlass.rotation.y = Math.PI / 2;
-  eastGlass.position.set(7.95, 2.86, -3.05);
+  eastGlass.position.set(
+    PENTHOUSE_SIDE_WALL_X - 0.03,
+    PENTHOUSE_WINDOW_CENTER_Y,
+    -PENTHOUSE_HALF_DEPTH_METERS + eastGlassReturnDepth / 2 + 0.18,
+  );
   windows.add(eastGlass);
-  const mullionMaterial = new THREE.MeshStandardMaterial({
-    color: 0x20282b,
-    roughness: 0.38,
-    metalness: 0.42,
-  });
-  for (const x of [-7.25, -3.6, 0, 3.6, 7.25]) {
-    const mullion = new THREE.Mesh(new THREE.BoxGeometry(0.045, 4.6, 0.08), mullionMaterial);
+  const mullionMaterial = createMaterial(0x20282b, 0.38, 0.42, undefined, surfaceTextures.detail);
+  for (const x of [-20, -10, 0, 10, 20]) {
+    const mullion = new THREE.Mesh(
+      new THREE.BoxGeometry(0.045, PENTHOUSE_WINDOW_HEIGHT_METERS + 0.12, 0.08),
+      mullionMaterial,
+    );
     mullion.name = "NorthMullion";
-    mullion.position.set(x, 2.85, -5.54);
+    mullion.position.set(x, PENTHOUSE_WINDOW_CENTER_Y, PENTHOUSE_NORTH_GLASS_Z + 0.08);
     windows.add(mullion);
   }
   const horizontalMullion = new THREE.Mesh(
-    new THREE.BoxGeometry(16.65, 0.045, 0.08),
+    new THREE.BoxGeometry(PENTHOUSE_NORTH_GLASS_WIDTH_METERS, 0.045, 0.08),
     mullionMaterial,
   );
   horizontalMullion.name = "NorthMullionHorizontal";
-  horizontalMullion.position.set(0, 2.56, -5.54);
+  horizontalMullion.position.set(
+    0,
+    PENTHOUSE_CEILING_HEIGHT_METERS / 2,
+    PENTHOUSE_NORTH_GLASS_Z + 0.08,
+  );
   windows.add(horizontalMullion);
-  const sill = new THREE.Mesh(new THREE.BoxGeometry(16.8, 0.22, 0.32), structuralGray);
+  const sill = new THREE.Mesh(
+    new THREE.BoxGeometry(PENTHOUSE_NORTH_GLASS_WIDTH_METERS + 0.2, 0.22, 0.32),
+    createMaterial(COLORS.structuralGray, 0.58, 0.05, surfaceTextures.wall, surfaceTextures.detail),
+  );
   sill.name = "WindowSill";
-  sill.position.set(0, 0.7, -5.5);
+  sill.position.set(0, 0.14, PENTHOUSE_NORTH_GLASS_Z + 0.12);
   sill.castShadow = true;
   windows.add(sill);
 
-  const redLine = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 6.6), red);
+  const redLine = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.035, 12.5), red);
   redLine.name = "RedDirectionalLine";
-  redLine.position.set(-4.42, 0.06, -1.8);
+  redLine.position.set(-PENTHOUSE_HALF_WIDTH_METERS + 3.2, 0.06, -3.2);
   redLine.rotation.y = -0.08;
   accents.add(redLine);
-  const cyanStrip = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.032, 0.04), cyan);
+  const cyanStrip = new THREE.Mesh(new THREE.BoxGeometry(8.4, 0.032, 0.04), cyan);
   cyanStrip.name = "CyanCeilingStrip";
-  cyanStrip.position.set(2.9, 4.57, -4.86);
+  cyanStrip.position.set(0, PENTHOUSE_CEILING_HEIGHT_METERS - 0.28, 0);
   accents.add(cyanStrip);
   const teacherTexture = makeTeacherPanelTexture();
   const teacherPanel = new THREE.Mesh(
@@ -2652,53 +3239,99 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     }),
   );
   teacherPanel.name = "TeacherPanel";
-  teacherPanel.position.set(-4.15, 2.3, -5.35);
+  teacherPanel.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS + 8,
+    2.5,
+    PENTHOUSE_NORTH_GLASS_Z + 0.26,
+  );
   teacherPanel.userData.dofIgnore = true;
   accents.add(teacherPanel);
   const teacherPanelLine = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.025, 0.05), cyan);
   teacherPanelLine.name = "TeacherPanelStatusLine";
-  teacherPanelLine.position.set(-4.15, 1.93, -5.31);
+  teacherPanelLine.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS + 8,
+    2.13,
+    PENTHOUSE_NORTH_GLASS_Z + 0.3,
+  );
   accents.add(teacherPanelLine);
 
   const sofa = new THREE.Group();
   sofa.name = "SculpturalSofa";
-  const sofaSeat = new THREE.Mesh(new RoundedBoxGeometry(3.05, 0.34, 0.92, 5, 0.14), whiteLacquer);
-  sofaSeat.position.set(4.2, 0.48, -3.96);
+  const sofaSeat = new THREE.Mesh(
+    new RoundedBoxGeometry(3.05, 0.34, 0.92, 5, 0.14),
+    createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail),
+  );
+  sofaSeat.position.set(
+    PENTHOUSE_HALF_WIDTH_METERS - 6.2,
+    0.48,
+    -PENTHOUSE_HALF_DEPTH_METERS + 4,
+  );
   sofaSeat.castShadow = true;
   sofa.add(sofaSeat);
-  const sofaBack = new THREE.Mesh(new RoundedBoxGeometry(3.05, 0.92, 0.27, 5, 0.1), whiteLacquer);
-  sofaBack.position.set(4.2, 1.0, -4.28);
+  const sofaBack = new THREE.Mesh(
+    new RoundedBoxGeometry(3.05, 0.92, 0.27, 5, 0.1),
+    createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail),
+  );
+  sofaBack.position.set(
+    PENTHOUSE_HALF_WIDTH_METERS - 6.2,
+    1.0,
+    -PENTHOUSE_HALF_DEPTH_METERS + 3.68,
+  );
   sofaBack.castShadow = true;
   sofa.add(sofaBack);
   furniture.add(sofa);
 
   const sideTable = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.42, 0.5, 24), aluminum);
   sideTable.name = "SideTable";
-  sideTable.position.set(6.02, 0.28, -2.75);
+  sideTable.position.set(
+    PENTHOUSE_HALF_WIDTH_METERS - 2.8,
+    0.28,
+    -PENTHOUSE_HALF_DEPTH_METERS + 5.7,
+  );
   sideTable.castShadow = true;
   furniture.add(sideTable);
   const pendant = new THREE.Mesh(new RoundedBoxGeometry(2.55, 0.08, 0.11, 3, 0.025), aluminum);
   pendant.name = "LinearPendant";
-  pendant.position.set(2.15, 4.35, -0.72);
+  pendant.position.set(0, PENTHOUSE_CEILING_HEIGHT_METERS - 0.65, 0);
   furniture.add(pendant);
   const pendantLight = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.018, 0.04), cyan);
   pendantLight.name = "PendantLightStrip";
-  pendantLight.position.set(2.15, 4.29, -0.72);
+  pendantLight.position.set(0, PENTHOUSE_CEILING_HEIGHT_METERS - 0.71, 0);
   furniture.add(pendantLight);
 
   const bar = new THREE.Group();
   bar.name = "TeaCounter";
-  const barBody = new THREE.Mesh(new RoundedBoxGeometry(2.25, 0.92, 0.52, 4, 0.1), whiteLacquer);
-  barBody.position.set(-4.58, 0.46, -3.9);
+  const barBody = new THREE.Mesh(
+    new RoundedBoxGeometry(2.25, 0.92, 0.52, 4, 0.1),
+    createMaterial(COLORS.whiteLacquer, 0.3, 0, surfaceTextures.table, surfaceTextures.detail),
+  );
+  barBody.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS + 5.2,
+    0.46,
+    -PENTHOUSE_HALF_DEPTH_METERS + 4.2,
+  );
   barBody.castShadow = true;
   bar.add(barBody);
-  const barTop = new THREE.Mesh(new RoundedBoxGeometry(2.38, 0.08, 0.61, 4, 0.025), paleOak);
-  barTop.position.set(-4.58, 0.96, -3.9);
+  const barTop = new THREE.Mesh(
+    new RoundedBoxGeometry(2.38, 0.08, 0.61, 4, 0.025),
+    createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail),
+  );
+  barTop.position.set(
+    -PENTHOUSE_HALF_WIDTH_METERS + 5.2,
+    0.96,
+    -PENTHOUSE_HALF_DEPTH_METERS + 4.2,
+  );
   bar.add(barTop);
   furniture.add(bar);
 
-  const stationMaterial = createMaterial(COLORS.whiteLacquer, 0.42);
-  const stationInset = createMaterial(COLORS.charcoal, 0.72);
+  const stationMaterial = createMaterial(
+    COLORS.whiteLacquer,
+    0.42,
+    0,
+    surfaceTextures.table,
+    surfaceTextures.detail,
+  );
+  const stationInset = createMaterial(COLORS.charcoal, 0.72, 0, surfaceTextures.wall, surfaceTextures.detail);
   const stationPlacements = [
     ["SouthPlayerStation", 0, 0, 2.03, 0],
     ["NorthPlayerStation", 0, 0, -2.03, Math.PI],
@@ -2729,22 +3362,173 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     furniture.add(station);
   }
 
-  const sculpture = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.075, 12, 32), aluminum);
-  sculpture.name = "GeometricSculpture";
-  sculpture.position.set(-5.05, 1.4, -1.15);
-  sculpture.rotation.set(Math.PI / 2.7, 0.25, 0.18);
-  furniture.add(sculpture);
+  const playAreas = new THREE.Group();
+  playAreas.name = "PlayAreas";
+  playAreas.userData = { physicsIgnore: true };
+  for (const area of PLAY_AREA_DEFINITIONS) {
+    const pad = new THREE.Mesh(
+      new THREE.BoxGeometry(PLAY_AREA_SIZE_METERS, 0.05, PLAY_AREA_SIZE_METERS),
+      new THREE.MeshStandardMaterial({
+        color: 0x18272d,
+        roughness: 0.9,
+        metalness: 0.04,
+        transparent: true,
+        opacity: 0.78,
+      }),
+    );
+    pad.name = `${area.id}PlayAreaPad`;
+    pad.position.set(area.origin.x, -0.075, area.origin.z);
+    pad.receiveShadow = true;
+    playAreas.add(pad);
+
+    const borderMaterial = new THREE.MeshStandardMaterial({
+      color: area.accent,
+      emissive: area.accent,
+      emissiveIntensity: 0.24,
+      roughness: 0.38,
+      metalness: 0.18,
+    });
+    const borderPieces = [
+      new THREE.Mesh(new THREE.BoxGeometry(PLAY_AREA_SIZE_METERS, 0.055, 0.11), borderMaterial),
+      new THREE.Mesh(new THREE.BoxGeometry(PLAY_AREA_SIZE_METERS, 0.055, 0.11), borderMaterial),
+      new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.055, PLAY_AREA_SIZE_METERS), borderMaterial),
+      new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.055, PLAY_AREA_SIZE_METERS), borderMaterial),
+    ] as const;
+    const [northBorder, southBorder, westBorder, eastBorder] = borderPieces;
+    const edge = PLAY_AREA_HALF_SIZE - 0.055;
+    northBorder.position.set(area.origin.x, -0.01, area.origin.z - edge);
+    southBorder.position.set(area.origin.x, -0.01, area.origin.z + edge);
+    westBorder.position.set(area.origin.x - edge, -0.01, area.origin.z);
+    eastBorder.position.set(area.origin.x + edge, -0.01, area.origin.z);
+    for (const border of borderPieces) {
+      border.name = `${area.id}PlayAreaBorder`;
+      border.receiveShadow = true;
+      playAreas.add(border);
+    }
+
+    const label = createLabelSprite(`${area.label.toUpperCase()}  /  50M X 50M`, area.accent);
+    label.name = `${area.id}PlayAreaLabel`;
+    label.position.set(area.origin.x, 0.2, area.origin.z - PLAY_AREA_HALF_SIZE + 1.2);
+    label.scale.set(2.7, 0.42, 1);
+    playAreas.add(label);
+  }
+  environment.add(playAreas);
+
+  const addClimbingGym = (root: THREE.Object3D): void => {
+    const gym = new THREE.Group();
+    gym.name = "ClimbingGym";
+    gym.userData = { physicsIgnore: true };
+    const baseMaterial = createMaterial(0x3a4c57, 0.61, 0.05, undefined, surfaceTextures.detail);
+    const ledgeMaterial = createMaterial(0x5f7784, 0.49, 0.12, undefined, surfaceTextures.detail);
+    const railMaterial = createAccentMaterial(0x849ead, 0.54, 0.21, 0.18, surfaceTextures.detail);
+
+    const addLedge = (
+      name: string,
+      x: number,
+      z: number,
+      topY: number,
+      width: number,
+      depth: number,
+    ): void => {
+      const ledge = new THREE.Mesh(new RoundedBoxGeometry(width, 0.16, depth, 4, 0.05), ledgeMaterial);
+      ledge.name = name;
+      ledge.position.set(x, topY - 0.08, z);
+      ledge.castShadow = true;
+      ledge.receiveShadow = true;
+      gym.add(ledge);
+    };
+
+    const run = new THREE.Mesh(new RoundedBoxGeometry(3.25, 0.22, 1.9, 4, 0.08), baseMaterial);
+    run.name = "ClimbingGymRun";
+    run.position.set(
+      CLIMBING_GYM_ZONE_ORIGIN_X,
+      CLIMBING_GYM_RUN_Y,
+      CLIMBING_GYM_ZONE_ORIGIN_Z,
+    );
+    run.castShadow = true;
+    run.receiveShadow = true;
+    gym.add(run);
+
+    addLedge(
+      "ClimbingGymHoldOne",
+      CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
+      CLIMBING_GYM_ZONE_ORIGIN_Z - 0.3,
+      0.95,
+      1.55,
+      1.35,
+    );
+    addLedge(
+      "ClimbingGymHoldTwo",
+      CLIMBING_GYM_ZONE_ORIGIN_X + 0.9,
+      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+      1.54,
+      1.40,
+      1.28,
+    );
+    addLedge(
+      "ClimbingGymHoldThree",
+      CLIMBING_GYM_ZONE_ORIGIN_X + 1.58,
+      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.44,
+      2.12,
+      1.25,
+      1.12,
+    );
+
+    const rightWall = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.95, 1.45), railMaterial);
+    rightWall.name = "ClimbingGymRightWall";
+    rightWall.position.set(
+      CLIMBING_GYM_ZONE_ORIGIN_X + 1.95,
+      1.07,
+      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+    );
+    rightWall.castShadow = true;
+    rightWall.receiveShadow = true;
+    gym.add(rightWall);
+    const leftHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
+    leftHandrail.name = "ClimbingGymHandrailLeft";
+    leftHandrail.position.set(
+      CLIMBING_GYM_ZONE_ORIGIN_X - 0.95,
+      1.4,
+      CLIMBING_GYM_ZONE_ORIGIN_Z - 0.06,
+    );
+    leftHandrail.castShadow = true;
+    leftHandrail.receiveShadow = true;
+    gym.add(leftHandrail);
+    const centerHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
+    centerHandrail.name = "ClimbingGymHandrailCenter";
+    centerHandrail.position.set(
+      CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
+      1.98,
+      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
+    );
+    centerHandrail.castShadow = true;
+    centerHandrail.receiveShadow = true;
+    gym.add(centerHandrail);
+    const rightHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
+    rightHandrail.name = "ClimbingGymHandrailRight";
+    rightHandrail.position.set(
+      CLIMBING_GYM_ZONE_ORIGIN_X + 1.35,
+      2.56,
+      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.32,
+    );
+    rightHandrail.castShadow = true;
+    rightHandrail.receiveShadow = true;
+    gym.add(rightHandrail);
+
+    root.add(gym);
+  };
+  addClimbingGym(furniture);
   scene.add(environment);
   return {
     ambient: {
       cyanMaterials: [cyan],
       redMaterials: [red],
-      skylineMaterials: [],
     },
     teacherTexture,
     glassSurfaces: [northGlass, eastGlass],
     simpleGlassMaterial,
     physicalGlassMaterial,
+    surfaceTextures,
   };
 };
 
@@ -2801,6 +3585,7 @@ const addGeneratedPlanter = (
   position: THREE.Vector3,
   palette: GeneratedRoomPalette,
   random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
 ): void => {
   const planter = new THREE.Group();
   planter.name = "GeneratedPlanter";
@@ -2809,7 +3594,7 @@ const addGeneratedPlanter = (
   planter.rotation.y = quantizeRotation45(random.nextFloat() * Math.PI * 2);
   const pot = new THREE.Mesh(
     new THREE.CylinderGeometry(0.22, 0.28, 0.42, 18),
-    new THREE.MeshStandardMaterial({ color: palette.dark, roughness: 0.78 }),
+    createMaterial(palette.dark, 0.78, 0, surfaceTextures?.wall, surfaceTextures?.detail),
   );
   pot.position.y = 0.21;
   pot.castShadow = true;
@@ -2817,16 +3602,13 @@ const addGeneratedPlanter = (
   planter.add(pot);
   const stem = new THREE.Mesh(
     new THREE.CylinderGeometry(0.035, 0.05, 0.62, 8),
-    new THREE.MeshStandardMaterial({ color: palette.plant, roughness: 0.82 }),
+    createMaterial(palette.plant, 0.82, 0, undefined, surfaceTextures?.detail),
   );
   stem.position.y = 0.66;
   stem.castShadow = true;
   planter.add(stem);
   const leafGeometry = new THREE.IcosahedronGeometry(0.17, 1);
-  const leafMaterial = new THREE.MeshStandardMaterial({
-    color: palette.plant,
-    roughness: 0.7,
-  });
+  const leafMaterial = createMaterial(palette.plant, 0.7, 0, undefined, surfaceTextures?.detail);
   const leafCount = 3 + random.nextInt(3);
   for (let index = 0; index < leafCount; index += 1) {
     const leaf = new THREE.Mesh(leafGeometry, leafMaterial);
@@ -2853,24 +3635,27 @@ const addGeneratedDivider = (
   rotation: number,
   palette: GeneratedRoomPalette,
   random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
 ): void => {
   const divider = new THREE.Group();
   divider.name = "GeneratedRoomDivider";
   divider.position.copy(position);
   quantizeHorizontal(divider.position);
   divider.rotation.y = quantizeRotation45(rotation);
-  const frameMaterial = new THREE.MeshStandardMaterial({
-    color: palette.secondary,
-    roughness: 0.38,
-    metalness: 0.34,
-  });
-  const lightMaterial = new THREE.MeshStandardMaterial({
-    color: palette.accent,
-    emissive: palette.accent,
-    emissiveIntensity: 0.24,
-    roughness: 0.34,
-    metalness: 0.12,
-  });
+  const frameMaterial = createMaterial(
+    palette.secondary,
+    0.38,
+    0.34,
+    surfaceTextures?.wood,
+    surfaceTextures?.detail,
+  );
+  const lightMaterial = createAccentMaterial(
+    palette.accent,
+    0.34,
+    0.12,
+    0.24,
+    surfaceTextures?.detail,
+  );
   const width = quantizeScale(1.25 + random.nextFloat() * 0.72);
   const height = quantizeScale(2.25 + random.nextFloat() * 0.8);
   const slatCount = 3 + random.nextInt(3);
@@ -2900,6 +3685,7 @@ const addGeneratedWallPanel = (
   rotation: number,
   palette: GeneratedRoomPalette,
   random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
 ): void => {
   const panel = new THREE.Group();
   panel.name = "GeneratedWallPanel";
@@ -2908,17 +3694,20 @@ const addGeneratedWallPanel = (
   panel.rotation.y = quantizeRotation45(rotation);
   const width = quantizeScale(0.86 + random.nextFloat() * 0.78);
   const height = quantizeScale(0.92 + random.nextFloat() * 0.78);
-  const panelMaterial = new THREE.MeshStandardMaterial({
-    color: palette.surface,
-    roughness: 0.65,
-  });
-  const accentMaterial = new THREE.MeshStandardMaterial({
-    color: palette.accent,
-    emissive: palette.accent,
-    emissiveIntensity: 0.19,
-    roughness: 0.38,
-    metalness: 0.2,
-  });
+  const panelMaterial = createMaterial(
+    palette.surface,
+    0.65,
+    0,
+    surfaceTextures?.wall,
+    surfaceTextures?.detail,
+  );
+  const accentMaterial = createAccentMaterial(
+    palette.accent,
+    0.38,
+    0.2,
+    0.19,
+    surfaceTextures?.detail,
+  );
   const face = new THREE.Mesh(new RoundedBoxGeometry(width, height, 0.075, 4, 0.04), panelMaterial);
   face.position.y = 1.55 + height / 2;
   face.castShadow = true;
@@ -2967,7 +3756,142 @@ const addGeneratedLightBar = (
   parent.add(fixture);
 };
 
-const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoomResult => {
+const addGeneratedSculpture = (
+  parent: THREE.Object3D,
+  position: THREE.Vector3,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
+): void => {
+  const plinth = new THREE.Mesh(
+    new RoundedBoxGeometry(0.85 + random.nextFloat() * 0.42, 0.6, 0.85, 4, 0.08),
+    createMaterial(palette.secondary, 0.46, 0.08, undefined, surfaceTextures?.detail),
+  );
+  plinth.name = "GeneratedSculpturePlinth";
+  plinth.position.copy(position);
+  plinth.castShadow = true;
+  plinth.receiveShadow = true;
+  const sculpture = new THREE.Mesh(
+    new THREE.TorusKnotGeometry(0.22 + random.nextFloat() * 0.1, 0.05, 48, 10),
+    createAccentMaterial(palette.accent, 0.3, 0.62, 0.2, surfaceTextures?.detail),
+  );
+  sculpture.name = "GeneratedSculpture";
+  sculpture.position.y = 0.72;
+  sculpture.rotation.y = quantizeRotation45(random.nextFloat() * Math.PI * 2);
+  sculpture.castShadow = true;
+  plinth.add(sculpture);
+  parent.add(plinth);
+};
+
+const setVisualMapEntityMetadata = (
+  object: THREE.Object3D,
+  id: string,
+  kind: VisualMapEntityKind,
+): void => {
+  object.userData.visualMapEntityId = id;
+  object.userData.visualMapEntityKind = kind;
+};
+
+const applyVisualMapEntityTransform = (object: THREE.Object3D, entity: VisualMapEntity): void => {
+  object.position.set(...entity.position);
+  object.rotation.y = THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0);
+  object.scale.setScalar(entity.scale ?? 1);
+};
+
+const addVisualMapEntity = (
+  parent: THREE.Object3D,
+  entity: VisualMapEntity,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
+): THREE.Object3D => {
+  const position = new THREE.Vector3(...entity.position);
+  const childCount = parent.children.length;
+  switch (entity.kind) {
+    case "planter":
+      addGeneratedPlanter(parent, position, palette, random, surfaceTextures);
+      break;
+    case "divider":
+      addGeneratedDivider(
+        parent,
+        position,
+        THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0),
+        palette,
+        random,
+        surfaceTextures,
+      );
+      break;
+    case "wallPanel":
+      addGeneratedWallPanel(
+        parent,
+        position,
+        THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0),
+        palette,
+        random,
+        surfaceTextures,
+      );
+      break;
+    case "lightBar":
+      addGeneratedLightBar(parent, position, THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0), palette, random);
+      break;
+    case "sculpture":
+      addGeneratedSculpture(parent, position, palette, random);
+      break;
+  }
+  const object = parent.children[childCount];
+  if (object === undefined) {
+    throw new Error(`Could not create map entity ${entity.id}`);
+  }
+  object.name = `MapEntity:${entity.id}`;
+  setVisualMapEntityMetadata(object, entity.id, entity.kind);
+  applyVisualMapEntityTransform(object, entity);
+  return object;
+};
+
+const applyVisualMapDocument = (
+  root: THREE.Object3D,
+  document: VisualMapDocument,
+  palette: GeneratedRoomPalette,
+  random: ReturnType<typeof createSeededRandom>,
+  surfaceTextures?: InteriorSurfaceTextures,
+): void => {
+  const entitiesById = new Map(document.entities.map((entity) => [entity.id, entity]));
+  for (const object of [...root.children]) {
+    const id = object.userData.visualMapEntityId;
+    if (typeof id !== "string") {
+      continue;
+    }
+    const entity = entitiesById.get(id);
+    if (entity === undefined) {
+      root.remove(object);
+      continue;
+    }
+    if (object.userData.visualMapEntityKind !== entity.kind) {
+      root.remove(object);
+      addVisualMapEntity(root, entity, palette, random, surfaceTextures);
+      continue;
+    }
+    object.name = `MapEntity:${entity.id}`;
+    applyVisualMapEntityTransform(object, entity);
+  }
+  const existingIds = new Set(
+    root.children
+      .map((object) => object.userData.visualMapEntityId)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  for (const entity of document.entities) {
+    if (!existingIds.has(entity.id)) {
+      addVisualMapEntity(root, entity, palette, random, surfaceTextures);
+    }
+  }
+};
+
+const createGeneratedRoom = (
+  scene: THREE.Scene,
+  roomSeed: string,
+  mapDocument: VisualMapDocument,
+  surfaceTextures: InteriorSurfaceTextures,
+): GeneratedRoomResult => {
   const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
   const random = createSeededRandom(normalizedSeed);
   const palette =
@@ -2980,19 +3904,25 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
   root.name = "GeneratedRoomRoot";
   root.userData = { roomSeed: normalizedSeed, roomVariant: palette.label };
 
-  const floorWidth = 3.8 + random.nextFloat() * 1.8;
-  const floorDepth = 3.15 + random.nextFloat() * 1.6;
-  const floorMaterial = new THREE.MeshStandardMaterial({
-    color: palette.surface,
-    roughness: 0.88,
-  });
+  random.nextFloat();
+  random.nextFloat();
+  const floorRotationSeed = random.nextFloat();
+  const baseCeilingLightSeed = 1 + random.nextInt(2);
+  const floorWidth = mapDocument.floor.width;
+  const floorDepth = mapDocument.floor.depth;
+  const requestedFloorRotationDegrees = mapDocument.floor.rotationDegrees;
+  const floorRotation = (requestedFloorRotationDegrees === undefined
+    ? (floorRotationSeed - 0.5) * 0.12
+    : THREE.MathUtils.degToRad(requestedFloorRotationDegrees)
+  ) as number;
+  const floorMaterial = createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail);
   const floorPanel = new THREE.Mesh(
     new RoundedBoxGeometry(floorWidth, 0.035, floorDepth, 5, 0.18),
     floorMaterial,
   );
   floorPanel.name = "GeneratedFloorPanel";
   floorPanel.position.y = 0.052;
-  floorPanel.rotation.y = (random.nextFloat() - 0.5) * 0.12;
+  floorPanel.rotation.y = floorRotation;
   floorPanel.receiveShadow = true;
   root.add(floorPanel);
 
@@ -3020,31 +3950,66 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
     root.add(strip);
   }
 
-  const ceilingLightCount = 1 + random.nextInt(2);
+  const baseCeilingLightCount = baseCeilingLightSeed;
+  const objectDensity = 0.35;
+  const densityAdjustedCeilingLightCount = Math.max(
+    1,
+    Math.round(baseCeilingLightCount * THREE.MathUtils.clamp(0.6 + objectDensity * 0.5, 0.6, 1.5)),
+  );
+  const ceilingLightCount = Math.min(4, densityAdjustedCeilingLightCount);
+  const ceilingLightSpanX = Math.min(18, floorWidth * 0.42);
+  const ceilingLightSpanZ = Math.min(12, floorDepth * 0.28);
   for (let index = 0; index < ceilingLightCount; index += 1) {
-    const x = quantizeToGrid(-3.2 + random.nextFloat() * 6.4);
-    const z = quantizeToGrid(-4.35 + random.nextFloat() * 4.2);
+    const x = quantizeToGrid(-ceilingLightSpanX / 2 + random.nextFloat() * ceilingLightSpanX);
+    const z = quantizeToGrid(-ceilingLightSpanZ / 2 + random.nextFloat() * ceilingLightSpanZ);
     addGeneratedLightBar(
       root,
-      new THREE.Vector3(x, 4.5 + random.nextFloat() * 0.24, z),
+      new THREE.Vector3(
+        x,
+        PENTHOUSE_CEILING_HEIGHT_METERS - 0.42 + random.nextFloat() * 0.16,
+        z,
+      ),
       random.nextFloat() > 0.5 ? 0 : Math.PI / 2,
       palette,
       random,
     );
+    const object = root.children[root.children.length - 1];
+    if (object !== undefined) {
+      setVisualMapEntityMetadata(object, `ceiling-light-${index + 1}`, "lightBar");
+    }
   }
 
+  const wallInset = Math.max(1.2, Math.min(2.4, Math.min(floorWidth, floorDepth) * 0.06));
+  const roomHalfWidth = floorWidth / 2;
+  const roomHalfDepth = floorDepth / 2;
   const wallSlots = [
-    { position: new THREE.Vector3(-7.8, 0, -3.4), rotation: Math.PI / 2 },
-    { position: new THREE.Vector3(-7.8, 0, 0.4), rotation: Math.PI / 2 },
-    { position: new THREE.Vector3(-7.8, 0, 3.7), rotation: Math.PI / 2 },
-    { position: new THREE.Vector3(7.8, 0, -3.7), rotation: -Math.PI / 2 },
-    { position: new THREE.Vector3(7.8, 0, -0.1), rotation: -Math.PI / 2 },
-    { position: new THREE.Vector3(7.8, 0, 3.3), rotation: -Math.PI / 2 },
-    { position: new THREE.Vector3(-4.2, 0, -5.36), rotation: 0 },
-    { position: new THREE.Vector3(3.6, 0, -5.36), rotation: 0 },
+    {
+      position: new THREE.Vector3(-roomHalfWidth + wallInset, 0, -roomHalfDepth * 0.48),
+      rotation: Math.PI / 2,
+    },
+    {
+      position: new THREE.Vector3(-roomHalfWidth + wallInset, 0, roomHalfDepth * 0.34),
+      rotation: Math.PI / 2,
+    },
+    {
+      position: new THREE.Vector3(roomHalfWidth - wallInset, 0, -roomHalfDepth * 0.38),
+      rotation: -Math.PI / 2,
+    },
+    {
+      position: new THREE.Vector3(roomHalfWidth - wallInset, 0, roomHalfDepth * 0.42),
+      rotation: -Math.PI / 2,
+    },
+    {
+      position: new THREE.Vector3(-roomHalfWidth * 0.46, 0, roomHalfDepth - wallInset),
+      rotation: Math.PI,
+    },
+    {
+      position: new THREE.Vector3(roomHalfWidth * 0.34, 0, roomHalfDepth - wallInset),
+      rotation: Math.PI,
+    },
   ] as const;
   wallSlots.forEach((slot, index) => {
-    if (random.nextFloat() < 0.55) {
+    if (random.nextFloat() > objectDensity * 0.45) {
       return;
     }
     const position = slot.position.clone();
@@ -3052,63 +4017,66 @@ const createGeneratedRoom = (scene: THREE.Scene, roomSeed: string): GeneratedRoo
     position.x += Math.abs(slot.position.x) > 7 ? 0 : (random.nextFloat() - 0.5) * 0.32;
     quantizeHorizontal(position);
     const kind = (random.nextInt(4) + index) % 4;
+    const childCount = root.children.length;
+    let entityKind: VisualMapEntityKind;
     if (kind === 0) {
-      addGeneratedPlanter(root, new THREE.Vector3(position.x, 0, position.z), palette, random);
+      entityKind = "planter";
+      addGeneratedPlanter(root, new THREE.Vector3(position.x, 0, position.z), palette, random, surfaceTextures);
     } else if (kind === 1) {
-      addGeneratedDivider(root, position, slot.rotation, palette, random);
+      entityKind = "divider";
+      addGeneratedDivider(root, position, slot.rotation, palette, random, surfaceTextures);
     } else if (kind === 2) {
-      addGeneratedWallPanel(root, position, slot.rotation, palette, random);
+      entityKind = "wallPanel";
+      addGeneratedWallPanel(root, position, slot.rotation, palette, random, surfaceTextures);
     } else {
+      entityKind = "lightBar";
       addGeneratedLightBar(
         root,
-        new THREE.Vector3(position.x, 3.66 + random.nextFloat() * 0.44, position.z),
+        new THREE.Vector3(
+          position.x,
+          PENTHOUSE_CEILING_HEIGHT_METERS - 1.34 + random.nextFloat() * 0.44,
+          position.z,
+        ),
         slot.rotation,
         palette,
         random,
       );
     }
+    const object = root.children[childCount];
+    if (object !== undefined) {
+      setVisualMapEntityMetadata(object, `wall-slot-${index + 1}`, entityKind);
+    }
   });
 
-  const plinth = new THREE.Mesh(
-    new RoundedBoxGeometry(0.85 + random.nextFloat() * 0.42, 0.6, 0.85, 4, 0.08),
-    new THREE.MeshStandardMaterial({ color: palette.secondary, roughness: 0.46, metalness: 0.08 }),
+  const sculpturePosition = new THREE.Vector3(
+    roomHalfWidth - 3,
+    0.3,
+    roomHalfDepth - 4 + random.nextFloat() * 2.2,
   );
-  plinth.name = "GeneratedSculpturePlinth";
-  plinth.position.set(random.nextFloat() > 0.5 ? -5.7 : 5.7, 0.3, -0.6 + random.nextFloat() * 2.2);
-  quantizeHorizontal(plinth.position);
-  plinth.castShadow = true;
-  plinth.receiveShadow = true;
-  root.add(plinth);
-  const sculpture = new THREE.Mesh(
-    new THREE.TorusKnotGeometry(0.22 + random.nextFloat() * 0.1, 0.05, 48, 10),
-    new THREE.MeshStandardMaterial({
-      color: palette.accent,
-      emissive: palette.accent,
-      emissiveIntensity: 0.2,
-      roughness: 0.3,
-      metalness: 0.62,
-    }),
-  );
-  sculpture.name = "GeneratedSculpture";
-  sculpture.position.y = 0.72;
-  sculpture.rotation.y = quantizeRotation45(random.nextFloat() * Math.PI * 2);
-  sculpture.castShadow = true;
-  plinth.add(sculpture);
+  quantizeHorizontal(sculpturePosition);
+  const sculptureChildCount = root.children.length;
+  addGeneratedSculpture(root, sculpturePosition, palette, random, surfaceTextures);
+  const sculptureObject = root.children[sculptureChildCount];
+  if (sculptureObject !== undefined) {
+    setVisualMapEntityMetadata(sculptureObject, "sculpture", "sculpture");
+  }
+
+  applyVisualMapDocument(root, mapDocument, palette, random, surfaceTextures);
 
   scene.add(root);
   return { variant: palette.label };
 };
 
-interface ExplorationZoneStyle {
-  readonly label: string;
-  readonly ground: number;
-  readonly path: number;
-  readonly prop: number;
-  readonly accent: number;
-}
-
 interface ExplorationWorld {
   readonly update: (position: THREE.Vector3) => void;
+  readonly updateKnockables: (
+    deltaSeconds: number,
+    playerPosition: THREE.Vector3,
+    impactDelta: PhysicsVector,
+    impactCollisions: number,
+    grounded: boolean,
+    dynamicBodyStates?: readonly PhysicsBodyState[],
+  ) => void;
   readonly getArea: () => string;
   readonly getLoadedChunkCount: () => number;
   readonly getPhysicsBoxes: () => readonly PhysicsBox[];
@@ -3119,6 +4087,26 @@ interface ExplorationWorld {
 interface ExplorationChunk {
   readonly root: THREE.Group;
   readonly physicsBoxes: readonly PhysicsBox[];
+  readonly knockableProps: readonly ExplorationKnockable[];
+}
+
+interface ExplorationKnockable {
+  readonly mesh: THREE.InstancedMesh;
+  readonly index: number;
+  readonly basePosition: THREE.Vector3;
+  readonly baseScale: THREE.Vector3;
+  readonly baseQuaternion: THREE.Quaternion;
+  readonly halfExtents: PhysicsVector;
+  readonly rotationY?: number;
+  readonly physicsId: number;
+  readonly fallAxis: THREE.Vector3;
+  readonly launchLinearVelocity: THREE.Vector3;
+  readonly launchAngularVelocity: THREE.Vector3;
+  isKnocked: boolean;
+  angle: number;
+  angularVelocity: number;
+  targetAngle: number;
+  hasBodyState: boolean;
 }
 
 interface ExplorationBuildingSpec {
@@ -3137,37 +4125,6 @@ interface ExplorationWindowSpec {
   readonly width: number;
   readonly rotation: number;
 }
-
-const EXPLORATION_ZONE_STYLES: readonly ExplorationZoneStyle[] = [
-  {
-    label: "South courtyard",
-    ground: 0x545f67,
-    path: 0x3a4852,
-    prop: 0x72818d,
-    accent: 0x93a0ad,
-  },
-  {
-    label: "West tea garden",
-    ground: 0x505c65,
-    path: 0x37434d,
-    prop: 0x6e7b88,
-    accent: 0x8a96a2,
-  },
-  {
-    label: "East practice court",
-    ground: 0x5a656f,
-    path: 0x3e4a54,
-    prop: 0x7a8794,
-    accent: 0x97a3ae,
-  },
-  {
-    label: "North skybridge",
-    ground: 0x515a63,
-    path: 0x394450,
-    prop: 0x6f7d89,
-    accent: 0x91a0ad,
-  },
-] as const;
 
 const addExplorationGateway = (scene: THREE.Scene): void => {
   const gateway = new THREE.Group();
@@ -3226,6 +4183,7 @@ const addExplorationGateway = (scene: THREE.Scene): void => {
 export const createExplorationWorld = (
   scene: THREE.Scene,
   roomSeed: string,
+  surfaceTextures?: InteriorSurfaceTextures,
   onAreaChange?: (area: string) => void,
 ): ExplorationWorld => {
   const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
@@ -3242,58 +4200,68 @@ export const createExplorationWorld = (
   const pathGeometry = new THREE.BoxGeometry(EXPLORATION_CHUNK_SIZE * 0.84, 0.026, 0.9);
   const propGeometry = new RoundedBoxGeometry(0.28, 1, 0.28, 3, 0.04);
   const beaconGeometry = new RoundedBoxGeometry(0.12, 0.12, 0.12, 3, 0.02);
+  const citySignGeometry = new RoundedBoxGeometry(1.25, 0.22, 0.06, 2, 0.02);
+  const utilityPostGeometry = new RoundedBoxGeometry(0.12, 2, 0.12, 2, 0.03);
   const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
   const windowGeometry = new THREE.BoxGeometry(0.56, 0.055, 0.045);
   const bridgeGeometry = new RoundedBoxGeometry(EXPLORATION_CHUNK_SIZE * 0.86, 0.14, 0.2, 3, 0.035);
-  const groundMaterials = EXPLORATION_ZONE_STYLES.map(
-    (style) => new THREE.MeshStandardMaterial({ color: style.ground, roughness: 0.9 }),
+  const groundMaterials = EXPLORATION_BIOMES.map(
+    (style) => createMaterial(style.ground, 0.9, 0, undefined, surfaceTextures?.detail),
   );
-  const pathMaterials = EXPLORATION_ZONE_STYLES.map(
-    (style) => new THREE.MeshStandardMaterial({ color: style.path, roughness: 0.82 }),
+  const pathMaterials = EXPLORATION_BIOMES.map(
+    (style) => createMaterial(style.path, 0.82, 0, undefined, surfaceTextures?.detail),
   );
-  const propMaterials = EXPLORATION_ZONE_STYLES.map(
+  const propMaterials = EXPLORATION_BIOMES.map(
     (style) =>
-      new THREE.MeshStandardMaterial({
-        color: style.prop,
-        roughness: 0.66,
-        metalness: 0.05,
-      }),
+      createMaterial(style.prop, 0.66, 0.05, undefined, surfaceTextures?.detail),
   );
-  const accentMaterials = EXPLORATION_ZONE_STYLES.map(
+  const accentMaterials = EXPLORATION_BIOMES.map(
     (style) =>
-      new THREE.MeshStandardMaterial({
-        color: style.accent,
-        emissive: style.accent,
-        emissiveIntensity: 0.28,
-        roughness: 0.35,
-        metalness: 0.16,
-      }),
+      createAccentMaterial(style.accent, 0.35, 0.16, 0.28, surfaceTextures?.detail),
   );
-  const buildingMaterials = EXPLORATION_ZONE_STYLES.map(
+  const buildingMaterials = EXPLORATION_BIOMES.map(
     (style) =>
-      new THREE.MeshStandardMaterial({ color: style.prop, roughness: 0.78, metalness: 0.08 }),
+      createMaterial(style.prop, 0.78, 0.08, undefined, surfaceTextures?.detail),
   );
-  const windowMaterials = EXPLORATION_ZONE_STYLES.map(
+  const windowMaterials = EXPLORATION_BIOMES.map(
     (style) =>
-      new THREE.MeshStandardMaterial({
-        color: style.accent,
-        emissive: style.accent,
-        emissiveIntensity: 0.2,
-        roughness: 0.32,
-        metalness: 0.18,
-      }),
+      createAccentMaterial(style.accent, 0.32, 0.18, 0.2, surfaceTextures?.detail),
   );
-  const bridgeMaterials = EXPLORATION_ZONE_STYLES.map(
+  const bridgeMaterials = EXPLORATION_BIOMES.map(
     (style) =>
-      new THREE.MeshStandardMaterial({
-        color: style.path,
-        roughness: 0.48,
-        metalness: 0.44,
-      }),
+      createMaterial(style.path, 0.48, 0.44, undefined, surfaceTextures?.detail),
+  );
+  const citySignMaterials = EXPLORATION_BIOMES.map(
+    (style) =>
+      createAccentMaterial(style.accent, 0.24, 0.25, 0.35, surfaceTextures?.detail),
+  );
+  const utilityPostMaterials = EXPLORATION_BIOMES.map(
+    (style) =>
+      createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
   );
   const activeChunks = new Map<string, ExplorationChunk>();
+  const knockCollisionRefreshDistance = 1.05;
+  const knockImpactSpeedMin = 0.9;
+  const knockAngularVelocityMax = 2.9;
+  const knockAngularVelocityMin = 1.3;
+  const knockApproachDotMin = 0.05;
+  const knockableHeightMax = 0.9;
+  const knockLinearImpulseScale = 0.85;
+  const knockLiftImpulse = 0.55;
+  const knockAngularImpulseScale = 3.1;
+  let nextKnockablePhysicsId = 0;
+  const knockAxis = new THREE.Vector3(0, 0, 1);
+  const knockDirection = new THREE.Vector3();
+  const knockToObject = new THREE.Vector3();
+  const knockQuaternion = new THREE.Quaternion();
+  const knockMatrix = new THREE.Matrix4();
   let physicsVersion = 0;
   let currentArea = "Penthouse";
+
+  // Existing generator branches use this name; keep every streamed building,
+  // prop, window, bridge, and beacon out of all authored play-area squares.
+  const isExplorationRectOutsidePenthouse = (rect: ExplorationRect): boolean =>
+    isExplorationRectOutsidePlayAreas(rect);
 
   const addClippedMeshes = (
     parent: THREE.Object3D,
@@ -3309,14 +4277,23 @@ export const createExplorationWorld = (
     if (material === undefined) {
       return;
     }
-    for (const piece of clipExplorationRectAroundPenthouse(rect)) {
+    for (const piece of clipExplorationRectAroundPlayAreas(rect)) {
+      const clippedPiece = {
+        minX: Math.max(piece.minX, WORLD_BOUNDS.minX),
+        maxX: Math.min(piece.maxX, WORLD_BOUNDS.maxX),
+        minZ: Math.max(piece.minZ, WORLD_BOUNDS.minZ),
+        maxZ: Math.min(piece.maxZ, WORLD_BOUNDS.maxZ),
+      };
+      if (clippedPiece.maxX <= clippedPiece.minX || clippedPiece.maxZ <= clippedPiece.minZ) {
+        continue;
+      }
       const mesh = new THREE.Mesh(geometry, material);
       mesh.name = name;
-      mesh.position.set((piece.minX + piece.maxX) / 2, y, (piece.minZ + piece.maxZ) / 2);
+      mesh.position.set((clippedPiece.minX + clippedPiece.maxX) / 2, y, (clippedPiece.minZ + clippedPiece.maxZ) / 2);
       mesh.scale.set(
-        (piece.maxX - piece.minX) / baseWidth,
+        (clippedPiece.maxX - clippedPiece.minX) / baseWidth,
         1,
-        (piece.maxZ - piece.minZ) / baseDepth,
+        (clippedPiece.maxZ - clippedPiece.minZ) / baseDepth,
       );
       mesh.receiveShadow = receiveShadow;
       parent.add(mesh);
@@ -3327,8 +4304,15 @@ export const createExplorationWorld = (
     Math.floor((value + EXPLORATION_CHUNK_SIZE / 2) / EXPLORATION_CHUNK_SIZE);
   const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
   const describeArea = (position: THREE.Vector3): string => {
-    if (Math.abs(position.x) <= 8.9 && position.z >= -7.2 && position.z <= 6.9) {
-      return "Penthouse";
+    const playArea = PLAY_AREA_BOUNDS.find(
+      (bounds) =>
+        position.x >= bounds.minX &&
+        position.x <= bounds.maxX &&
+        position.z >= bounds.minZ &&
+        position.z <= bounds.maxZ,
+    );
+    if (playArea !== undefined) {
+      return playArea.label;
     }
     if (position.z > 7.2 && Math.abs(position.x) < 15) {
       return "South courtyard";
@@ -3349,13 +4333,20 @@ export const createExplorationWorld = (
     const random = createSeededRandom(
       `${normalizedSeed}|exploration|${String(chunkX)}|${String(chunkZ)}`,
     );
-    const styleIndex = random.nextInt(EXPLORATION_ZONE_STYLES.length);
-    const style = EXPLORATION_ZONE_STYLES[styleIndex] ?? EXPLORATION_ZONE_STYLES[0];
+    const biome = resolveExplorationBiome(normalizedSeed, chunkX, chunkZ);
+    const style = biome.style;
+    const styleIndex = biome.styleIndex;
     if (style === undefined) {
       throw new Error("Exploration zone styles are empty");
     }
+    const terrainHeight = THREE.MathUtils.lerp(0.45, 1.7, biome.elevation);
+    const featureBias = biome.featureNoise;
+    const routeSeed = createSeededRandom(
+      `${normalizedSeed}|exploration-route|${String(chunkX)}|${String(chunkZ)}`,
+    );
     const chunk = new THREE.Group();
     const physicsBoxes: PhysicsBox[] = [];
+    const knockableProps: ExplorationKnockable[] = [];
     chunk.name = `ExplorationChunk:${String(chunkX)}:${String(chunkZ)}`;
     chunk.userData = {
       chunkX,
@@ -3398,6 +4389,26 @@ export const createExplorationWorld = (
       "CityGridPath",
       true,
     );
+    if (routeSeed.nextFloat() < style.pathFrequency) {
+      const laneOffset = (routeSeed.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE * 0.22);
+      addClippedMeshes(
+        chunk,
+        pathGeometry,
+        pathMaterials[styleIndex],
+        {
+          minX: originX - EXPLORATION_CHUNK_SIZE * 0.32,
+          maxX: originX + EXPLORATION_CHUNK_SIZE * 0.32,
+          minZ: originZ - 0.3 + laneOffset,
+          maxZ: originZ + 0.3 + laneOffset,
+        },
+        EXPLORATION_CHUNK_SIZE * 0.64,
+        0.6,
+        0.014,
+        "CityDistrictRoad",
+        true,
+      );
+    }
+
     // Keep a cross-city route at every chunk seam. The buildings and props
     // vary by seed, but the two orthogonal routes remain continuous so a
     // player can cross from one streamed block into the next without hitting
@@ -3419,32 +4430,45 @@ export const createExplorationWorld = (
       true,
     );
 
-    const buildingCount = 1 + random.nextInt(2);
+    const buildingCount = Math.max(
+      1,
+      Math.round((style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE),
+    );
     const buildingSpecs: ExplorationBuildingSpec[] = [];
     for (let index = 0; index < buildingCount; index += 1) {
       const edge = random.nextInt(4);
-      const edgeOffset = (random.nextFloat() - 0.5) * 2.3;
+      const edgeOffset = (random.nextFloat() - 0.5) * EXPLORATION_CHUNK_BUILDING_EDGE_JITTER;
       const x = quantizeToGrid(
         edge === 0
-          ? originX - 2.45 + edgeOffset
-          : edge === 1
-            ? originX + 2.45 + edgeOffset
+          ? originX - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
+        : edge === 1
+            ? originX + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
             : originX + edgeOffset,
       );
       const z = quantizeToGrid(
         edge === 2
-          ? originZ - 2.45 + edgeOffset
-          : edge === 3
-            ? originZ + 2.45 + edgeOffset
+          ? originZ - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
+        : edge === 3
+            ? originZ + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
             : originZ + edgeOffset,
       );
-      const width = quantizeScale(1.15 + random.nextFloat() * 1.55);
-      const height = quantizeScale(1.7 + random.nextFloat() * 5.2);
-      const depth = quantizeScale(1.15 + random.nextFloat() * 1.55);
+      const width = quantizeScale(1 + random.nextFloat() * (1 + featureBias * 1.2));
+      const height = quantizeScale(
+        style.buildingHeightMin +
+          random.nextFloat() * (style.buildingHeightMax - style.buildingHeightMin) +
+          terrainHeight * 0.8,
+      );
+      const depth = quantizeScale(1 + random.nextFloat() * (1 + terrainHeight));
       const rotation = random.nextInt(4) * (Math.PI / 2);
       const swapsAxes = Math.abs(Math.sin(rotation)) > 0.5;
       if (
         !isExplorationRectOutsidePenthouse({
+          minX: x - (swapsAxes ? depth : width) / 2,
+          maxX: x + (swapsAxes ? depth : width) / 2,
+          minZ: z - (swapsAxes ? width : depth) / 2,
+          maxZ: z + (swapsAxes ? width : depth) / 2,
+        }) ||
+        isExplorationRectOutsideWorld({
           minX: x - (swapsAxes ? depth : width) / 2,
           maxX: x + (swapsAxes ? depth : width) / 2,
           minZ: z - (swapsAxes ? width : depth) / 2,
@@ -3494,7 +4518,10 @@ export const createExplorationWorld = (
 
     const windowPlacements: ExplorationWindowSpec[] = [];
     for (const building of buildingSpecs) {
-      const rows = Math.min(5, Math.max(2, Math.floor(building.height / 1.05)));
+      const rows = Math.min(
+        Math.floor(style.windowHeight / 0.95),
+        Math.max(2, Math.floor(building.height / 1.05)),
+      );
       const frontOffset = building.depth / 2 + 0.035;
       const offsetX = Math.sin(building.rotation) * frontOffset;
       const offsetZ = Math.cos(building.rotation) * frontOffset;
@@ -3507,6 +4534,18 @@ export const createExplorationWorld = (
         const windowZ = quantizeToGrid(building.z + offsetZ);
         if (
           !isExplorationRectOutsidePenthouse({
+            minX: windowX - halfWidth,
+            maxX: windowX + halfWidth,
+            minZ: windowZ - halfDepth,
+            maxZ: windowZ + halfDepth,
+          }) ||
+          isExplorationRectOutsideWorld({
+            minX: windowX - halfWidth,
+            maxX: windowX + halfWidth,
+            minZ: windowZ - halfDepth,
+            maxZ: windowZ + halfDepth,
+          }) ||
+          !isExplorationRectOutsideFocusCalibrationRamp({
             minX: windowX - halfWidth,
             maxX: windowX + halfWidth,
             minZ: windowZ - halfDepth,
@@ -3544,7 +4583,7 @@ export const createExplorationWorld = (
       chunk.add(windows);
     }
 
-    if (random.nextFloat() < 0.2) {
+    if (random.nextFloat() < style.bridgeDensity * (0.5 + style.preferredElevation)) {
       const bridgeRotation = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
       const bridgeLength = EXPLORATION_CHUNK_SIZE * 0.86;
       const bridgeHalfWidth = bridgeRotation === 0 ? bridgeLength / 2 : 0.1;
@@ -3553,6 +4592,12 @@ export const createExplorationWorld = (
       const bridgeZ = originZ;
       if (
         isExplorationRectOutsidePenthouse({
+          minX: bridgeX - bridgeHalfWidth,
+          maxX: bridgeX + bridgeHalfWidth,
+          minZ: bridgeZ - bridgeHalfDepth,
+          maxZ: bridgeZ + bridgeHalfDepth,
+        }) &&
+        isExplorationRectOutsideWorld({
           minX: bridgeX - bridgeHalfWidth,
           maxX: bridgeX + bridgeHalfWidth,
           minZ: bridgeZ - bridgeHalfDepth,
@@ -3567,7 +4612,11 @@ export const createExplorationWorld = (
       ) {
         const bridge = new THREE.Mesh(bridgeGeometry, bridgeMaterials[styleIndex]);
         bridge.name = "SkybridgeSpan";
-        bridge.position.set(originX, 3.2 + random.nextFloat() * 2.2, originZ);
+        bridge.position.set(
+          originX,
+          3.2 + random.nextFloat() * 1.9 + terrainHeight * 0.65,
+          originZ,
+        );
         bridge.rotation.y = quantizeRotation45(bridgeRotation);
         bridge.castShadow = true;
         bridge.receiveShadow = true;
@@ -3580,8 +4629,42 @@ export const createExplorationWorld = (
       }
     }
 
-    const propCount = 1 + random.nextInt(3);
+    const propCount = Math.max(
+      1,
+      Math.round((style.propDensity * 2 + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE),
+    );
     const propMatrices: THREE.Matrix4[] = [];
+    const propTransforms: Array<{
+      readonly position: THREE.Vector3;
+      readonly quaternion: THREE.Quaternion;
+      readonly scale: THREE.Vector3;
+      readonly halfExtents: PhysicsVector;
+      readonly rotationY: number;
+    }> = [];
+    const citySignCount = Math.max(
+      1,
+      Math.round((style.citySignDensity + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE),
+    );
+    const citySignMatrices: THREE.Matrix4[] = [];
+    const citySignTransforms: Array<{
+      readonly position: THREE.Vector3;
+      readonly quaternion: THREE.Quaternion;
+      readonly scale: THREE.Vector3;
+      readonly halfExtents: PhysicsVector;
+      readonly rotationY: number;
+    }> = [];
+    const utilityPostCount = Math.max(
+      1,
+      Math.round((style.utilityPostDensity + random.nextFloat() * 0.7) * EXPLORATION_DENSITY_SCALE),
+    );
+    const utilityPostMatrices: THREE.Matrix4[] = [];
+    const utilityPostTransforms: Array<{
+      readonly position: THREE.Vector3;
+      readonly quaternion: THREE.Quaternion;
+      readonly scale: THREE.Vector3;
+      readonly halfExtents: PhysicsVector;
+      readonly rotationY: number;
+    }> = [];
     for (let index = 0; index < propCount; index += 1) {
       position.set(
         quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
@@ -3596,27 +4679,134 @@ export const createExplorationWorld = (
         quantizeScale(0.65 + random.nextFloat() * 1.25),
       );
       const halfExtent = 0.14 * Math.max(scale.x, scale.z);
-      if (
-        !isExplorationRectOutsidePenthouse({
-          minX: position.x - halfExtent,
-          maxX: position.x + halfExtent,
-          minZ: position.z - halfExtent,
-          maxZ: position.z + halfExtent,
-        }) ||
-        !isExplorationRectOutsideFocusCalibrationRamp({
-          minX: position.x - halfExtent,
-          maxX: position.x + halfExtent,
-          minZ: position.z - halfExtent,
-          maxZ: position.z + halfExtent,
+        if (
+          !isExplorationRectOutsidePenthouse({
+            minX: position.x - halfExtent,
+            maxX: position.x + halfExtent,
+            minZ: position.z - halfExtent,
+            maxZ: position.z + halfExtent,
+          }) ||
+          isExplorationRectOutsideWorld({
+            minX: position.x - halfExtent,
+            maxX: position.x + halfExtent,
+            minZ: position.z - halfExtent,
+            maxZ: position.z + halfExtent,
+          }) ||
+          !isExplorationRectOutsideFocusCalibrationRamp({
+            minX: position.x - halfExtent,
+            maxX: position.x + halfExtent,
+            minZ: position.z - halfExtent,
+            maxZ: position.z + halfExtent,
         })
       ) {
         continue;
       }
       matrix.compose(position, rotation, scale);
       propMatrices.push(matrix.clone());
-      physicsBoxes.push({
-        center: { x: position.x, y: position.y, z: position.z },
-        halfExtents: { x: scale.x * 0.14, y: scale.y * 0.5, z: scale.z * 0.14 },
+      const halfExtents = { x: scale.x * 0.14, y: scale.y * 0.5, z: scale.z * 0.14 };
+      propTransforms.push({
+        position: position.clone(),
+        quaternion: rotation.clone(),
+        scale: scale.clone(),
+        halfExtents,
+        rotationY,
+      });
+    }
+    for (let index = 0; index < citySignCount; index += 1) {
+      position.set(
+        quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2.1)),
+        quantizeToGrid(1 + random.nextFloat() * 1.2),
+        quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2.1)),
+      );
+      const rotationY = quantizeRotation45(random.nextFloat() * Math.PI * 2);
+      rotation.setFromAxisAngle(yAxis, rotationY);
+      scale.set(
+        quantizeScale(0.8 + random.nextFloat() * 1.4),
+        quantizeScale(0.8 + random.nextFloat() * 0.9),
+        quantizeScale(0.08 + random.nextFloat() * 0.09),
+      );
+      const baseHalfWidth = 0.625 * scale.x;
+      const baseHalfHeight = 0.11 * scale.y;
+      const baseHalfDepth = 0.03 * scale.z;
+      const halfWidth = Math.abs(Math.cos(rotationY)) * baseHalfWidth + Math.abs(Math.sin(rotationY)) * baseHalfDepth;
+      const halfDepth = Math.abs(Math.sin(rotationY)) * baseHalfWidth + Math.abs(Math.cos(rotationY)) * baseHalfDepth;
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - halfWidth,
+          maxX: position.x + halfWidth,
+          minZ: position.z - halfDepth,
+          maxZ: position.z + halfDepth,
+        }) ||
+          isExplorationRectOutsideWorld({
+          minX: position.x - halfWidth,
+          maxX: position.x + halfWidth,
+          minZ: position.z - halfDepth,
+          maxZ: position.z + halfDepth,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - halfWidth,
+          maxX: position.x + halfWidth,
+          minZ: position.z - halfDepth,
+          maxZ: position.z + halfDepth,
+        })
+      ) {
+        continue;
+      }
+      matrix.compose(position, rotation, scale);
+      citySignMatrices.push(matrix.clone());
+      citySignTransforms.push({
+        position: position.clone(),
+        quaternion: rotation.clone(),
+        scale: scale.clone(),
+        halfExtents: { x: baseHalfWidth, y: baseHalfHeight, z: baseHalfDepth },
+        rotationY,
+      });
+    }
+    for (let index = 0; index < utilityPostCount; index += 1) {
+      position.set(
+        quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2)),
+        0,
+        quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2)),
+      );
+      const rotationY = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
+      rotation.setFromAxisAngle(yAxis, rotationY);
+      scale.set(
+        quantizeScale(0.6 + random.nextFloat() * 0.7),
+        quantizeScale(1.4 + random.nextFloat() * 1.2),
+        quantizeScale(0.6 + random.nextFloat() * 0.7),
+      );
+      position.y = scale.y / 2;
+      const baseHalfWidth = 0.06 * scale.x;
+      const baseHalfDepth = 0.06 * scale.z;
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - baseHalfWidth,
+          maxX: position.x + baseHalfWidth,
+          minZ: position.z - baseHalfDepth,
+          maxZ: position.z + baseHalfDepth,
+        }) ||
+          isExplorationRectOutsideWorld({
+          minX: position.x - baseHalfWidth,
+          maxX: position.x + baseHalfWidth,
+          minZ: position.z - baseHalfDepth,
+          maxZ: position.z + baseHalfDepth,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - baseHalfWidth,
+          maxX: position.x + baseHalfWidth,
+          minZ: position.z - baseHalfDepth,
+          maxZ: position.z + baseHalfDepth,
+        })
+      ) {
+        continue;
+      }
+      matrix.compose(position, rotation, scale);
+      utilityPostMatrices.push(matrix.clone());
+      utilityPostTransforms.push({
+        position: position.clone(),
+        quaternion: rotation.clone(),
+        scale: scale.clone(),
+        halfExtents: { x: baseHalfWidth, y: scale.y / 2, z: baseHalfDepth },
         rotationY,
       });
     }
@@ -3632,13 +4822,122 @@ export const createExplorationWorld = (
       propMatrices.forEach((propMatrix, index) => {
         props.setMatrixAt(index, propMatrix);
       });
+      propMatrices.forEach((_, index) => {
+        const transform = propTransforms[index];
+        if (transform === undefined) {
+          return;
+        }
+        knockableProps.push({
+          physicsId: nextKnockablePhysicsId,
+          mesh: props,
+          index,
+          basePosition: transform.position,
+          baseScale: transform.scale,
+          baseQuaternion: transform.quaternion,
+          halfExtents: transform.halfExtents,
+          rotationY: transform.rotationY,
+          fallAxis: new THREE.Vector3(0, 0, 1),
+          launchLinearVelocity: new THREE.Vector3(),
+          launchAngularVelocity: new THREE.Vector3(),
+          hasBodyState: false,
+          isKnocked: false,
+          angle: 0,
+          angularVelocity: 0,
+          targetAngle: Math.PI * 0.75,
+        });
+        nextKnockablePhysicsId += 1;
+      });
       props.instanceMatrix.needsUpdate = true;
       props.computeBoundingSphere();
       chunk.add(props);
     }
+    if (citySignMatrices.length > 0) {
+      const signs = new THREE.InstancedMesh(
+        citySignGeometry,
+        citySignMaterials[styleIndex],
+        citySignMatrices.length,
+      );
+      signs.name = "CitySignInstances";
+      signs.castShadow = true;
+      signs.receiveShadow = true;
+      citySignMatrices.forEach((citySignMatrix, index) => {
+        signs.setMatrixAt(index, citySignMatrix);
+      });
+      citySignMatrices.forEach((_, index) => {
+        const transform = citySignTransforms[index];
+        if (transform === undefined) {
+          return;
+        }
+        knockableProps.push({
+          physicsId: nextKnockablePhysicsId,
+          mesh: signs,
+          index,
+          basePosition: transform.position,
+          baseScale: transform.scale,
+          baseQuaternion: transform.quaternion,
+          halfExtents: transform.halfExtents,
+          rotationY: transform.rotationY,
+          fallAxis: new THREE.Vector3(0, 0, 1),
+          launchLinearVelocity: new THREE.Vector3(),
+          launchAngularVelocity: new THREE.Vector3(),
+          hasBodyState: false,
+          isKnocked: false,
+          angle: 0,
+          angularVelocity: 0,
+          targetAngle: Math.PI * 0.52,
+        });
+        nextKnockablePhysicsId += 1;
+      });
+      signs.instanceMatrix.needsUpdate = true;
+      signs.computeBoundingSphere();
+      chunk.add(signs);
+    }
+    if (utilityPostMatrices.length > 0) {
+      const utilityPosts = new THREE.InstancedMesh(
+        utilityPostGeometry,
+        utilityPostMaterials[styleIndex],
+        utilityPostMatrices.length,
+      );
+      utilityPosts.name = "CityUtilityPostInstances";
+      utilityPosts.castShadow = true;
+      utilityPosts.receiveShadow = true;
+      utilityPostMatrices.forEach((utilityPostMatrix, index) => {
+        utilityPosts.setMatrixAt(index, utilityPostMatrix);
+      });
+      utilityPostMatrices.forEach((_, index) => {
+        const transform = utilityPostTransforms[index];
+        if (transform === undefined) {
+          return;
+        }
+        knockableProps.push({
+          physicsId: nextKnockablePhysicsId,
+          mesh: utilityPosts,
+          index,
+          basePosition: transform.position,
+          baseScale: transform.scale,
+          baseQuaternion: transform.quaternion,
+          halfExtents: transform.halfExtents,
+          rotationY: transform.rotationY,
+          fallAxis: new THREE.Vector3(0, 0, 1),
+          launchLinearVelocity: new THREE.Vector3(),
+          launchAngularVelocity: new THREE.Vector3(),
+          hasBodyState: false,
+          isKnocked: false,
+          angle: 0,
+          angularVelocity: 0,
+          targetAngle: Math.PI * 0.52,
+        });
+        nextKnockablePhysicsId += 1;
+      });
+      utilityPosts.instanceMatrix.needsUpdate = true;
+      utilityPosts.computeBoundingSphere();
+      chunk.add(utilityPosts);
+    }
 
-    const beaconCount = random.nextInt(2);
+    const beaconCount = random.nextFloat() < style.beaconDensity * 1.2 + featureBias * 0.2 ? 1 : 0;
     const beaconMatrices: THREE.Matrix4[] = [];
+    const beaconTransforms: Array<{ readonly position: THREE.Vector3; readonly quaternion: THREE.Quaternion; readonly scale: THREE.Vector3; readonly halfExtents: PhysicsVector; }> =
+      [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
     for (let index = 0; index < beaconCount; index += 1) {
@@ -3649,6 +4948,12 @@ export const createExplorationWorld = (
       );
       if (
         !isExplorationRectOutsidePenthouse({
+          minX: position.x - 0.06,
+          maxX: position.x + 0.06,
+          minZ: position.z - 0.06,
+          maxZ: position.z + 0.06,
+        }) ||
+        isExplorationRectOutsideWorld({
           minX: position.x - 0.06,
           maxX: position.x + 0.06,
           minZ: position.z - 0.06,
@@ -3665,6 +4970,13 @@ export const createExplorationWorld = (
       }
       matrix.compose(position, rotation, beaconScale);
       beaconMatrices.push(matrix.clone());
+      beaconTransforms.push({
+        position: position.clone(),
+        quaternion: rotation.clone(),
+        scale: beaconScale.clone(),
+        halfExtents: { x: 0.06, y: 0.06, z: 0.06 },
+        rotationY: 0,
+      });
     }
     if (beaconMatrices.length > 0) {
       const beacons = new THREE.InstancedMesh(
@@ -3677,11 +4989,40 @@ export const createExplorationWorld = (
       beaconMatrices.forEach((beaconMatrix, index) => {
         beacons.setMatrixAt(index, beaconMatrix);
       });
+      beaconMatrices.forEach((_, index) => {
+        const transform = beaconTransforms[index];
+        if (transform === undefined) {
+          return;
+        }
+        knockableProps.push({
+          physicsId: nextKnockablePhysicsId,
+          mesh: beacons,
+          index,
+          basePosition: transform.position,
+          baseScale: transform.scale,
+          baseQuaternion: transform.quaternion,
+          halfExtents: transform.halfExtents,
+          rotationY: transform.rotationY,
+          fallAxis: new THREE.Vector3(0, 0, 1),
+          launchLinearVelocity: new THREE.Vector3(),
+          launchAngularVelocity: new THREE.Vector3(),
+          hasBodyState: false,
+          isKnocked: false,
+          angle: 0,
+          angularVelocity: 0,
+          targetAngle: Math.PI * 0.68,
+        });
+        nextKnockablePhysicsId += 1;
+      });
       beacons.instanceMatrix.needsUpdate = true;
       beacons.computeBoundingSphere();
       chunk.add(beacons);
     }
-    return { root: chunk, physicsBoxes };
+    return {
+      root: chunk,
+      physicsBoxes,
+      knockableProps,
+    };
   };
 
   const disposeChunk = (chunk: THREE.Group): void => {
@@ -3698,28 +5039,13 @@ export const createExplorationWorld = (
 
   const preloadAllChunks = (): void => {
     let physicsChanged = false;
-    const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX) - 1;
-    const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX) + 1;
-    const minChunkZ = chunkCoordinate(WORLD_BOUNDS.minZ) - 1;
-    const maxChunkZ = chunkCoordinate(WORLD_BOUNDS.maxZ) + 1;
+    const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX);
+    const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX);
+    const minChunkZ = chunkCoordinate(WORLD_BOUNDS.minZ);
+    const maxChunkZ = chunkCoordinate(WORLD_BOUNDS.maxZ);
 
     for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
-      const centerX = chunkX * EXPLORATION_CHUNK_SIZE;
-      if (
-        centerX < WORLD_BOUNDS.minX - EXPLORATION_CHUNK_SIZE ||
-        centerX > WORLD_BOUNDS.maxX + EXPLORATION_CHUNK_SIZE
-      ) {
-        continue;
-      }
       for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
-        const centerZ = chunkZ * EXPLORATION_CHUNK_SIZE;
-        if (
-          centerZ < WORLD_BOUNDS.minZ - EXPLORATION_CHUNK_SIZE ||
-          centerZ > WORLD_BOUNDS.maxZ + EXPLORATION_CHUNK_SIZE
-        ) {
-          continue;
-        }
-
         const key = chunkKey(chunkX, chunkZ);
         if (activeChunks.has(key)) {
           continue;
@@ -3743,6 +5069,121 @@ export const createExplorationWorld = (
     }
   };
 
+  const updateKnockables = (
+    deltaSeconds: number,
+    playerPosition: THREE.Vector3,
+    impactDelta: PhysicsVector,
+    impactCollisions: number,
+    playerGrounded: boolean,
+    dynamicBodyStates: readonly PhysicsBodyState[] = [],
+  ): void => {
+    if (deltaSeconds <= 0) {
+      return;
+    }
+    const dynamicStateById = new Map<number, PhysicsBodyState>();
+    for (const dynamicBodyState of dynamicBodyStates) {
+      dynamicStateById.set(dynamicBodyState.dynamicId, dynamicBodyState);
+    }
+    const impactMagnitude = Math.hypot(impactDelta.x, impactDelta.z);
+    const impactSpeed = impactMagnitude / Math.max(deltaSeconds, 1 / 240);
+    const shouldKnock = impactSpeed >= knockImpactSpeedMin && playerGrounded && impactCollisions > 0;
+    if (impactMagnitude > 0) {
+      knockDirection.set(impactDelta.x, 0, impactDelta.z).normalize();
+    } else {
+      knockDirection.set(0, 0, 0);
+    }
+    let physicsChanged = false;
+
+    for (const chunk of activeChunks.values()) {
+      for (const knockable of chunk.knockableProps) {
+        if (!knockable.isKnocked) {
+          if (!shouldKnock || impactMagnitude <= 0) {
+            continue;
+          }
+          if (knockable.halfExtents.y > knockableHeightMax) {
+            continue;
+          }
+          knockToObject.set(
+            knockable.basePosition.x - playerPosition.x,
+            0,
+            knockable.basePosition.z - playerPosition.z,
+          );
+          const impactDistance = knockToObject.length();
+          if (impactDistance > knockCollisionRefreshDistance + Math.max(knockable.halfExtents.x, knockable.halfExtents.z)) {
+            continue;
+          }
+          if (impactDistance <= Number.EPSILON) {
+            continue;
+          }
+          const knockApproach = knockToObject.dot(knockDirection) / impactDistance;
+          if (knockApproach <= knockApproachDotMin) {
+            continue;
+          }
+          knockable.isKnocked = true;
+          knockable.angle = 0;
+          knockable.hasBodyState = false;
+          const impactFactor = Math.max(0, Math.min(1, (impactSpeed - knockImpactSpeedMin) / knockImpactSpeedMin));
+          const knockScale = Math.max(0.02, impactFactor);
+          knockable.angularVelocity =
+            knockAngularVelocityMin +
+            (knockAngularVelocityMax - knockAngularVelocityMin) * impactFactor;
+          knockAxis.set(knockDirection.z, 0, -knockDirection.x);
+          if (knockAxis.lengthSq() <= Number.EPSILON) {
+            knockAxis.set(1, 0, 0);
+          }
+          knockAxis.normalize();
+          knockable.fallAxis.copy(knockAxis);
+          knockable.launchLinearVelocity.set(
+            knockDirection.x * knockLinearImpulseScale * knockScale * 1.9,
+            knockLiftImpulse + knockScale * 0.8,
+            knockDirection.z * knockLinearImpulseScale * knockScale * 1.9,
+          );
+          knockable.launchAngularVelocity.copy(knockAxis).multiplyScalar(knockAngularImpulseScale * (knockScale + 0.12));
+          physicsChanged = true;
+        }
+        if (!knockable.isKnocked) {
+          continue;
+        }
+        const bodyState = dynamicStateById.get(knockable.physicsId);
+        if (bodyState === undefined) {
+          knockable.hasBodyState = false;
+          if (knockable.angle < knockable.targetAngle) {
+            knockable.angle += knockable.angularVelocity * deltaSeconds;
+            knockable.angularVelocity *= 1 - Math.min(0.9, 10 * deltaSeconds);
+            if (knockable.angle >= knockable.targetAngle) {
+              knockable.angle = knockable.targetAngle;
+              knockable.angularVelocity = 0;
+            }
+          }
+          knockQuaternion.setFromAxisAngle(knockable.fallAxis, knockable.angle);
+          knockMatrix.compose(
+            knockable.basePosition,
+            knockQuaternion.multiply(knockable.baseQuaternion),
+            knockable.baseScale,
+          );
+        } else {
+          knockable.hasBodyState = true;
+          knockQuaternion.set(
+            bodyState.rotation.x,
+            bodyState.rotation.y,
+            bodyState.rotation.z,
+            bodyState.rotation.w,
+          );
+          knockMatrix.compose(
+            new THREE.Vector3(bodyState.center.x, bodyState.center.y, bodyState.center.z),
+            knockQuaternion,
+            knockable.baseScale,
+          );
+        }
+        knockable.mesh.setMatrixAt(knockable.index, knockMatrix);
+        knockable.mesh.instanceMatrix.needsUpdate = true;
+      }
+    }
+    if (physicsChanged) {
+      physicsVersion += 1;
+    }
+  };
+
   const dispose = (): void => {
     root.removeFromParent();
     for (const chunk of activeChunks.values()) {
@@ -3752,6 +5193,8 @@ export const createExplorationWorld = (
     groundGeometry.dispose();
     pathGeometry.dispose();
     propGeometry.dispose();
+    citySignGeometry.dispose();
+    utilityPostGeometry.dispose();
     beaconGeometry.dispose();
     buildingGeometry.dispose();
     windowGeometry.dispose();
@@ -3764,6 +5207,8 @@ export const createExplorationWorld = (
       ...buildingMaterials,
       ...windowMaterials,
       ...bridgeMaterials,
+      ...citySignMaterials,
+      ...utilityPostMaterials,
     ]) {
       material.dispose();
     }
@@ -3774,12 +5219,51 @@ export const createExplorationWorld = (
   onAreaChange?.(currentArea);
   return {
     update,
+    updateKnockables,
     getArea: () => currentArea,
     getLoadedChunkCount: () => activeChunks.size,
     getPhysicsBoxes: () => {
       const boxes: PhysicsBox[] = [];
       for (const chunk of activeChunks.values()) {
         boxes.push(...chunk.physicsBoxes);
+        for (const knockable of chunk.knockableProps) {
+          if (knockable.isKnocked) {
+            boxes.push({
+              center: {
+                x: knockable.basePosition.x,
+                y: knockable.basePosition.y,
+                z: knockable.basePosition.z,
+              },
+              halfExtents: knockable.halfExtents,
+              dynamic: true,
+              dynamicId: knockable.physicsId,
+              linearVelocity: {
+                x: knockable.launchLinearVelocity.x,
+                y: knockable.launchLinearVelocity.y,
+                z: knockable.launchLinearVelocity.z,
+              },
+              angularVelocity: {
+                x: knockable.launchAngularVelocity.x,
+                y: knockable.launchAngularVelocity.y,
+                z: knockable.launchAngularVelocity.z,
+              },
+              linearDamping: 0.75,
+              angularDamping: 0.75,
+              restitution: 0.15,
+              ...(knockable.rotationY === undefined ? {} : { rotationY: knockable.rotationY }),
+            });
+            continue;
+          }
+          boxes.push({
+            center: {
+              x: knockable.basePosition.x,
+              y: knockable.basePosition.y,
+              z: knockable.basePosition.z,
+            },
+            halfExtents: knockable.halfExtents,
+            ...(knockable.rotationY === undefined ? {} : { rotationY: knockable.rotationY }),
+          });
+        }
       }
       return boxes;
     },
@@ -3828,7 +5312,6 @@ const createPresentationAnchors = (
   const cameraTargets = {
     table: make("CameraTargetTable", new THREE.Vector3(0, 0.72, -0.75)),
     room: make("CameraTargetRoom", new THREE.Vector3(0, 1.45, -1.9)),
-    skyline: make("CameraTargetSkyline", new THREE.Vector3(-1.8, 2.8, -6.6)),
   } as const;
   scene.add(root);
   return {
@@ -3845,38 +5328,86 @@ const createPresentationAnchors = (
   };
 };
 
-const addLighting = (scene: THREE.Scene, quality: SceneQuality): void => {
-  RectAreaLightUniformsLib.init();
+const addLighting = (scene: THREE.Scene): void => {
   const lightingRoot = new THREE.Group();
   lightingRoot.name = "LightingRoot";
   scene.add(lightingRoot);
-  const hemisphere = new THREE.HemisphereLight(0xf4f7f4, 0x9aa8aa, 2.05);
-  lightingRoot.add(hemisphere);
-  const key = new THREE.DirectionalLight(0xfff3de, 3.45);
-  key.name = "SunKeyLight";
-  key.position.set(-5, 9.5, 6.5);
-  key.castShadow = quality.shadows !== "off";
-  if (quality.shadowMapSize > 0) {
-    key.shadow.mapSize.set(quality.shadowMapSize, quality.shadowMapSize);
-  }
-  key.shadow.camera.left = -6.5;
-  key.shadow.camera.right = 6.5;
-  key.shadow.camera.top = 6.5;
-  key.shadow.camera.bottom = -6.5;
-  lightingRoot.add(key);
-  const windowFill = new THREE.RectAreaLight(0xd8f5ff, 4.2, 9.6, 3.3);
-  windowFill.position.set(0, 3.0, -4.8);
-  windowFill.lookAt(0, 0.8, 0);
-  lightingRoot.add(windowFill);
-  const ceilingFill = new THREE.RectAreaLight(0xfff5e9, 2.3, 5.5, 2.2);
-  ceilingFill.position.set(1.2, 4.35, 0.2);
-  ceilingFill.lookAt(0, 0.7, 0);
-  lightingRoot.add(ceilingFill);
+
+  const keyLightTarget = new THREE.Object3D();
+  keyLightTarget.name = "SunKeyLightTarget";
+  keyLightTarget.position.set(0, 0.5, -0.1);
+  scene.add(keyLightTarget);
+
+  const keyLight = new THREE.DirectionalLight(0xffe7c9, 2.2);
+  keyLight.name = "SunKeyLight";
+  keyLight.position.set(-5.6, 9.5, 6.2);
+  keyLight.target = keyLightTarget;
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.radius = 2.2;
+  keyLight.shadow.bias = -0.00045;
+  keyLight.shadow.normalBias = 0.014;
+  keyLight.shadow.camera.near = 0.2;
+  keyLight.shadow.camera.far = 40;
+  keyLight.shadow.camera.left = -9;
+  keyLight.shadow.camera.right = 8;
+  keyLight.shadow.camera.top = 7;
+  keyLight.shadow.camera.bottom = -7;
+  keyLight.userData.dofIgnore = true;
+  lightingRoot.add(keyLight);
+
+  const fillLight = new THREE.SpotLight(0x8fd8e8, 0.42, 24, THREE.MathUtils.degToRad(68), 0.5, 0.6);
+  fillLight.name = "SunFillLight";
+  fillLight.position.set(4.4, 4.8, -2.4);
+  fillLight.target.position.set(-0.25, 0.65, 0.15);
+  lightingRoot.add(fillLight);
+  lightingRoot.add(fillLight.target);
+
+  const rimLight = new THREE.PointLight(0xc69bd0, 0.2, 18);
+  rimLight.name = "SunRimLight";
+  rimLight.position.set(-0.05, 6.2, -8.2);
+  rimLight.castShadow = false;
+  rimLight.userData.dofIgnore = true;
+  lightingRoot.add(rimLight);
+
+  const ambientLight = new THREE.AmbientLight(0x7594a2, 0.14);
+  ambientLight.name = "SceneAmbient";
+  lightingRoot.add(ambientLight);
+
+  // Keep a soft visual reference for the sun rig controls.
+  const skySunGlow = new THREE.Mesh(
+    new THREE.SphereGeometry(0.82, 20, 12),
+    new THREE.MeshBasicMaterial({
+      color: 0xffe7b6,
+      transparent: true,
+      opacity: 0.55,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  const skySunCore = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24, 20, 12),
+    new THREE.MeshBasicMaterial({
+      color: 0xfff0ce,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  const skySunReference = new THREE.Group();
+  skySunReference.name = "SkySunReference";
+  skySunReference.add(skySunGlow, skySunCore);
+  skySunReference.position.set(-5, 9.5, 6.5);
+  skySunReference.userData.dofIgnore = true;
+  lightingRoot.add(skySunReference);
 };
 
 const addFloor = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResources => {
   return addArchitecture(scene, quality);
 };
+
+const SKY_SUN_DISTANCE = 10;
 
 const isDofIgnored = (object: THREE.Object3D): boolean => {
   let current: THREE.Object3D | null = object;
@@ -3968,6 +5499,7 @@ export const createMahjongTableScene = (
   const sceneStateStorage = getVisualSceneStateStorage();
   const persistedSceneState = readVisualSceneState(sceneStateStorage, roomSeed);
   const debugPreferencesStorage = getVisualDebugPreferencesStorage();
+  const authoredRoomMap = getAuthoredVisualMapDocument();
   const persistedDebugPreferences = debugEnabled
     ? readVisualDebugPreferences(debugPreferencesStorage)
     : null;
@@ -3976,7 +5508,7 @@ export const createMahjongTableScene = (
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
-  scene.fog = new THREE.Fog(COLORS.sky, 10, 34);
+  scene.fog = new THREE.Fog(COLORS.haze, 10, 34);
   const camera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -3994,7 +5526,8 @@ export const createMahjongTableScene = (
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.AgXToneMapping;
-  renderer.toneMappingExposure = 0.98;
+  renderer.toneMappingExposure = 1.02;
+  renderer.physicallyCorrectLights = true;
   renderer.domElement.setAttribute(
     "aria-label",
     "Interactive three-dimensional Hong Kong mahjong table",
@@ -4050,25 +5583,25 @@ export const createMahjongTableScene = (
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
   const focusNdc = new THREE.Vector2(0, 0);
-  let skylineRoot: THREE.Object3D | null = null;
   let focusCalibrationRoot: THREE.Group | null = null;
   let focusCalibrationLabels: readonly THREE.Sprite[] = [];
   let debugBoundsRoot: THREE.Group | null = null;
   let sunLight: THREE.DirectionalLight | null = null;
+  let skySunReference: THREE.Object3D | null = null;
   let redMaterials: THREE.MeshStandardMaterial[] = [];
   let cyanMaterials: THREE.MeshStandardMaterial[] = [];
   let redMaterialBaseIntensity = new Map<THREE.MeshStandardMaterial, number>();
   let cyanMaterialBaseIntensity = new Map<THREE.MeshStandardMaterial, number>();
   let activeDebugPreset: VisualCameraPreset | null = null;
   let debugFovOverride: number | null = null;
-  let debugFogDensity = 0.018;
+  let debugFogDensity = 0.028;
   let debugSunYaw = -0.59;
   let debugSunElevation = 0.86;
-  let debugSunIntensity = 3.45;
-  let debugEnvironmentIntensity = 1;
+  let debugSunIntensity = 2.2;
+  let debugEnvironmentIntensity = 0.82;
   let debugEnvironmentRotation = 0;
-  let debugRedAccentIntensity = 1;
-  let debugCyanEmissiveIntensity = 1;
+  let debugRedAccentIntensity = 1.1;
+  let debugCyanEmissiveIntensity = 1.05;
   let debugShadowQuality: VisualShadowQuality = quality.shadows;
   let debugDprCap = quality.dprCap;
   let debugQualityMode: VisualQualityMode =
@@ -4081,7 +5614,7 @@ export const createMahjongTableScene = (
   let debugBokehStrength = 1;
   let debugAmbientOcclusionEnabled = gtaoPass.enabled;
   let debugAutoExposureEnabled = true;
-  let debugExposureTarget = renderer.toneMappingExposure;
+  let debugExposureTarget = 1.02;
   let debugGlassMode: VisualGlassMode = quality.glassMode;
   let glassSurfaces: readonly THREE.Mesh[] = [];
   let simpleGlassMaterial: THREE.MeshStandardMaterial | null = null;
@@ -4089,12 +5622,6 @@ export const createMahjongTableScene = (
   let debugWireframe = false;
   let debugBoundsVisible = false;
   let generatedRoomVariant = GENERATED_ROOM_PALETTES[0]?.label ?? "Northlight";
-  const debugSkylineLayers: Record<VisualSkylineLayer, boolean> = {
-    near: true,
-    hero: true,
-    fillers: true,
-    distant: true,
-  };
   let debugFps = 60;
   let debugFrameTimeMs = 1000 / 60;
   let previousAnimationTimestamp = 0;
@@ -4107,6 +5634,23 @@ export const createMahjongTableScene = (
   let bokehIntensity = initialBokeh.intensity;
   const exposureLookDirection = new THREE.Vector3();
   const getSunLight = (): THREE.DirectionalLight | null => sunLight;
+  const updateSkySunReference = (): void => {
+    if (skySunReference === null) {
+      return;
+    }
+    const horizontal = Math.cos(debugSunElevation) * SKY_SUN_DISTANCE;
+    skySunReference.position.set(
+      Math.cos(debugSunYaw) * horizontal,
+      Math.sin(debugSunElevation) * SKY_SUN_DISTANCE,
+      Math.sin(debugSunYaw) * horizontal,
+    );
+    const intensityScale = THREE.MathUtils.clamp(
+      0.85 + Math.pow(debugSunIntensity / 6, 0.75) * 0.75,
+      0.85,
+      1.6,
+    );
+    skySunReference.scale.setScalar(intensityScale);
+  };
   const getDebugBoundsRoot = (): THREE.Group | null => debugBoundsRoot;
   let suppressDebugPreferencesPersistence = true;
   let lastDebugPreferencesSerialized: string | null = null;
@@ -4121,8 +5665,6 @@ export const createMahjongTableScene = (
     ),
     toneMapper: toneMapperName(renderer.toneMapping),
     fogDensity: debugFogDensity,
-    skylineVisible: skylineRoot?.visible ?? true,
-    skylineLayers: { ...debugSkylineLayers },
     sunYaw: debugSunYaw,
     sunElevation: debugSunElevation,
     sunIntensity: debugSunIntensity,
@@ -4408,6 +5950,8 @@ export const createMahjongTableScene = (
   let grounded = true;
   let physicsRuntime: MahjongPhysicsRuntime | null = null;
   let physicsCharacterPosition: PhysicsVector | null = null;
+  let staticPhysicsBoxes: readonly PhysicsBox[] = [];
+  let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
   let appliedPhysicsVersion = -1;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
@@ -4564,6 +6108,81 @@ export const createMahjongTableScene = (
       grounded = false;
     }
   };
+  const resolveLedgeGrabTarget = (
+    fromPosition: PhysicsVector,
+    desiredHorizontalDelta: PhysicsVector,
+    feetY: number,
+  ): PhysicsVector | null => {
+    const horizontalDistance = Math.hypot(desiredHorizontalDelta.x, desiredHorizontalDelta.z);
+    if (horizontalDistance < 0.015) {
+      return null;
+    }
+    const directionX = desiredHorizontalDelta.x / horizontalDistance;
+    const directionZ = desiredHorizontalDelta.z / horizontalDistance;
+    const minTopY = feetY + LEDGE_GRAB_MIN_HEIGHT;
+    const maxTopY = feetY + LEDGE_GRAB_MAX_HEIGHT;
+    const probeX = fromPosition.x + directionX * (PLAYER_COLLIDER_RADIUS + 0.06);
+    const probeZ = fromPosition.z + directionZ * (PLAYER_COLLIDER_RADIUS + 0.06);
+    const targetX = fromPosition.x + desiredHorizontalDelta.x;
+    const targetZ = fromPosition.z + desiredHorizontalDelta.z;
+    let best: { x: number; y: number; z: number; gap: number } | null = null;
+    const tryBox = (box: PhysicsBox): void => {
+      if (box.halfExtents.y < 0.06) {
+        return;
+      }
+      const topY = box.center.y + box.halfExtents.y;
+      if (topY < minTopY || topY > maxTopY) {
+        return;
+      }
+      const probeSafeMinX = box.center.x - box.halfExtents.x - LEDGE_GRAB_SIDE_DISTANCE;
+      const probeSafeMaxX = box.center.x + box.halfExtents.x + LEDGE_GRAB_SIDE_DISTANCE;
+      const probeSafeMinZ = box.center.z - box.halfExtents.z - LEDGE_GRAB_SIDE_DISTANCE;
+      const probeSafeMaxZ = box.center.z + box.halfExtents.z + LEDGE_GRAB_SIDE_DISTANCE;
+      if (probeX < probeSafeMinX || probeX > probeSafeMaxX || probeZ < probeSafeMinZ || probeZ > probeSafeMaxZ) {
+        return;
+      }
+      const movingAlongX = Math.abs(desiredHorizontalDelta.x) >= Math.abs(desiredHorizontalDelta.z);
+      const edgeGap = movingAlongX
+        ? directionX >= 0
+          ? box.center.x - box.halfExtents.x - fromPosition.x
+          : fromPosition.x - (box.center.x + box.halfExtents.x)
+        : directionZ >= 0
+          ? box.center.z - box.halfExtents.z - fromPosition.z
+          : fromPosition.z - (box.center.z + box.halfExtents.z);
+      if (edgeGap < LEDGE_GRAB_PLATFORM_TOLERANCE || edgeGap > LEDGE_GRAB_APPROACH_DISTANCE) {
+        return;
+      }
+      const sideDelta = movingAlongX ? Math.abs(probeZ - box.center.z) : Math.abs(probeX - box.center.x);
+      const maxSideDelta = (movingAlongX ? box.halfExtents.z : box.halfExtents.x) + LEDGE_GRAB_SIDE_DISTANCE;
+      if (sideDelta > maxSideDelta) {
+        return;
+      }
+      const halfInsetX = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.x * 0.85);
+      const halfInsetZ = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.z * 0.85);
+      const minTargetX = box.center.x - box.halfExtents.x + halfInsetX;
+      const maxTargetX = box.center.x + box.halfExtents.x - halfInsetX;
+      const minTargetZ = box.center.z - box.halfExtents.z + halfInsetZ;
+      const maxTargetZ = box.center.z + box.halfExtents.z - halfInsetZ;
+      const candidate = {
+        x: minTargetX > maxTargetX ? box.center.x : THREE.MathUtils.clamp(targetX, minTargetX, maxTargetX),
+        y: topY + PLAYER_COLLIDER_CENTER_HEIGHT,
+        z: minTargetZ > maxTargetZ ? box.center.z : THREE.MathUtils.clamp(targetZ, minTargetZ, maxTargetZ),
+      };
+      if (best === null || edgeGap < best.gap) {
+        best = { ...candidate, gap: edgeGap };
+      }
+    };
+    for (const box of staticPhysicsBoxes) {
+      tryBox(box);
+    }
+    for (const box of dynamicPhysicsBoxes) {
+      tryBox(box);
+    }
+    if (best === null) {
+      return null;
+    }
+    return { x: best.x, y: best.y, z: best.z };
+  };
   const onWindowBlur = (): void => {
     swipePointerId = null;
     pressedKeys.clear();
@@ -4620,6 +6239,8 @@ export const createMahjongTableScene = (
     resetCameraMotion();
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
+    camera.updateMatrix();
+    camera.updateMatrixWorld(true);
     syncPhysicsCharacterToCamera();
     resetMotionCalibration();
   };
@@ -4630,6 +6251,8 @@ export const createMahjongTableScene = (
     resetCameraMotion();
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
+    camera.updateMatrix();
+    camera.updateMatrixWorld(true);
     syncPhysicsCharacterToCamera();
     camera.fov = TABLE_CAMERA_FOV;
     camera.updateProjectionMatrix();
@@ -4637,10 +6260,9 @@ export const createMahjongTableScene = (
   };
   const setFocusCalibrationVisibility = (): void => {
     if (focusCalibrationRoot !== null) {
-      // The calibration wing is part of the same walkable development map as
-      // the penthouse and streamed exploration areas. Camera presets should
-      // never hide the rest of the map to make the lab appear.
-      focusCalibrationRoot.visible = debugEnabled;
+      // The looking-focus room is a real ground-level play area. Debug mode
+      // adds the calibrated spawn preset, but never hides the authored room.
+      focusCalibrationRoot.visible = true;
     }
   };
   const setView = (view: SceneView): void => {
@@ -4753,6 +6375,48 @@ export const createMahjongTableScene = (
       persistDebugPreferences();
       return;
     }
+    if (preset === "climbingGym") {
+      // The climbing section is an active parkour test target and remains in
+      // seat mode so movement and edge logic continue to run.
+      activeView = "seat";
+      orbitControls.enabled = false;
+      firstPersonControls.enabled = true;
+      if (firstPersonControls.isLocked) {
+        firstPersonControls.unlock();
+      }
+      onWindowBlur();
+      firstPersonGroundY = CLIMBING_GYM_RUN_Y;
+      eyeHeight = STANDING_EYE_HEIGHT;
+      isCrouched = false;
+      jumpOffset = 0;
+      verticalVelocity = 0;
+      grounded = true;
+      forwardVelocity = 0;
+      strafeVelocity = 0;
+      isSprinting = false;
+      lastForwardTapAt = Number.NEGATIVE_INFINITY;
+      resetCameraMotion();
+      physicsCharacterPosition = null;
+      camera.position.set(
+        CLIMBING_GYM_PRESET_START_X + 0.55,
+        CLIMBING_GYM_RUN_Y + STANDING_EYE_HEIGHT,
+        CLIMBING_GYM_PRESET_START_Z,
+      );
+      camera.lookAt(
+        CLIMBING_GYM_PRESET_TARGET_X,
+        CLIMBING_GYM_RUN_Y + STANDING_EYE_HEIGHT,
+        CLIMBING_GYM_PRESET_TARGET_Z,
+      );
+      debugFovOverride = DEBUG_STANDING_FOV;
+      camera.fov = debugFovOverride;
+      camera.updateProjectionMatrix();
+      camera.updateMatrix();
+      camera.updateMatrixWorld(true);
+      syncPhysicsCharacterToCamera();
+      resetMotionCalibration();
+      persistDebugPreferences();
+      return;
+    }
 
     activeView = "overhead";
     firstPersonControls.enabled = false;
@@ -4785,6 +6449,25 @@ export const createMahjongTableScene = (
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
       camera.position.y = FOCUS_CALIBRATION_DECK_HEIGHT + eyeHeight;
+      camera.quaternion.fromArray(state.cameraQuaternion).normalize();
+      camera.fov = THREE.MathUtils.clamp(state.cameraFov, 30, 100);
+      debugFovOverride = camera.fov;
+      camera.updateProjectionMatrix();
+      camera.updateMatrix();
+      camera.updateMatrixWorld(true);
+      syncPhysicsCharacterToCamera();
+      return;
+    }
+    if (state.activeDebugPreset === "climbingGym") {
+      if (!debugEnabled) {
+        return;
+      }
+      setDebugCameraPreset("climbingGym");
+      firstPersonGroundY = CLIMBING_GYM_RUN_Y;
+      isCrouched = state.isCrouched;
+      eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
+      camera.position.fromArray(state.cameraPosition);
+      camera.position.y = CLIMBING_GYM_RUN_Y + eyeHeight;
       camera.quaternion.fromArray(state.cameraQuaternion).normalize();
       camera.fov = THREE.MathUtils.clamp(state.cameraFov, 30, 100);
       debugFovOverride = camera.fov;
@@ -4869,38 +6552,19 @@ export const createMahjongTableScene = (
   };
 
   const setDebugFogDensity = (density: number): void => {
-    debugFogDensity = THREE.MathUtils.clamp(density, 0.004, 0.04);
-    const fog = scene.fog;
-    if (fog instanceof THREE.Fog) {
-      fog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
-      fog.near = THREE.MathUtils.clamp(fog.far * 0.3, 4, 12);
+    debugFogDensity = THREE.MathUtils.clamp(density, 0, 0.04);
+    if (debugFogDensity === 0) {
+      scene.fog = null;
+      persistDebugPreferences();
+      return;
     }
-    persistDebugPreferences();
-  };
-
-  const skylineLayerNames: Readonly<Record<VisualSkylineLayer, string>> = {
-    near: "NearRooftops",
-    hero: "HeroLandmarks",
-    fillers: "SkylineFillers",
-    distant: "DistantMatte",
-  };
-
-  const setDebugSkylineLayerVisible = (layer: VisualSkylineLayer, visible: boolean): void => {
-    debugSkylineLayers[layer] = visible;
-    const object = skylineRoot?.getObjectByName(skylineLayerNames[layer]);
-    if (object !== undefined) {
-      object.visible = visible;
-    }
-    if (skylineRoot !== null) {
-      skylineRoot.visible = Object.values(debugSkylineLayers).some(Boolean);
-    }
-    persistDebugPreferences();
-  };
-
-  const setDebugSkylineVisible = (visible: boolean): void => {
-    for (const layer of Object.keys(debugSkylineLayers) as VisualSkylineLayer[]) {
-      setDebugSkylineLayerVisible(layer, visible);
-    }
+    const nextFog =
+      scene.fog instanceof THREE.Fog
+        ? scene.fog
+        : new THREE.Fog(COLORS.haze, 10, 34);
+    scene.fog = nextFog;
+    nextFog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
+    nextFog.near = THREE.MathUtils.clamp(nextFog.far * 0.3, 4, 12);
     persistDebugPreferences();
   };
 
@@ -4909,14 +6573,15 @@ export const createMahjongTableScene = (
     debugSunElevation = THREE.MathUtils.clamp(elevation, 0.25, 1.45);
     const light = getSunLight();
     if (light !== null) {
-      const horizontal = Math.cos(debugSunElevation) * 10;
+      const horizontal = Math.cos(debugSunElevation) * SKY_SUN_DISTANCE;
       light.position.set(
         Math.cos(debugSunYaw) * horizontal,
-        Math.sin(debugSunElevation) * 10,
+        Math.sin(debugSunElevation) * SKY_SUN_DISTANCE,
         Math.sin(debugSunYaw) * horizontal,
       );
       light.lookAt(0, 0.8, 0);
     }
+    updateSkySunReference();
     persistDebugPreferences();
   };
 
@@ -4926,6 +6591,7 @@ export const createMahjongTableScene = (
     if (light !== null) {
       light.intensity = debugSunIntensity;
     }
+    updateSkySunReference();
     persistDebugPreferences();
   };
 
@@ -5049,12 +6715,6 @@ export const createMahjongTableScene = (
     setDebugBokehEnabled(preset === "high");
     setDebugAmbientAnimationRate(profile.ambientAnimationRate);
     setDebugGlassMode(profile.glassMode);
-    for (const name of ["EmpireStateBuildingLOD", "OneVanderbiltLOD", "ChryslerBuildingLOD"]) {
-      const lod = scene.getObjectByName(name);
-      if (lod instanceof THREE.LOD && lod.levels[1] !== undefined) {
-        lod.levels[1].distance = 14 * profile.skylineLodBias;
-      }
-    }
     container.dataset.sceneQuality = preset;
     persistDebugPreferences();
   };
@@ -5099,18 +6759,16 @@ export const createMahjongTableScene = (
     version: VISUAL_DEBUG_PREFERENCES_VERSION,
     cameraPreset: null,
     fov: DEBUG_STANDING_FOV,
-    exposure: 0.98,
+    exposure: 1.02,
     toneMapper: "agx",
-    fogDensity: 0.018,
-    skylineVisible: true,
-    skylineLayers: { near: true, hero: true, fillers: true, distant: true },
+    fogDensity: 0.028,
     sunYaw: -0.59,
     sunElevation: 0.86,
-    sunIntensity: 3.45,
-    environmentIntensity: 1,
+    sunIntensity: 2.2,
+    environmentIntensity: 0.82,
     environmentRotation: 0,
-    redAccentIntensity: 1,
-    cyanEmissiveIntensity: 1,
+    redAccentIntensity: 1.1,
+    cyanEmissiveIntensity: 1.05,
     shadowQuality: quality.shadows,
     qualityMode:
       options.quality === undefined || options.quality === "auto" ? "adaptive" : options.quality,
@@ -5156,12 +6814,6 @@ export const createMahjongTableScene = (
     setDebugCameraBobEnabled(preferences.cameraBobEnabled);
     setDebugWireframe(preferences.wireframe);
     setDebugBoundsVisible(preferences.boundsVisible);
-    for (const layer of Object.keys(debugSkylineLayers) as VisualSkylineLayer[]) {
-      setDebugSkylineLayerVisible(layer, preferences.skylineLayers[layer]);
-    }
-    if (skylineRoot !== null) {
-      skylineRoot.visible = preferences.skylineVisible;
-    }
     setDebugFov(preferences.fov);
   };
 
@@ -5175,7 +6827,7 @@ export const createMahjongTableScene = (
     saveDebugPreferences();
   };
 
-  const getDebugSnapshot = (): SceneDebugSnapshot => ({
+const getDebugSnapshot = (): SceneDebugSnapshot => ({
     roomSeed,
     roomVariant: generatedRoomVariant,
     explorationArea,
@@ -5186,8 +6838,6 @@ export const createMahjongTableScene = (
     exposure: renderer.toneMappingExposure,
     toneMapper: toneMapperName(renderer.toneMapping),
     fogDensity: debugFogDensity,
-    skylineVisible: skylineRoot?.visible ?? true,
-    skylineLayers: { ...debugSkylineLayers },
     sunYaw: debugSunYaw,
     sunElevation: debugSunElevation,
     sunIntensity: debugSunIntensity,
@@ -5228,32 +6878,74 @@ export const createMahjongTableScene = (
   glassSurfaces = architectureResources.glassSurfaces;
   simpleGlassMaterial = architectureResources.simpleGlassMaterial;
   physicalGlassMaterial = architectureResources.physicalGlassMaterial;
-  generatedRoomVariant = createGeneratedRoom(scene, roomSeed).variant;
-  if (debugEnabled) {
-    const focusCalibration = createFocusCalibrationHallway(scene);
-    focusCalibrationRoot = focusCalibration.root;
-    focusCalibrationLabels = focusCalibration.labels;
-  }
+  const generatedRoom = createGeneratedRoom(
+    scene,
+    roomSeed,
+    authoredRoomMap,
+    architectureResources.surfaceTextures,
+  );
+  generatedRoomVariant = generatedRoom.variant;
+  const focusCalibration = createFocusCalibrationHallway(
+    scene,
+    architectureResources.surfaceTextures,
+  );
+  focusCalibrationRoot = focusCalibration.root;
+  focusCalibrationLabels = focusCalibration.labels;
   addExplorationGateway(scene);
-  explorationWorld = createExplorationWorld(scene, roomSeed, (area) => {
-    explorationArea = area;
-    options.onExplorationAreaChange?.(area);
-  });
+  explorationWorld = createExplorationWorld(
+    scene,
+    roomSeed,
+    architectureResources.surfaceTextures,
+    (area) => {
+      explorationArea = area;
+      options.onExplorationAreaChange?.(area);
+    },
+  );
   loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
-  addLighting(scene, quality);
-  const skylineResources = addSkyline(scene, quality.skylineLodBias);
-  skylineRoot = scene.getObjectByName("SkylineRoot") ?? null;
-  const ambientSkylineMaterials = skylineResources.ambient.skylineMaterials;
-  const table = createTable();
+  addLighting(scene);
+  scene.environmentIntensity = debugEnvironmentIntensity;
+  const table = createTable(architectureResources.surfaceTextures);
   scene.add(table);
-  const textureCache = createTextureCache();
+  const textureCache = createTextureCache(architectureResources.surfaceTextures.detail);
   const wallRoot = createWall(textureCache);
   scene.add(wallRoot);
   const anchors = createPresentationAnchors(scene, table, wallRoot);
-  addHand(scene, textureCache, new THREE.Vector3(0, 0, 1.5), 0, true, PLAYER_HAND);
-  addHand(scene, textureCache, new THREE.Vector3(0, 0, -1.5), Math.PI, false, PLAYER_HAND);
-  addHand(scene, textureCache, new THREE.Vector3(1.5, 0, 0), -Math.PI / 2, false, PLAYER_HAND);
-  addHand(scene, textureCache, new THREE.Vector3(-1.5, 0, 0), Math.PI / 2, false, PLAYER_HAND);
+  addHand(
+    scene,
+    textureCache,
+    architectureResources.surfaceTextures,
+    new THREE.Vector3(0, 0, 1.5),
+    0,
+    true,
+    PLAYER_HAND,
+  );
+  addHand(
+    scene,
+    textureCache,
+    architectureResources.surfaceTextures,
+    new THREE.Vector3(0, 0, -1.5),
+    Math.PI,
+    false,
+    PLAYER_HAND,
+  );
+  addHand(
+    scene,
+    textureCache,
+    architectureResources.surfaceTextures,
+    new THREE.Vector3(1.5, 0, 0),
+    -Math.PI / 2,
+    false,
+    PLAYER_HAND,
+  );
+  addHand(
+    scene,
+    textureCache,
+    architectureResources.surfaceTextures,
+    new THREE.Vector3(-1.5, 0, 0),
+    Math.PI / 2,
+    false,
+    PLAYER_HAND,
+  );
   addOpenMeld(scene, textureCache, new THREE.Vector3(0, 0, -0.98), Math.PI, [
     "characters.7",
     "characters.8",
@@ -5287,6 +6979,11 @@ export const createMahjongTableScene = (
       sunLight.position.y,
       Math.hypot(sunLight.position.x, sunLight.position.z),
     );
+  }
+  const skySunObject = scene.getObjectByName("SkySunReference");
+  if (skySunObject !== null) {
+    skySunReference = skySunObject;
+    updateSkySunReference();
   }
   cyanMaterials = [...architectureResources.ambient.cyanMaterials];
   redMaterials = [...architectureResources.ambient.redMaterials];
@@ -5329,7 +7026,6 @@ export const createMahjongTableScene = (
   debugBoundsRoot.visible = false;
   const debugBoundTargets = [
     scene.getObjectByName("EnvironmentRoot"),
-    skylineRoot,
     table,
     wallRoot,
   ];
@@ -5345,6 +7041,13 @@ export const createMahjongTableScene = (
 
   if (persistedDebugPreferences !== null) {
     applyDebugPreferences(persistedDebugPreferences);
+  } else {
+    setDebugFogDensity(debugFogDensity);
+    setDebugRedAccentIntensity(debugRedAccentIntensity);
+    setDebugCyanEmissiveIntensity(debugCyanEmissiveIntensity);
+    setDebugEnvironmentIntensity(debugEnvironmentIntensity);
+    setDebugSunDirection(debugSunYaw, debugSunElevation);
+    setDebugSunIntensity(debugSunIntensity);
   }
   suppressDebugPreferencesPersistence = false;
 
@@ -5352,6 +7055,13 @@ export const createMahjongTableScene = (
   // physics surfaces exist, so the first rendered frame starts in the same
   // place that the HMR remount replaced.
   restoreSceneState(persistedSceneState);
+  if (persistedSceneState === null && activeDebugPreset === null && initialView === "seat") {
+    setView("seat");
+  }
+  // Scene construction can invalidate the manually managed camera matrices;
+  // commit the restored/preset transform before the first composer render.
+  camera.updateMatrix();
+  camera.updateMatrixWorld(true);
 
   let previousWidth = 0;
   let previousHeight = 0;
@@ -5385,7 +7095,8 @@ export const createMahjongTableScene = (
   let animationFrame = 0;
   let disposed = false;
   container.dataset.physicsReady = "loading";
-  void createMahjongPhysics(createStaticPhysicsBoxes(scene)).then(
+  staticPhysicsBoxes = createStaticPhysicsBoxes(scene);
+  void createMahjongPhysics(staticPhysicsBoxes).then(
     (runtime) => {
       if (disposed) {
         runtime.dispose();
@@ -5393,7 +7104,9 @@ export const createMahjongTableScene = (
       }
       physicsRuntime = runtime;
       syncPhysicsCharacterToCamera();
-      runtime.setDynamicBoxes(explorationWorld?.getPhysicsBoxes() ?? []);
+      const nextPhysicsBoxes = explorationWorld?.getPhysicsBoxes() ?? [];
+      runtime.setDynamicBoxes(nextPhysicsBoxes);
+      dynamicPhysicsBoxes = nextPhysicsBoxes;
       appliedPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
       container.dataset.physicsReady = "true";
     },
@@ -5462,19 +7175,18 @@ export const createMahjongTableScene = (
       const baseIntensity = cyanMaterialBaseIntensity.get(material) ?? 0.28;
       material.emissiveIntensity = (baseIntensity + ambientPulse) * debugCyanEmissiveIntensity;
     }
-    const skylinePulse = Math.sin(ambientTime * 0.24) * 0.022 * debugAmbientAnimationRate;
-    for (const material of ambientSkylineMaterials) {
-      material.emissiveIntensity = (0.16 + skylinePulse) * debugCyanEmissiveIntensity;
-    }
     exposureLookDirection.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
     const windowFacing = THREE.MathUtils.clamp(-exposureLookDirection.z, 0, 1);
     const estimatedLuminance = THREE.MathUtils.clamp(
-      0.72 + debugEnvironmentIntensity * 0.24 + debugSunIntensity * 0.06 + windowFacing * 0.22,
+      0.72 +
+        debugEnvironmentIntensity * 0.24 +
+        (sunLight === null ? 0 : debugSunIntensity * 0.06) +
+        windowFacing * 0.22,
       0.35,
       2.4,
     );
     if (debugAutoExposureEnabled) {
-      const targetExposure = THREE.MathUtils.clamp(0.98 / estimatedLuminance, 0.58, 1.45);
+      const targetExposure = THREE.MathUtils.clamp(1.12 / estimatedLuminance, 0.64, 1.55);
       debugExposureTarget = THREE.MathUtils.damp(debugExposureTarget, targetExposure, 1.6, delta);
       renderer.toneMappingExposure = debugExposureTarget;
     }
@@ -5496,6 +7208,8 @@ export const createMahjongTableScene = (
     const firstPersonActive =
       firstPersonControls.enabled &&
       (firstPersonControls.isLocked || (isTouchDevice && activeView === "seat"));
+    let knockImpactDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
+    let knockCollisionCount = 0;
     if (firstPersonActive) {
       if (motionLookEnabled && motionTargetValid) {
         camera.quaternion.slerp(motionTargetQuaternion, 1 - Math.exp(-18 * delta));
@@ -5593,17 +7307,55 @@ export const createMahjongTableScene = (
           y: verticalVelocity * delta,
           z: desiredHorizontalDelta.z,
         });
+        knockImpactDelta = {
+          x: desiredHorizontalDelta.x,
+          y: 0,
+          z: desiredHorizontalDelta.z,
+        };
+        knockCollisionCount = movement.collisions;
         const clampedPosition: PhysicsVector = {
           x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
           y: movement.position.y,
           z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
         };
+        let ledgeGrabTarget: PhysicsVector | null = null;
+        if (
+          !grounded &&
+          !movement.grounded &&
+          verticalVelocity <= 0 &&
+          movement.collisions > 0 &&
+          jumpOffset > 0.05 &&
+          desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002
+        ) {
+          ledgeGrabTarget = resolveLedgeGrabTarget(
+            characterPosition,
+            desiredHorizontalDelta,
+            characterPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
+          );
+        }
+        if (ledgeGrabTarget !== null) {
+          const clampedX = THREE.MathUtils.clamp(
+            ledgeGrabTarget.x,
+            WORLD_BOUNDS.minX,
+            WORLD_BOUNDS.maxX,
+          );
+          const clampedZ = THREE.MathUtils.clamp(
+            ledgeGrabTarget.z,
+            WORLD_BOUNDS.minZ,
+            WORLD_BOUNDS.maxZ,
+          );
+          clampedPosition.x = clampedX;
+          clampedPosition.z = clampedZ;
+          clampedPosition.y = ledgeGrabTarget.y;
+          grounded = true;
+          verticalVelocity = 0;
+        }
         physicsCharacterPosition = clampedPosition;
-        grounded = movement.grounded;
+        grounded = ledgeGrabTarget === null ? movement.grounded : true;
+        jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
         if (grounded && verticalVelocity < 0) {
           verticalVelocity = 0;
         }
-        jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
         camera.position.x = clampedPosition.x;
         camera.position.z = clampedPosition.z;
         baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
@@ -5690,9 +7442,19 @@ export const createMahjongTableScene = (
     // The focus lab is part of the same streamed world, so moving through it
     // must continue loading and retaining the surrounding development map.
     explorationWorld?.update(camera.position);
+    explorationWorld?.updateKnockables(
+      delta,
+      camera.position,
+      knockImpactDelta,
+      knockCollisionCount,
+      grounded,
+      physicsRuntime?.getDynamicBodyStates() ?? [],
+    );
     const nextPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
     if (physicsRuntime !== null && nextPhysicsVersion !== appliedPhysicsVersion) {
-      physicsRuntime.setDynamicBoxes(explorationWorld?.getPhysicsBoxes() ?? []);
+      const nextPhysicsBoxes = explorationWorld?.getPhysicsBoxes() ?? [];
+      physicsRuntime.setDynamicBoxes(nextPhysicsBoxes);
+      dynamicPhysicsBoxes = nextPhysicsBoxes;
       appliedPhysicsVersion = nextPhysicsVersion;
     }
     loadedExplorationChunks = explorationWorld?.getLoadedChunkCount() ?? 0;
@@ -5807,8 +7569,6 @@ export const createMahjongTableScene = (
       setExposure: setDebugExposure,
       setToneMapper: setDebugToneMapper,
       setFogDensity: setDebugFogDensity,
-      setSkylineVisible: setDebugSkylineVisible,
-      setSkylineLayerVisible: setDebugSkylineLayerVisible,
       setSunDirection: setDebugSunDirection,
       setSunIntensity: setDebugSunIntensity,
       setEnvironmentIntensity: setDebugEnvironmentIntensity,
@@ -5904,8 +7664,10 @@ export const createMahjongTableScene = (
       gtaoPass.dispose();
       bokehPass.dispose();
       composer.dispose();
-      skylineResources.texture.dispose();
       architectureResources.teacherTexture.dispose();
+      for (const texture of Object.values(architectureResources.surfaceTextures)) {
+        texture.dispose();
+      }
       textureCache.back.dispose();
       for (const texture of textureCache.face.values()) {
         texture.dispose();

@@ -406,7 +406,20 @@ button[aria-pressed="true"] {
   font-size: 0.68rem;
   max-height: calc(100dvh - 2rem);
   overflow-y: auto;
+  overflow-x: hidden;
   pointer-events: auto;
+}
+
+.scene-debug-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgb(255 255 255 / 14%);
+  background: rgb(8 17 19 / 90%);
 }
 
 .scene-debug-heading {
@@ -414,23 +427,21 @@ button[aria-pressed="true"] {
   align-items: baseline;
   justify-content: space-between;
   gap: 0.7rem;
-  padding-bottom: 0.25rem;
-  border-bottom: 1px solid rgb(255 255 255 / 14%);
   letter-spacing: 0.05em;
   text-transform: uppercase;
-}
-
-.scene-debug-panel .scene-debug-toggle {
   width: 100%;
   min-height: 2.75rem;
   padding: 0.45rem 0;
   color: #eef4f1;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid rgb(255 255 255 / 14%);
   border-radius: 0;
   font: inherit;
   text-align: left;
+}
+
+.scene-debug-panel .scene-debug-toggle {
+  border-bottom: 0;
 }
 
 .scene-debug-panel .scene-debug-toggle:hover {
@@ -449,6 +460,7 @@ button[aria-pressed="true"] {
   color: #081113;
   background: #a7f4f6;
 }
+
 
 .scene-debug-status {
   margin-left: auto;
@@ -657,9 +669,9 @@ button[aria-pressed="true"] {
 .mobile-touch-controls {
   position: absolute;
   z-index: 4;
-  right: max(1rem, env(safe-area-inset-right));
-  bottom: max(1rem, env(safe-area-inset-bottom));
-  left: max(1rem, env(safe-area-inset-left));
+  right: max(0.35rem, env(safe-area-inset-right));
+  bottom: max(0.35rem, env(safe-area-inset-bottom));
+  left: max(0.35rem, env(safe-area-inset-left));
   display: flex;
   align-items: end;
   justify-content: space-between;
@@ -739,8 +751,10 @@ button[aria-pressed="true"] {
 
 .mobile-action-controls {
   display: flex;
+  flex-direction: column;
   align-items: end;
   gap: 0.45rem;
+  margin-left: auto;
   pointer-events: auto;
 }
 
@@ -909,20 +923,20 @@ button[aria-pressed="true"] {
 
   .mobile-joystick,
   .mobile-action-button {
-    min-width: 2.8rem;
-    min-height: 2.8rem;
+    min-width: 5.6rem;
+    min-height: 5.6rem;
     font-size: 1rem;
   }
 
   .mobile-joystick {
-    width: 5.8rem;
-    height: 5.8rem;
+    width: 11.6rem;
+    height: 11.6rem;
   }
 
   .mobile-joystick-knob {
-    width: 2.4rem;
-    height: 2.4rem;
-    margin: -1.2rem 0 0 -1.2rem;
+    width: 4.8rem;
+    height: 4.8rem;
+    margin: -2.4rem 0 0 -2.4rem;
   }
 
   .mobile-action-button {

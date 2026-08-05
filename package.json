@@ -9,7 +9,7 @@
     "pnpm": ">=11 <12"
   },
   "scripts": {
-    "dev": "pnpm build:packages && concurrently --kill-others --names server,web \"pnpm --filter @hk-mahjong/server dev\" \"pnpm --filter @hk-mahjong/web dev\"",
+    "dev": "concurrently --kill-others --names server,web \"pnpm --filter @hk-mahjong/server dev\" \"pnpm --filter @hk-mahjong/web dev\"",
     "build:packages": "pnpm --filter \"./packages/**\" --workspace-concurrency=1 run build",
     "build": "pnpm build:packages && pnpm --filter @hk-mahjong/cli build && pnpm --filter @hk-mahjong/web build && pnpm --filter @hk-mahjong/server build",
     "start": "node apps/server/dist/index.js",

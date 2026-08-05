@@ -17,7 +17,6 @@ import type {
   VisualGlassMode,
   VisualQualityMode,
   VisualShadowQuality,
-  VisualSkylineLayer,
   VisualToneMapper,
 } from "./scene/mahjong-table.js";
 
@@ -30,9 +29,9 @@ const debugCameraPresets: readonly {
 }[] = [
   { value: "table", label: "Table" },
   { value: "roomReveal", label: "Room reveal" },
-  { value: "skylineReview", label: "Skyline review" },
   { value: "assetReview", label: "Asset review" },
   { value: "focusCalibration", label: "Focus calibration" },
+  { value: "climbingGym", label: "Climbing gym" },
 ];
 
 const debugToneMappers: readonly { readonly value: VisualToneMapper; readonly label: string }[] = [
@@ -59,15 +58,104 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
     { value: "low", label: "Low" },
   ];
 
-const debugSkylineLayers: readonly {
-  readonly value: VisualSkylineLayer;
-  readonly label: string;
-}[] = [
-  { value: "near", label: "Near rooftops" },
-  { value: "hero", label: "Hero landmarks" },
-  { value: "fillers", label: "Filler skyline" },
-  { value: "distant", label: "Distant matte" },
-];
+const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
+const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
+const VISUAL_DEBUG_STATE_DEBOUNCE_MS = 400;
+
+interface PersistedVisualDebugScene {
+  readonly roomSeed: string;
+  readonly roomVariant: string;
+  readonly explorationArea: string;
+  readonly cameraPreset: VisualCameraPreset | null;
+  readonly fov: number;
+  readonly exposure: number;
+  readonly toneMapper: VisualToneMapper;
+  readonly fogDensity: number;
+  readonly sunYaw: number;
+  readonly sunElevation: number;
+  readonly sunIntensity: number;
+  readonly environmentIntensity: number;
+  readonly environmentRotation: number;
+  readonly redAccentIntensity: number;
+  readonly cyanEmissiveIntensity: number;
+  readonly shadowQuality: VisualShadowQuality;
+  readonly quality: VisualQualityMode;
+  readonly glassMode: VisualGlassMode;
+  readonly ambientAnimationRate: number;
+  readonly dprCap: number;
+  readonly wireframe: boolean;
+  readonly boundsVisible: boolean;
+  readonly bokehEnabled: boolean;
+  readonly bokehStrength: number;
+  readonly ambientOcclusionEnabled: boolean;
+  readonly autoExposureEnabled: boolean;
+  readonly cameraShiftEnabled: boolean;
+  readonly cameraBobEnabled: boolean;
+}
+
+interface PersistedVisualDebugState {
+  readonly savedAt: string;
+  readonly scene: PersistedVisualDebugScene;
+}
+
+const buildPersistedVisualDebugScene = (
+  snapshot: SceneDebugSnapshot,
+): PersistedVisualDebugScene => ({
+  roomSeed: snapshot.roomSeed,
+  roomVariant: snapshot.roomVariant,
+  explorationArea: snapshot.explorationArea,
+  cameraPreset: snapshot.cameraPreset,
+  fov: snapshot.fov,
+  exposure: snapshot.exposure,
+  toneMapper: snapshot.toneMapper,
+  fogDensity: snapshot.fogDensity,
+  sunYaw: snapshot.sunYaw,
+  sunElevation: snapshot.sunElevation,
+  sunIntensity: snapshot.sunIntensity,
+  environmentIntensity: snapshot.environmentIntensity,
+  environmentRotation: snapshot.environmentRotation,
+  redAccentIntensity: snapshot.redAccentIntensity,
+  cyanEmissiveIntensity: snapshot.cyanEmissiveIntensity,
+  shadowQuality: snapshot.shadowQuality,
+  quality: snapshot.quality,
+  glassMode: snapshot.glassMode,
+  ambientAnimationRate: snapshot.ambientAnimationRate,
+  dprCap: snapshot.dprCap,
+  wireframe: snapshot.wireframe,
+  boundsVisible: snapshot.boundsVisible,
+  bokehEnabled: snapshot.bokehEnabled,
+  bokehStrength: snapshot.bokehStrength,
+  ambientOcclusionEnabled: snapshot.ambientOcclusionEnabled,
+  autoExposureEnabled: snapshot.autoExposureEnabled,
+  cameraShiftEnabled: snapshot.cameraShiftEnabled,
+  cameraBobEnabled: snapshot.cameraBobEnabled,
+});
+
+const readMotionLookPreference = (): boolean => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.sessionStorage.getItem(MOTION_LOOK_PREFERENCE_STORAGE_KEY) === "enabled";
+  } catch {
+    return false;
+  }
+};
+
+const writeMotionLookPreference = (enabled: boolean): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (enabled) {
+      window.sessionStorage.setItem(MOTION_LOOK_PREFERENCE_STORAGE_KEY, "enabled");
+    } else {
+      window.sessionStorage.removeItem(MOTION_LOOK_PREFERENCE_STORAGE_KEY);
+    }
+  } catch {
+    // Session storage is intentionally best-effort here.
+  }
+};
 
 interface VisualDebugPanelProps {
   readonly mount: MahjongTableMount;
@@ -87,6 +175,8 @@ const VisualDebugPanel = ({
   const [snapshot, setSnapshot] = React.useState<SceneDebugSnapshot>(() =>
     mount.debug.getSnapshot(),
   );
+  const debugStateSaveTimeoutRef = React.useRef<number | null>(null);
+  const debugStatePayloadRef = React.useRef("");
   const [isExpanded, setIsExpanded] = React.useState(() => !isMobile);
   const [roomSeedDraft, setRoomSeedDraft] = React.useState(
     () => mount.debug.getSnapshot().roomSeed,
@@ -97,6 +187,40 @@ const VisualDebugPanel = ({
     }, 500);
     return () => window.clearInterval(interval);
   }, [mount]);
+  React.useEffect(() => {
+    if (debugStateSaveTimeoutRef.current !== null) {
+      window.clearTimeout(debugStateSaveTimeoutRef.current);
+    }
+    // Compare only the stable debug settings. `savedAt` must be generated when
+    // the request is sent, not while sampling the live snapshot, or every
+    // telemetry refresh will look like a change and write the artifact again.
+    // Focus distance and pupil size are live autofocus telemetry, so they are
+    // deliberately not part of the persisted settings payload.
+    const scene = buildPersistedVisualDebugScene(snapshot);
+    const scenePayload = JSON.stringify(scene);
+    if (scenePayload !== debugStatePayloadRef.current) {
+      debugStatePayloadRef.current = scenePayload;
+      debugStateSaveTimeoutRef.current = window.setTimeout(() => {
+        const payload: PersistedVisualDebugState = {
+          savedAt: new Date().toISOString(),
+          scene,
+        };
+        void fetch(VISUAL_DEBUG_STATE_ENDPOINT, {
+          body: JSON.stringify(payload),
+          headers: { "Content-Type": "application/json" },
+          method: "POST",
+        }).catch(() => {
+          // Best-effort persistence so visual tuning interaction always remains
+          // responsive even if the local write endpoint is unavailable.
+        });
+      }, VISUAL_DEBUG_STATE_DEBOUNCE_MS);
+    }
+    return () => {
+      if (debugStateSaveTimeoutRef.current !== null) {
+        window.clearTimeout(debugStateSaveTimeoutRef.current);
+      }
+    };
+  }, [snapshot]);
   React.useEffect(() => {
     const nextSnapshot = mount.debug.getSnapshot();
     setSnapshot(nextSnapshot);
@@ -131,14 +255,6 @@ const VisualDebugPanel = ({
   };
   const setFogDensity = (density: number): void => {
     mount.debug.setFogDensity(density);
-    refresh();
-  };
-  const setSkylineVisible = (visible: boolean): void => {
-    mount.debug.setSkylineVisible(visible);
-    refresh();
-  };
-  const setSkylineLayerVisible = (layer: VisualSkylineLayer, visible: boolean): void => {
-    mount.debug.setSkylineLayerVisible(layer, visible);
     refresh();
   };
   const setSunDirection = (yaw: number, elevation: number): void => {
@@ -217,47 +333,49 @@ const VisualDebugPanel = ({
     mount.debug.resetDefaults();
     refresh();
   };
+  const openFocusCalibration = (): void => {
+    setCameraPreset("focusCalibration");
+    mount.debug.teleportToFocusLab();
+    setIsExpanded(true);
+  };
+  const openClimbingGym = (): void => {
+    setCameraPreset("climbingGym");
+    setIsExpanded(true);
+  };
   const radiansToDegrees = (radians: number): number => (radians * 180) / Math.PI;
   return (
     <aside className="scene-debug-panel" aria-label="Visual development controls">
-      <button
-        aria-controls="scene-debug-controls"
-        aria-expanded={isExpanded}
-        aria-label={isExpanded ? "Collapse visual debug controls" : "Expand visual debug controls"}
-        className="scene-debug-heading scene-debug-toggle"
-        onClick={() => setIsExpanded((expanded) => !expanded)}
-        type="button"
-      >
-        <strong>Visual debug</strong>
-        <span className="scene-debug-status">
-          {snapshot.qualityMode} · {snapshot.quality} · {formatMetric(snapshot.fps)} FPS
-        </span>
-        <span aria-hidden="true" className="scene-debug-chevron">
-          ⌄
-        </span>
-      </button>
-      {!isExpanded ? (
+      <div className="scene-debug-header">
+        <button
+          aria-controls="scene-debug-controls"
+          aria-expanded={isExpanded}
+          aria-label={
+            isExpanded ? "Collapse visual debug controls" : "Expand visual debug controls"
+          }
+          className="scene-debug-heading scene-debug-toggle"
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+          type="button"
+        >
+          <strong>Visual debug</strong>
+          <span className="scene-debug-status">
+            {snapshot.qualityMode} · {snapshot.quality} · {formatMetric(snapshot.fps)} FPS
+          </span>
+          <span aria-hidden="true" className="scene-debug-chevron">
+            ⌄
+          </span>
+        </button>
+      </div>
+      <div hidden={!isExpanded} id="scene-debug-controls">
         <button
           className="scene-debug-focus-quick-action"
-          onClick={() => {
-            // Switch the camera preset to the focus‑calibration view.
-            setCameraPreset("focusCalibration");
-            // Teleport the camera directly to the focus‑lab platform so the
-            // user is positioned at the calibration ramp immediately.
-            // ``mount`` is the scene mount provided by the surrounding hook.
-            // The new debug method ``teleportToFocusLab`` is a safe wrapper that
-            // moves the active camera to the ramp's world position.
-            // The optional chaining protects against the mount being undefined
-            // during the very first render.
-            mount?.debug?.teleportToFocusLab?.();
-            setIsExpanded(true);
-          }}
+          onClick={openFocusCalibration}
           type="button"
         >
           Open focus calibration
         </button>
-      ) : null}
-      <div hidden={!isExpanded} id="scene-debug-controls">
+        <button className="scene-debug-focus-quick-action" onClick={openClimbingGym} type="button">
+          Open climbing gym
+        </button>
         <fieldset className="scene-debug-room">
           <legend>Generated room</legend>
           <div className="scene-debug-room-meta">
@@ -428,7 +546,7 @@ const VisualDebugPanel = ({
           Fog density <output>{snapshot.fogDensity.toFixed(3)}</output>
           <input
             max="0.04"
-            min="0.004"
+            min="0"
             onChange={(event) => setFogDensity(Number(event.currentTarget.value))}
             step="0.001"
             type="range"
@@ -547,29 +665,6 @@ const VisualDebugPanel = ({
             value={snapshot.dprCap}
           />
         </label>
-        <fieldset>
-          <legend>Skyline layers</legend>
-          <label className="scene-debug-check">
-            <input
-              checked={snapshot.skylineVisible}
-              onChange={(event) => setSkylineVisible(event.currentTarget.checked)}
-              type="checkbox"
-            />
-            All layers
-          </label>
-          {debugSkylineLayers.map((layer) => (
-            <label className="scene-debug-check" key={layer.value}>
-              <input
-                checked={snapshot.skylineLayers[layer.value]}
-                onChange={(event) =>
-                  setSkylineLayerVisible(layer.value, event.currentTarget.checked)
-                }
-                type="checkbox"
-              />
-              {layer.label}
-            </label>
-          ))}
-        </fieldset>
         <div className="scene-debug-checks">
           <label className="scene-debug-check">
             <input
@@ -651,7 +746,10 @@ const App = (): React.JSX.Element => {
   const [motionStatus, setMotionStatus] = React.useState<MotionLookStatus>(() =>
     isMobile ? "needs-permission" : "unsupported",
   );
-  const [isMotionLookEnabled, setIsMotionLookEnabled] = React.useState(false);
+  const [isMotionLookEnabled, setIsMotionLookEnabled] = React.useState<boolean>(() =>
+    isMobile ? readMotionLookPreference() : false,
+  );
+  const hasAttemptedMotionReenable = React.useRef(false);
   const [isCrouched, setIsCrouched] = React.useState(false);
   const mountRef = React.useRef<MahjongTableMount | null>(null);
   const [debugMount, setDebugMount] = React.useState<MahjongTableMount | null>(null);
@@ -676,14 +774,15 @@ const App = (): React.JSX.Element => {
       setDebugMount(mount);
       if (mount === null) {
         // When the scene unmounts we reset motion‑look related UI state.
-        setIsMotionLookEnabled(false);
         setIsCrouched(false);
         setExplorationArea("Penthouse");
+        hasAttemptedMotionReenable.current = false;
         return;
       }
       const snapshot = mount.debug.getSnapshot();
       setRoomVariant(snapshot.roomVariant);
       setExplorationArea(snapshot.explorationArea);
+      hasAttemptedMotionReenable.current = false;
 
       // Re‑apply the motion‑look flag after a hot‑reload or scene recreation.
       // The original implementation lost this flag, causing the enable/disable
@@ -703,8 +802,13 @@ const App = (): React.JSX.Element => {
   );
   const handleMotionLookStatusChange = React.useCallback((status: MotionLookStatus): void => {
     setMotionStatus(status);
-    if (status !== "ready") {
+    if (status === "denied" || status === "unsupported") {
       setIsMotionLookEnabled(false);
+      writeMotionLookPreference(false);
+      return;
+    }
+    if (status === "ready") {
+      writeMotionLookPreference(true);
     }
   }, []);
   const handleExplorationAreaChange = React.useCallback((area: string): void => {
@@ -714,6 +818,7 @@ const App = (): React.JSX.Element => {
     void (async (): Promise<void> => {
       const status = await mountRef.current?.requestMotionLook();
       if (status === "ready") {
+        writeMotionLookPreference(true);
         setIsMotionLookEnabled(true);
       }
     })();
@@ -729,10 +834,12 @@ const App = (): React.JSX.Element => {
     }
     if (isMotionLookEnabled) {
       mount.setMotionLookEnabled(false);
+      writeMotionLookPreference(false);
       setIsMotionLookEnabled(false);
       return;
     }
     mount.setMotionLookEnabled(true);
+    writeMotionLookPreference(true);
     setIsMotionLookEnabled(true);
   };
   const updateJoystick = (event: React.PointerEvent<HTMLButtonElement>): void => {
@@ -774,20 +881,44 @@ const App = (): React.JSX.Element => {
       true,
     );
   };
-  // Synchronize the underlying mount's motion‑look state with the UI toggle.
-  // This ensures that a hot‑reload or recreation of the scene does not lose
-  // the user's preference. We only apply the setting when the motion permission
-  // is ready, mirroring the logic in `toggleMotionLook`.
+  // Synchronize the underlying mount's motion‑look state with the persisted
+  // preference, and re-open permission flow only once per mount/rebuild.
   React.useEffect(() => {
     const mount = mountRef.current;
-    if (mount && motionStatus === "ready") {
+    if (mount === null || !isMobile) {
+      hasAttemptedMotionReenable.current = false;
+      return;
+    }
+    if (motionStatus === "ready") {
+      hasAttemptedMotionReenable.current = false;
       try {
         mount.setMotionLookEnabled(isMotionLookEnabled);
       } catch {
         // The mount may have been disposed during a concurrent hot‑reload.
       }
+      return;
     }
-  }, [isMotionLookEnabled, motionStatus]);
+    if (!isMotionLookEnabled || motionStatus !== "needs-permission") {
+      hasAttemptedMotionReenable.current = false;
+      return;
+    }
+    if (hasAttemptedMotionReenable.current) {
+      return;
+    }
+    hasAttemptedMotionReenable.current = true;
+    void (async (): Promise<void> => {
+      const status = await mount.requestMotionLook();
+      if (status === "ready") {
+        setIsMotionLookEnabled(true);
+      }
+    })();
+  }, [isMobile, isMotionLookEnabled, motionStatus]);
+
+  React.useEffect(() => {
+    if (motionStatus === "ready" && isMotionLookEnabled) {
+      writeMotionLookPreference(true);
+    }
+  }, [motionStatus, isMotionLookEnabled]);
   const resetJoystick = (): void => {
     const knob = joystickKnobRef.current;
     if (knob !== null) {
@@ -920,7 +1051,17 @@ const App = (): React.JSX.Element => {
               </p>
             )}
           </header>
-          <div className="scene-overlay scene-overlay-controls">
+          <div
+            className="scene-overlay scene-overlay-controls"
+            style={{
+              top: "max(0.7rem, env(safe-area-inset-top))",
+              left: "max(0.7rem, env(safe-area-inset-left))",
+              right: "auto",
+              bottom: "auto",
+              margin: 0,
+              alignSelf: "flex-start",
+            }}
+          >
             <div className="scene-actions" role="group" aria-label="Camera view">
               <button aria-pressed={view === "seat"} onClick={() => setView("seat")} type="button">
                 Seat view

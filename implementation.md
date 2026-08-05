@@ -95,6 +95,11 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The rendering pass now follows the supplied Mirror's Edge-style contract without copying its assets:
   broad white architectural planes, dark recessed voids, a sparse red directional line, pale cyan system
   light, a bright late-afternoon key, original Midtown landmark silhouettes, and limited penthouse props.
+- The cinematic material/lighting pass keeps that hierarchy explicit: restrained procedural grain replaces
+  repeated scratch noise, white architecture is separated from charcoal reveals by roughness and shadow,
+  the floor uses a slate clearcoat epoxy response, and AgX mapping combines a warm key with cyan fill,
+  lavender rim, and blue/lavender atmospheric haze. Adaptive exposure targets the high-key baseline while
+  retaining headroom for lacquer and tile highlights. Bokeh and depth-of-field focus behavior remain unchanged.
 - The play space is expanded to a 17.2 m × 13.4 m shell, with the first-person movement bounds widened to
   match so the room reads larger without changing the table layout.
 - The canvas resize path now coalesces `ResizeObserver` notifications and ignores unchanged
@@ -103,6 +108,8 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The shipping camera starts as a centered 45° composed table view, then supports click-to-capture pointer
   lock, mouse/touch look, and WASD/joystick movement. The debug-only overhead/orbit view and visual panel
   remain behind `?debug=1`.
+- The first-person seat preset commits the camera matrix before pointer lock, so the composed table view is
+  visible while the instructional overlay is waiting for interaction.
 - Pointer-lock state fades the instructional intro/footer overlays so the controlled scene stays clear.
 - The scene now resolves `high`, `medium`, or `low` presentation quality from an explicit option or
   conservative device-memory/core signals. Adaptive selects medium unless the browser reports at least 8 GB
@@ -138,10 +145,14 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The first-person controller now uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule.
   The floor and table remain explicit colliders, while meaningful meshes under the environment, generated room,
   and gateway roots are converted to coarse world-space AABBs. Streamed city buildings, props, and skybridges use
-  explicit rotated boxes; the dynamic set is rebuilt only when a new append-only chunk enters the 3×3 lookahead
-  window. Rendering geometry stays separate from collision geometry; decorative strips, floor inlays, tiles, and
-  skyline detail stay out of the blocking set. The existing bounded movement remains the fallback while the
-  inlined WASM initializes or if a browser cannot load it.
+  explicit rotated boxes; the streamed collider set is rebuilt only when a new append-only chunk enters the 3×3
+  lookahead window. Upright props are static blockers and become dynamic bodies after a knock, so walking no longer
+  passes through the development boxes. Rendering geometry stays separate from collision geometry; decorative
+  strips, floor inlays, tiles, and skyline detail stay out of the blocking set. The existing bounded movement
+  remains the fallback while the inlined WASM initializes or if a browser cannot load it.
+- Parkour-feel movement now includes a ledge-climb assist in first-person: when airborne and moving toward a top edge,
+  the kinematic capsule can snap to nearby walkable surfaces in a small vertical window, emulating a Mirror's Edge-
+  inspired edge grab rather than a hard stop.
 - The Bokeh/focus pass now follows the gaze ray and classifies tile, surface, and far-fallback targets. A tight
   five-ray neighborhood assists tile focus when the reticule falls into a narrow gap, without selecting an
   occluded tile. Accommodation uses separate near/far damping (about 0.4/0.65 seconds), and the blur envelope
@@ -162,12 +173,15 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The debug panel now has an accessible disclosure toggle. It starts collapsed on coarse-pointer devices
   so the mobile scene remains usable, while desktop visual tuning remains expanded by default; all controls
   remain available through the keyboard/touch toggle and the panel stays scrollable when expanded.
-- Debug mode now includes a Focus calibration map wing: a wide second-level hallway begins at a zero-metre gaze
-  plane, marks each metre through `2H`, and places staggered focus targets at close, halfway, hyperfocal, and
-  double-hyperfocal distances using the 4 mm reference eye model. A continuous physics-backed ramp connects the
-  ground terrain to the elevated deck, and the landing floor is widened so the starting target is not a narrow
-  edge. Selecting the preset keeps first-person movement and streamed-city updates active instead of switching to
-  an orbit camera or hiding the rest of the map.
+- The development map now has three authored, non-overlapping ground-level play areas. The penthouse, looking-focus
+  room, and climbing gym each occupy a clearly marked 50 m x 50 m square, with 10 m of open ground between them.
+  Streamed buildings, props, windows, bridges, and beacons are excluded from every square, while the existing
+  penthouse/table collision set remains at the origin. The focus room is a ground-level hallway at the east pad,
+  and the Mirror's Edge-style climbing gym is centered on the west pad for repeatable edge-grab tuning.
+- The `Focus calibration` preset still starts first-person movement at the beginning of the hallway, but its former
+  elevated deck and ramp are disabled so the whole room uses the shared ground plane. The `Climbing gym` preset
+  starts in the dedicated west play area, and area HUD text now reports `Penthouse`, `Looking focus room`, or
+  `Climbing gym` while the player crosses the three squares.
 - Tile body, face-plane, and material resources are cached by size/tile identity, including concealed
   `InstancedMesh` resources. Shader readiness uses a cancellable timer and first-render fallback; it does not
   force a synchronous compile that can block software WebGL or leave Three.js' `compileAsync` polling a removed
@@ -192,6 +206,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   contract. The visual debug menu separately persists its validated v1 preferences in `localStorage`,
   including skyline/building visibility, quality, lighting, post effects, motion, and camera controls; the
   `Reset debug defaults` action applies and stores the device-appropriate defaults in one step.
+- The visual debug artifact endpoint compares a stable tuning payload, adds `savedAt` only when sending,
+  and ignores requests whose scene payload is unchanged. This prevents the 500 ms telemetry refresh from
+  repeatedly writing the artifact and retriggering Vite HMR.
 - `three@0.185.1`, matching `@types/three@0.185.3`, and Apache-2.0 `@dimforge/rapier3d-compat@0.19.3`
   are the browser packages used by this lane. Online research checked the official Three.js ecosystem and
   CC0 texture sources; this prototype uses no external asset files so licensing can be reviewed before adding
@@ -201,9 +218,28 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   touch-capable smoke walked through South courtyard, East practice court, and North skybridge while the debug
   HUD stayed at 9 loaded chunks. The connected in-app browser's local-page policy was unavailable during this
   run, and headless Chromium can stall on software WebGL/GPU readback; no browser security control was bypassed.
+- The generated penthouse now consumes the checked-in `apps/web/src/scene/maps/penthouse.json` map asset.
+  The document is versioned and validated at scene creation, with exact metre positions, Y rotations, and
+  scales for named planter/divider/wall-panel/light-bar/sculpture entities. Editing that file is the direct
+  level-authoring workflow; Vite HMR remounts the scene and the renderer reconciles the edited entity list.
+- The scene material pass now creates a reusable linear detail texture and routes it through the shared
+  material factory as roughness and bump data. Penthouse floors, the focus ramp, and generated room floors
+  use a high-clearcoat wet epoxy response; neutral architecture, tiles, furniture, skyline masses, and
+  streamed-city materials inherit the same restrained micro-relief by default, while red/cyan accents retain
+  clean emissive surfaces for Mirror's Edge-style wayfinding.
+- The root `dev` task now starts the Fastify and Vite processes directly instead of rebuilding all nine
+  workspace packages serially on every startup. The browser's Vite aliases consume package sources in
+  development, and the production `pnpm build` path still performs the full package build.
 
 ## Next action
 
 Add focused Milestone 5 regressions for deletion, snapshot recovery, export/schema migration, hash
 tampering, and migration-ledger continuity; make the smallest repository fixes; then prove an exact
 restart/resume path before beginning dependent CLI/server integration.
+
+## Visual penthouse expansion checkpoint
+
+- The penthouse now fills the 50 m x 50 m authored play area with a 5 m interior ceiling and a continuous north floor-to-ceiling glazing wall.
+- The mahjong table remains centered on an enlarged presentation inset while fixed furniture is distributed sparsely around the perimeter.
+- The authored penthouse map uses a 48 m x 48 m interior floor and five deliberate accent entities; procedural room props are reduced to a low-density fallback.
+- Penthouse exploration clipping follows the expanded shell footprint, keeping streamed city geometry outside the room.

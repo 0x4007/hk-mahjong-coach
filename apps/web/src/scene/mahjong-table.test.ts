@@ -61,13 +61,11 @@ const sceneState: VisualSceneState = {
 
 const debugPreferences: VisualDebugPreferences = {
   version: 1,
-  cameraPreset: "skylineReview",
+  cameraPreset: "roomReveal",
   fov: 82,
   exposure: 1.12,
   toneMapper: "neutral",
   fogDensity: 0.023,
-  skylineVisible: false,
-  skylineLayers: { near: false, hero: false, fillers: false, distant: false },
   sunYaw: 0.4,
   sunElevation: 0.92,
   sunIntensity: 2.7,
@@ -165,10 +163,10 @@ describe("development scene state", () => {
     storage.setItem(key, JSON.stringify({ ...sceneState, cameraPosition: [0, -3, 0] }));
     expect(readVisualSceneState(storage, sceneState.roomSeed)).toBeNull();
 
-    storage.setItem(key, JSON.stringify({ ...sceneState, cameraPosition: [61, 1.65, 0] }));
+    storage.setItem(key, JSON.stringify({ ...sceneState, cameraPosition: [251, 1.65, 0] }));
     expect(readVisualSceneState(storage, sceneState.roomSeed)).toBeNull();
 
-    storage.setItem(key, JSON.stringify({ ...sceneState, cameraPosition: [0, 1.65, -53] }));
+    storage.setItem(key, JSON.stringify({ ...sceneState, cameraPosition: [0, 1.65, -251] }));
     expect(readVisualSceneState(storage, sceneState.roomSeed)).toBeNull();
   });
 });
@@ -198,7 +196,7 @@ describe("visual debug preferences", () => {
       key,
       JSON.stringify({
         ...debugPreferences,
-        skylineLayers: { ...debugPreferences.skylineLayers, hero: "visible" },
+        cameraPreset: "bogus" as unknown as VisualDebugPreferences["cameraPreset"],
       }),
     );
     expect(readVisualDebugPreferences(storage)).toBeNull();
@@ -207,20 +205,20 @@ describe("visual debug preferences", () => {
 
 describe("exploration room exclusion", () => {
   it("clips a boundary block into city-only rectangles", () => {
-    const source = { minX: -12, maxX: 12, minZ: 4, maxZ: 12 } as const;
+    const source = { minX: -30, maxX: 30, minZ: 20, maxZ: 30 } as const;
     const pieces = clipExplorationRectAroundPenthouse(source);
 
     expect(pieces.length).toBe(3);
     expect(pieces.every((piece) => isExplorationRectOutsidePenthouse(piece))).toBe(true);
     expect(pieces).toEqual(
       expect.arrayContaining([
-        { minX: -12, maxX: EXPLORATION_PENTHOUSE_BOUNDS.minX, minZ: 4, maxZ: 12 },
-        { minX: EXPLORATION_PENTHOUSE_BOUNDS.maxX, maxX: 12, minZ: 4, maxZ: 12 },
+        { minX: -30, maxX: EXPLORATION_PENTHOUSE_BOUNDS.minX, minZ: 20, maxZ: 30 },
+        { minX: EXPLORATION_PENTHOUSE_BOUNDS.maxX, maxX: 30, minZ: 20, maxZ: 30 },
         {
           minX: EXPLORATION_PENTHOUSE_BOUNDS.minX,
           maxX: EXPLORATION_PENTHOUSE_BOUNDS.maxX,
           minZ: EXPLORATION_PENTHOUSE_BOUNDS.maxZ,
-          maxZ: 12,
+          maxZ: 30,
         },
       ]),
     );
@@ -230,7 +228,7 @@ describe("exploration room exclusion", () => {
     expect(clipExplorationRectAroundPenthouse({ minX: -4, maxX: 4, minZ: -4, maxZ: 4 })).toEqual(
       [],
     );
-    const outside = { minX: 12, maxX: 16, minZ: 4, maxZ: 8 } as const;
+    const outside = { minX: 32, maxX: 36, minZ: 4, maxZ: 8 } as const;
     expect(clipExplorationRectAroundPenthouse(outside)).toEqual([outside]);
   });
 });
@@ -240,10 +238,10 @@ describe("append-only exploration chunks", () => {
     const scene = new THREE.Scene();
     const world = createExplorationWorld(scene, "append-only-test");
 
-    expect(world.getLoadedChunkCount()).toBe(255);
+    expect(world.getLoadedChunkCount()).toBe(121);
     world.update(new THREE.Vector3(16, 0, 0));
     const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBe(255);
+    expect(expandedCount).toBe(121);
 
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);

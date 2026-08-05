@@ -149,10 +149,15 @@
 - Collision coverage now expands beyond the table: the environment, generated room fixtures, glass, walls,
   furniture, and gateway are converted from meaningful render meshes into coarse world-space AABB colliders.
   Streamed city buildings, props, and skybridges contribute explicit rotated boxes as chunks enter the 3×3
-  lookahead window; Rapier rebuilds that dynamic set when new chunks are appended, while floors and decorative
-  strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle a physics
-  body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does not change
-  its collision layout.
+  lookahead window; Rapier replaces that streamed collider set when new chunks are appended. These boxes are
+  solid while props are upright and are replaced by dynamic bodies when a knockable prop is hit, while floors and
+  decorative strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle
+  a physics body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does
+  not change its collision layout.
+- When airborne and moving into a nearby top edge, first-person movement can perform a short edge-grab: if the
+  player is within a small height and approach window, the controller snaps the camera to the top of that
+  surface instead of stopping dead. This produces the requested parkour edge climb feel while keeping collision
+  authoritative through the Rapier capsule.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -160,6 +165,10 @@
   below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
   drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
   writes the safe snapshot before the next HMR reload.
+- The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only stable tuning
+  settings. Live autofocus telemetry and the write timestamp stay out of the change key, and the Vite
+  middleware skips writes whose scene payload is unchanged so visual tuning cannot create a self-triggered
+  HMR/write loop.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
   jump apex. Double-tapping W engages a 3× sprint that remains active while any movement key is held, so
@@ -197,11 +206,16 @@
   use distance-based `LOD` fallbacks. Every debug control is persisted in validated v1 `localStorage`,
   including the all-skyline and per-layer visibility switches, and `Reset debug defaults` restores the
   device-appropriate defaults and rewrites the stored preferences.
-- The `Focus calibration` debug preset places a clean, wide second-level hallway in the same walkable map, with
-  one-metre floor markers from `0` to `2H` and staggered small targets at close, halfway, hyperfocal, and
-  double-hyperfocal distances. Its H marker uses the 4 mm reference pupil (about 13.8 m). A continuous ramp
-  connects the ground terrain to the elevated deck, whose floor extends well behind and beside the starting target;
-  the streamed city remains visible and active while the first-person player walks through the lab.
+- The development map is divided into three independent ground-level play areas: the penthouse at the origin, the
+  looking focus room 60 m east, and the climbing gym 60 m west. Each area is marked as a 50 m x 50 m square with a
+  10 m open gap to its neighbor. Generated city buildings, props, windows, bridges, and beacons are rejected from
+  all three footprints, so the authored rooms remain visually and physically separate.
+- The `Focus calibration` debug preset now opens the looking focus room on the shared ground plane. The hallway still
+  marks each metre from `0` through `2H` and places the close, halfway, hyperfocal, and double-hyperfocal targets,
+  but the former elevated deck/ramp is no longer part of the navigation path.
+- The `Climbing gym` debug preset opens the west play area, where the compact ledge field and handrails remain
+  available for repeatable Mirror's Edge-style edge-grab tuning without sharing collision space with the penthouse
+  or focus room.
 - The debug panel header is an accessible disclosure control. It opens by default on desktop and starts
   collapsed for coarse-pointer/mobile devices, preserving a compact scene view; expanding it reveals the
   same scrollable controls without changing their runtime state.
@@ -241,6 +255,13 @@
   the local presentation transform seamless during development. The browser must continue to consume
   public observations when those surfaces are wired in; opponent hands must remain face-down until an
   engine event makes a tile public.
+- The generated penthouse is authored in `apps/web/src/scene/maps/penthouse.json`, not in browser state.
+  The version-1 document has `floor: { width, depth, rotationDegrees }` plus a complete `entities` array.
+  Each entity has a stable lowercase `id`, one of `planter`, `divider`, `wallPanel`, `lightBar`, or
+  `sculpture`, a metre-space `position: [x, y, z]`, optional Y `rotationDegrees`, and optional `scale`.
+  The array is authoritative: omitting an entity removes it. Runtime validation rejects bad bounds and
+  duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
+  objects.
 
 ## Commands
 
@@ -253,9 +274,27 @@ pnpm build
 pnpm start
 ```
 
+`pnpm dev` starts the Fastify and Vite development processes directly. It does not run the serial
+workspace package build first; Vite resolves the browser package sources for development, while
+`pnpm build` retains the complete package build for production artifacts.
+
 ## Material deviations
 
-None.
+- The visual-table scene now uses a shared procedural material detail channel. Neutral surfaces receive
+  low-amplitude roughness and bump variation with sparse linear grain, while the penthouse floor, generated
+  room panels, and focus ramp use a clearcoat physical epoxy response with a slate anchor color. Neutral
+  architecture is separated into warm/cool white, pale structural gray, and charcoal families so the scene
+  stays bright without flattening into gray. AgX filmic mapping, a warm directional key, cool cyan fill,
+  restrained lavender rim, and a blue/lavender haze establish the cinematic daylight baseline; the existing
+  bokeh/focus pass is unchanged. Adaptive exposure targets the high-key daylight baseline without clipping
+  the lacquer or tile whites. The same defaults are passed into tiles, furniture, skyline masses, and streamed-
+  city batches so new generated geometry inherits the architectural-futurist language without assets.
+- Red/cyan wayfinding remains deliberately emissive and comparatively clean; the detail channel is used
+  for response variation rather than decorative noise on the scene's command accents.
+
+## Penthouse level pass
+
+The visual penthouse occupies the complete 50 m x 50 m development play space. Its room shell is five metres high, the north side is a continuous floor-to-ceiling window wall, and the table stays centered in a larger inset. Perimeter furniture and map-authored accents are intentionally sparse so the table and skyline remain the focal points. The authored map floor is 48 m x 48 m to leave a clean structural margin inside the shell.
 
 ## Known limitations
 
