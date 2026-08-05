@@ -165,10 +165,10 @@
   below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
   drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
   writes the safe snapshot before the next HMR reload.
-- The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only stable tuning
-  settings. Live autofocus telemetry and the write timestamp stay out of the change key, and the Vite
-  middleware skips writes whose scene payload is unchanged so visual tuning cannot create a self-triggered
-  HMR/write loop.
+- The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only an explicit debug-UI
+  change. The panel keeps the latest dirty tuning payload in memory and sends it once with `keepalive` on
+  `pagehide`; its 500 ms live telemetry refresh never writes the artifact. The Vite middleware also skips
+  unchanged scene payloads, so normal rendering cannot create a self-triggered HMR/write loop.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
   jump apex. Double-tapping W engages a 3× sprint that remains active while any movement key is held, so

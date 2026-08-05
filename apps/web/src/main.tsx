@@ -60,7 +60,6 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
 
 const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
 const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
-const VISUAL_DEBUG_STATE_DEBOUNCE_MS = 400;
 
 interface PersistedVisualDebugScene {
   readonly roomSeed: string;
@@ -175,8 +174,11 @@ const VisualDebugPanel = ({
   const [snapshot, setSnapshot] = React.useState<SceneDebugSnapshot>(() =>
     mount.debug.getSnapshot(),
   );
-  const debugStateSaveTimeoutRef = React.useRef<number | null>(null);
-  const debugStatePayloadRef = React.useRef("");
+  const debugStateLastPayloadRef = React.useRef<string | null>(null);
+  const debugStatePendingRef = React.useRef<{
+    readonly scene: PersistedVisualDebugScene;
+    readonly scenePayload: string;
+  } | null>(null);
   const [isExpanded, setIsExpanded] = React.useState(() => !isMobile);
   const [roomSeedDraft, setRoomSeedDraft] = React.useState(
     () => mount.debug.getSnapshot().roomSeed,
@@ -188,45 +190,77 @@ const VisualDebugPanel = ({
     return () => window.clearInterval(interval);
   }, [mount]);
   React.useEffect(() => {
-    if (debugStateSaveTimeoutRef.current !== null) {
-      window.clearTimeout(debugStateSaveTimeoutRef.current);
-    }
-    // Compare only the stable debug settings. `savedAt` must be generated when
-    // the request is sent, not while sampling the live snapshot, or every
-    // telemetry refresh will look like a change and write the artifact again.
-    // Focus distance and pupil size are live autofocus telemetry, so they are
-    // deliberately not part of the persisted settings payload.
-    const scene = buildPersistedVisualDebugScene(snapshot);
-    const scenePayload = JSON.stringify(scene);
-    if (scenePayload !== debugStatePayloadRef.current) {
-      debugStatePayloadRef.current = scenePayload;
-      debugStateSaveTimeoutRef.current = window.setTimeout(() => {
-        const payload: PersistedVisualDebugState = {
-          savedAt: new Date().toISOString(),
-          scene,
-        };
-        void fetch(VISUAL_DEBUG_STATE_ENDPOINT, {
-          body: JSON.stringify(payload),
-          headers: { "Content-Type": "application/json" },
-          method: "POST",
-        }).catch(() => {
-          // Best-effort persistence so visual tuning interaction always remains
-          // responsive even if the local write endpoint is unavailable.
-        });
-      }, VISUAL_DEBUG_STATE_DEBOUNCE_MS);
-    }
-    return () => {
-      if (debugStateSaveTimeoutRef.current !== null) {
-        window.clearTimeout(debugStateSaveTimeoutRef.current);
+    // The snapshot also contains live presentation telemetry (autofocus,
+    // exposure, movement area, and camera easing). Establish the current scene
+    // payload as the baseline, but do not write it just because the panel is
+    // sampling that telemetry.
+    debugStateLastPayloadRef.current = JSON.stringify(
+      buildPersistedVisualDebugScene(mount.debug.getSnapshot()),
+    );
+    debugStatePendingRef.current = null;
+    const persistPendingDebugState = (): void => {
+      const pending = debugStatePendingRef.current;
+      if (pending === null) {
+        return;
       }
+      debugStatePendingRef.current = null;
+      debugStateLastPayloadRef.current = pending.scenePayload;
+      const payload: PersistedVisualDebugState = {
+        savedAt: new Date().toISOString(),
+        scene: pending.scene,
+      };
+      const serializedPayload = JSON.stringify(payload);
+      try {
+        if (
+          typeof navigator.sendBeacon === "function" &&
+          navigator.sendBeacon(
+            VISUAL_DEBUG_STATE_ENDPOINT,
+            new Blob([serializedPayload], { type: "application/json" }),
+          )
+        ) {
+          return;
+        }
+      } catch {
+        // Fall through to a keepalive fetch when Beacon is unavailable.
+      }
+      void fetch(VISUAL_DEBUG_STATE_ENDPOINT, {
+        body: serializedPayload,
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        method: "POST",
+      }).catch(() => {
+        // Best-effort persistence. The debug panel remains usable if the local
+        // development write endpoint is unavailable during pagehide.
+      });
     };
-  }, [snapshot]);
+    window.addEventListener("pagehide", persistPendingDebugState);
+    return () => {
+      window.removeEventListener("pagehide", persistPendingDebugState);
+      debugStatePendingRef.current = null;
+    };
+  }, [mount]);
   React.useEffect(() => {
     const nextSnapshot = mount.debug.getSnapshot();
     setSnapshot(nextSnapshot);
     setRoomSeedDraft(nextSnapshot.roomSeed);
   }, [mount]);
+  const markDebugStateDirty = (): void => {
+    // Only explicit controls call this function. The 500 ms snapshot refresh
+    // above is telemetry for the panel and must never be a persistence trigger.
+    const scene = buildPersistedVisualDebugScene(mount.debug.getSnapshot());
+    const scenePayload = JSON.stringify(scene);
+    if (scenePayload === debugStateLastPayloadRef.current) {
+      debugStatePendingRef.current = null;
+      return;
+    }
+    debugStatePendingRef.current = { scene, scenePayload };
+  };
   const refresh = (): void => setSnapshot(mount.debug.getSnapshot());
+  const applyDebugChange = (change: () => void): void => {
+    change();
+    refresh();
+    markDebugStateDirty();
+  };
   const submitRoomSeed = (event: React.SyntheticEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const normalizedSeed = normalizeVisualRoomSeed(roomSeedDraft);
@@ -234,104 +268,79 @@ const VisualDebugPanel = ({
     onRoomSeedSubmit(normalizedSeed);
   };
   const setQualityMode = (mode: VisualQualityMode): void => {
-    mount.debug.setQualityMode(mode);
-    refresh();
+    applyDebugChange(() => mount.debug.setQualityMode(mode));
   };
   const setCameraPreset = (preset: VisualCameraPreset): void => {
-    mount.debug.setCameraPreset(preset);
-    refresh();
+    applyDebugChange(() => mount.debug.setCameraPreset(preset));
   };
   const setFov = (fov: number): void => {
-    mount.debug.setFov(fov);
-    refresh();
+    applyDebugChange(() => mount.debug.setFov(fov));
   };
   const setExposure = (exposure: number): void => {
-    mount.debug.setExposure(exposure);
-    refresh();
+    applyDebugChange(() => mount.debug.setExposure(exposure));
   };
   const setToneMapper = (toneMapper: VisualToneMapper): void => {
-    mount.debug.setToneMapper(toneMapper);
-    refresh();
+    applyDebugChange(() => mount.debug.setToneMapper(toneMapper));
   };
   const setFogDensity = (density: number): void => {
-    mount.debug.setFogDensity(density);
-    refresh();
+    applyDebugChange(() => mount.debug.setFogDensity(density));
   };
   const setSunDirection = (yaw: number, elevation: number): void => {
-    mount.debug.setSunDirection(yaw, elevation);
-    refresh();
+    applyDebugChange(() => mount.debug.setSunDirection(yaw, elevation));
   };
   const setSunIntensity = (intensity: number): void => {
-    mount.debug.setSunIntensity(intensity);
-    refresh();
+    applyDebugChange(() => mount.debug.setSunIntensity(intensity));
   };
   const setEnvironmentIntensity = (intensity: number): void => {
-    mount.debug.setEnvironmentIntensity(intensity);
-    refresh();
+    applyDebugChange(() => mount.debug.setEnvironmentIntensity(intensity));
   };
   const setEnvironmentRotation = (rotation: number): void => {
-    mount.debug.setEnvironmentRotation(rotation);
-    refresh();
+    applyDebugChange(() => mount.debug.setEnvironmentRotation(rotation));
   };
   const setRedAccentIntensity = (intensity: number): void => {
-    mount.debug.setRedAccentIntensity(intensity);
-    refresh();
+    applyDebugChange(() => mount.debug.setRedAccentIntensity(intensity));
   };
   const setCyanEmissiveIntensity = (intensity: number): void => {
-    mount.debug.setCyanEmissiveIntensity(intensity);
-    refresh();
+    applyDebugChange(() => mount.debug.setCyanEmissiveIntensity(intensity));
   };
   const setShadowQuality = (quality: VisualShadowQuality): void => {
-    mount.debug.setShadowQuality(quality);
-    refresh();
+    applyDebugChange(() => mount.debug.setShadowQuality(quality));
   };
   const setDprCap = (dprCap: number): void => {
-    mount.debug.setDprCap(dprCap);
-    refresh();
+    applyDebugChange(() => mount.debug.setDprCap(dprCap));
   };
   const setBokehEnabled = (enabled: boolean): void => {
-    mount.debug.setBokehEnabled(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setBokehEnabled(enabled));
   };
   const setBokehIntensity = (intensity: number): void => {
-    mount.debug.setBokehIntensity(intensity);
-    refresh();
+    applyDebugChange(() => mount.debug.setBokehIntensity(intensity));
   };
   const setAmbientOcclusionEnabled = (enabled: boolean): void => {
-    mount.debug.setAmbientOcclusionEnabled(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setAmbientOcclusionEnabled(enabled));
   };
   const setAutoExposureEnabled = (enabled: boolean): void => {
-    mount.debug.setAutoExposureEnabled(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setAutoExposureEnabled(enabled));
   };
   const setAmbientAnimationRate = (rate: number): void => {
-    mount.debug.setAmbientAnimationRate(rate);
-    refresh();
+    applyDebugChange(() => mount.debug.setAmbientAnimationRate(rate));
   };
   const setGlassMode = (mode: VisualGlassMode): void => {
-    mount.debug.setGlassMode(mode);
-    refresh();
+    applyDebugChange(() => mount.debug.setGlassMode(mode));
   };
   const setCameraShiftEnabled = (enabled: boolean): void => {
-    mount.debug.setCameraShiftEnabled(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setCameraShiftEnabled(enabled));
   };
   const setCameraBobEnabled = (enabled: boolean): void => {
-    mount.debug.setCameraBobEnabled(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setCameraBobEnabled(enabled));
   };
   const setWireframe = (enabled: boolean): void => {
-    mount.debug.setWireframe(enabled);
-    refresh();
+    applyDebugChange(() => mount.debug.setWireframe(enabled));
   };
   const setBoundsVisible = (visible: boolean): void => {
-    mount.debug.setBoundsVisible(visible);
-    refresh();
+    applyDebugChange(() => mount.debug.setBoundsVisible(visible));
   };
   const resetDefaults = (): void => {
-    mount.debug.resetDefaults();
-    refresh();
+    applyDebugChange(() => mount.debug.resetDefaults());
   };
   const openFocusCalibration = (): void => {
     setCameraPreset("focusCalibration");

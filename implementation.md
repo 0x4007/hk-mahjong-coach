@@ -206,9 +206,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   contract. The visual debug menu separately persists its validated v1 preferences in `localStorage`,
   including skyline/building visibility, quality, lighting, post effects, motion, and camera controls; the
   `Reset debug defaults` action applies and stores the device-appropriate defaults in one step.
-- The visual debug artifact endpoint compares a stable tuning payload, adds `savedAt` only when sending,
-  and ignores requests whose scene payload is unchanged. This prevents the 500 ms telemetry refresh from
-  repeatedly writing the artifact and retriggering Vite HMR.
+- The visual debug panel keeps the artifact payload dirty only after an explicit debug-control change and
+  sends one `keepalive` request on `pagehide`, adding `savedAt` at that point. The 500 ms telemetry refresh
+  never writes the artifact, and the Vite middleware still ignores unchanged scene payloads to prevent
+  redundant HMR-triggering writes.
 - `three@0.185.1`, matching `@types/three@0.185.3`, and Apache-2.0 `@dimforge/rapier3d-compat@0.19.3`
   are the browser packages used by this lane. Online research checked the official Three.js ecosystem and
   CC0 texture sources; this prototype uses no external asset files so licensing can be reviewed before adding
