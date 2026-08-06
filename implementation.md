@@ -148,14 +148,18 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - First-person presentation now adds a small direction-change roll kick for sprinting lateral shifts and a
   damped speed-driven vertical camera bob. The effect is camera-only, resets on blur/view changes, and does
   not alter movement physics or the authoritative game state.
+- The scene reticule now reads the same damped first-person roll and head-bob offsets as the camera. Rapid lateral
+  direction changes therefore produce a matching lag, while the focus ray remains anchored to the configured
+  reticule position. The outer ring is inverted at -1x, while the center dot is tuned to a 5x total displacement.
 - The first-person controller now uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule.
   The floor and table remain explicit colliders, while meaningful meshes under the environment, generated room,
   and gateway roots are converted to coarse world-space AABBs. Streamed city buildings, props, and skybridges use
   explicit rotated boxes; the streamed collider set is rebuilt only when a new append-only chunk enters the 3×3
   lookahead window. Upright props are static blockers and become dynamic bodies after a knock, so walking no longer
   passes through the development boxes. Rendering geometry stays separate from collision geometry; decorative
-  strips, floor inlays, tiles, and skyline detail stay out of the blocking set. The existing bounded movement
-  remains the fallback while the inlined WASM initializes or if a browser cannot load it.
+  strips, floor inlays, tiles, and skyline detail stay out of the blocking set. If a browser cannot load the inlined
+  WASM, a coarse AABB runtime now feeds the same ledge/vault/wall traversal state machine instead of falling back to
+  unconstrained movement.
 - Parkour-feel movement now includes a ledge-climb assist in first-person: when airborne and moving toward a top edge,
   the kinematic capsule animates onto nearby walkable surfaces in a small vertical window, emulating a short Mirror's
   Edge-inspired climb rather than snapping instantly.
@@ -273,7 +277,7 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   diagnostics and is recorded as incomplete until that dirty lane is repaired.
 - The live browser controller now uses the same wall geometry after ledge handling. A valid tall-wall collision
   enters a persistent face-attached state, suppresses gravity, releases on backward input, and starts a two-phase
-  lift/cross transition on forward or jump input. The final position is passed back through Rapier for support;
+  lift/cross transition on forward or jump input after a short visible settle beat. The final position is passed back through Rapier for support;
   the browser footer documents the `Climbing gym` debug route and controls. The gym now starts on clear ground
   facing a dedicated tall training wall, and detection probes the safe pre-collision capsule position so a thin
   Rapier contact cannot be rejected after collision correction.

@@ -24,6 +24,7 @@ import {
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
+  resolveReticleZoomViewOffset,
   serializeVisualSceneState,
   writeVisualDebugPreferences,
   writeVisualSceneState,
@@ -142,6 +143,19 @@ describe("human-eye bokeh model", () => {
     expect(practicalHyperfocalFocus.intensity).toBe(0);
     expect(farFocus.intensity).toBe(0);
     expect(quarterBlurFocus.intensity).toBeGreaterThan(resolveHumanEyeBokeh(4, 4).intensity);
+  });
+});
+
+describe("reticule-anchored seat zoom", () => {
+  it("does not shift the standing projection", () => {
+    expect(resolveReticleZoomViewOffset(90)).toEqual({ x: 0, y: 0 });
+  });
+
+  it("moves the narrow projection pivot above a lower reticule", () => {
+    const offset = resolveReticleZoomViewOffset(45);
+
+    expect(offset.x).toBeCloseTo(0, 8);
+    expect(offset.y).toBeCloseTo(-0.1414213562, 8);
   });
 });
 

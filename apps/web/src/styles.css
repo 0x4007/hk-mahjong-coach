@@ -306,7 +306,10 @@ button[aria-pressed="true"] {
   border-radius: 50%;
   box-shadow: none;
   pointer-events: none;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) translate(
+    var(--scene-reticule-bob-x, 0px),
+    var(--scene-reticule-bob-y, 0px)
+  );
 }
 
 .scene-reticule span {
@@ -314,6 +317,10 @@ button[aria-pressed="true"] {
   height: 0.22rem;
   border-radius: 50%;
   background: #ffffff;
+  transform: translate(
+    var(--scene-reticule-dot-bob-x, 0px),
+    var(--scene-reticule-dot-bob-y, 0px)
+  );
 }
 
 .scene-overlay {

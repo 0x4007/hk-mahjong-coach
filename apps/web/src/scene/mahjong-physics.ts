@@ -52,6 +52,206 @@ export interface MahjongPhysicsRuntime {
   readonly dispose: () => void;
 }
 
+// The browser should normally use Rapier. Keep a small AABB controller for
+// browsers where the optional WASM module cannot initialise (for example a
+// restricted WebView). The scene traversal code consumes the same runtime
+// interface in both cases, so ledge/vault/wall ordering does not silently
+// disappear when the fallback is selected.
+const FALLBACK_CAPSULE_RADIUS = 0.26;
+const FALLBACK_CAPSULE_HALF_HEIGHT = 0.6;
+const FALLBACK_CAPSULE_CENTER_HEIGHT = FALLBACK_CAPSULE_HALF_HEIGHT + FALLBACK_CAPSULE_RADIUS;
+const FALLBACK_AUTOSTEP_HEIGHT = 0.28;
+const FALLBACK_EPSILON = 0.0005;
+
+const fallbackVerticalOverlap = (centerY: number, box: PhysicsBox): boolean => {
+  const bottom = centerY - FALLBACK_CAPSULE_CENTER_HEIGHT;
+  const top = centerY + FALLBACK_CAPSULE_CENTER_HEIGHT;
+  const boxBottom = box.center.y - box.halfExtents.y;
+  const boxTop = box.center.y + box.halfExtents.y;
+  return bottom < boxTop - FALLBACK_EPSILON && top > boxBottom + FALLBACK_EPSILON;
+};
+
+const fallbackHorizontalOverlap = (centerX: number, centerZ: number, box: PhysicsBox): boolean => {
+  const minX = box.center.x - box.halfExtents.x - FALLBACK_CAPSULE_RADIUS;
+  const maxX = box.center.x + box.halfExtents.x + FALLBACK_CAPSULE_RADIUS;
+  const minZ = box.center.z - box.halfExtents.z - FALLBACK_CAPSULE_RADIUS;
+  const maxZ = box.center.z + box.halfExtents.z + FALLBACK_CAPSULE_RADIUS;
+  return (
+    centerX >= minX - FALLBACK_EPSILON &&
+    centerX <= maxX + FALLBACK_EPSILON &&
+    centerZ >= minZ - FALLBACK_EPSILON &&
+    centerZ <= maxZ + FALLBACK_EPSILON
+  );
+};
+
+const fallbackSupportTop = (
+  centerX: number,
+  centerY: number,
+  centerZ: number,
+  boxes: readonly PhysicsBox[],
+): { readonly box: PhysicsBox; readonly topY: number } | null => {
+  const feetY = centerY - FALLBACK_CAPSULE_CENTER_HEIGHT;
+  let best: { readonly box: PhysicsBox; readonly topY: number } | null = null;
+  for (const box of boxes) {
+    const topY = box.center.y + box.halfExtents.y;
+    if (
+      topY > feetY + FALLBACK_EPSILON ||
+      feetY - topY > 0.14 + FALLBACK_EPSILON ||
+      !fallbackHorizontalOverlap(centerX, centerZ, box)
+    ) {
+      continue;
+    }
+    if (best === null || topY > best.topY) {
+      best = { box, topY };
+    }
+  }
+  return best;
+};
+
+/**
+ * Coarse, deterministic fallback for the Rapier character controller.
+ * Rotated boxes are treated as their world-space AABB; this is intentionally
+ * conservative, while the normal Rapier path remains authoritative where it
+ * is available.
+ */
+export const createFallbackMahjongPhysics = (
+  staticBoxes: readonly PhysicsBox[],
+): MahjongPhysicsRuntime => {
+  let activeBoxes: readonly PhysicsBox[] = [...staticBoxes];
+
+  const move = (position: PhysicsVector, desiredDelta: PhysicsVector): PhysicsMovement => {
+    let next: PhysicsVector = { ...position };
+    const collisionBoxes = new Set<PhysicsBox>();
+
+    // Resolve vertical motion first. This lets a jump clear a short obstacle
+    // before horizontal movement is tested, while a falling capsule still
+    // lands on a box top instead of tunnelling through it.
+    const desiredY = position.y + desiredDelta.y;
+    let verticalResolved = false;
+    if (desiredDelta.y < -FALLBACK_EPSILON) {
+      for (const box of activeBoxes) {
+        if (!fallbackHorizontalOverlap(position.x, position.z, box)) {
+          continue;
+        }
+        const boxTop = box.center.y + box.halfExtents.y;
+        const startFeet = position.y - FALLBACK_CAPSULE_CENTER_HEIGHT;
+        const nextFeet = desiredY - FALLBACK_CAPSULE_CENTER_HEIGHT;
+        if (startFeet >= boxTop - FALLBACK_EPSILON && nextFeet <= boxTop + FALLBACK_EPSILON) {
+          next = { ...next, y: boxTop + FALLBACK_CAPSULE_CENTER_HEIGHT };
+          collisionBoxes.add(box);
+          verticalResolved = true;
+          break;
+        }
+      }
+      if (!verticalResolved) {
+        next = { ...next, y: desiredY };
+      }
+    } else if (desiredDelta.y > FALLBACK_EPSILON) {
+      next = { ...next, y: desiredY };
+      for (const box of activeBoxes) {
+        if (!fallbackHorizontalOverlap(position.x, position.z, box)) {
+          continue;
+        }
+        const boxBottom = box.center.y - box.halfExtents.y;
+        const startHead = position.y + FALLBACK_CAPSULE_CENTER_HEIGHT;
+        const nextHead = desiredY + FALLBACK_CAPSULE_CENTER_HEIGHT;
+        if (startHead <= boxBottom + FALLBACK_EPSILON && nextHead >= boxBottom - FALLBACK_EPSILON) {
+          next = { ...next, y: boxBottom - FALLBACK_CAPSULE_CENTER_HEIGHT };
+          collisionBoxes.add(box);
+          verticalResolved = true;
+          break;
+        }
+      }
+    }
+
+    const moveAxis = (axis: "x" | "z", amount: number): void => {
+      if (Math.abs(amount) <= FALLBACK_EPSILON) {
+        return;
+      }
+      const candidate = next[axis] + amount;
+      for (const box of activeBoxes) {
+        if (!fallbackVerticalOverlap(next.y, box)) {
+          continue;
+        }
+        const candidateX = axis === "x" ? candidate : next.x;
+        const candidateZ = axis === "z" ? candidate : next.z;
+        if (!fallbackHorizontalOverlap(candidateX, candidateZ, box)) {
+          continue;
+        }
+
+        const topY = box.center.y + box.halfExtents.y;
+        const feetY = next.y - FALLBACK_CAPSULE_CENTER_HEIGHT;
+        const stepHeight = topY - feetY;
+        const canAutostep =
+          desiredDelta.y <= FALLBACK_EPSILON &&
+          stepHeight > FALLBACK_EPSILON &&
+          stepHeight <= FALLBACK_AUTOSTEP_HEIGHT + FALLBACK_EPSILON &&
+          feetY <= topY + FALLBACK_EPSILON;
+        if (canAutostep) {
+          const steppedY = topY + FALLBACK_CAPSULE_CENTER_HEIGHT;
+          if (!fallbackVerticalOverlap(steppedY, box)) {
+            next = { ...next, y: steppedY, [axis]: candidate };
+            collisionBoxes.add(box);
+            return;
+          }
+        }
+
+        const minAxis =
+          axis === "x" ? box.center.x - box.halfExtents.x : box.center.z - box.halfExtents.z;
+        const maxAxis =
+          axis === "x" ? box.center.x + box.halfExtents.x : box.center.z + box.halfExtents.z;
+        const safeAxis =
+          amount > 0
+            ? minAxis - FALLBACK_CAPSULE_RADIUS - FALLBACK_EPSILON
+            : maxAxis + FALLBACK_CAPSULE_RADIUS + FALLBACK_EPSILON;
+        next = { ...next, [axis]: safeAxis };
+        collisionBoxes.add(box);
+        return;
+      }
+      next = { ...next, [axis]: candidate };
+    };
+
+    moveAxis("x", desiredDelta.x);
+    moveAxis("z", desiredDelta.z);
+
+    // A horizontal move can arrive over a support that was not underneath the
+    // capsule at the start of the frame. Snap only while descending or already
+    // level; upward motion must remain airborne.
+    let grounded = false;
+    if (desiredDelta.y <= FALLBACK_EPSILON) {
+      const support = fallbackSupportTop(next.x, next.y, next.z, activeBoxes);
+      if (support !== null) {
+        const supportedY = support.topY + FALLBACK_CAPSULE_CENTER_HEIGHT;
+        if (next.y <= supportedY + 0.14 + FALLBACK_EPSILON) {
+          next = { ...next, y: supportedY };
+          grounded = true;
+          collisionBoxes.add(support.box);
+        }
+      }
+    }
+
+    return {
+      position: next,
+      grounded,
+      collisions: collisionBoxes.size,
+    };
+  };
+
+  return {
+    move,
+    setDynamicBoxes: (boxes) => {
+      activeBoxes = [...staticBoxes, ...boxes.filter((box) => box.dynamic !== true)];
+    },
+    applyImpulseToDynamicBody: () => {
+      // Dynamic props are intentionally visual-only in the fallback.
+    },
+    getDynamicBodyStates: () => [],
+    dispose: () => {
+      activeBoxes = [];
+    },
+  };
+};
+
 let rapierInitialization: Promise<void> | null = null;
 
 const ensureRapierInitialized = (): Promise<void> => {
@@ -97,11 +297,7 @@ const addDynamicBox = (
   world: RAPIER.World,
   box: PhysicsBox & { readonly dynamicId: number },
 ): { body: RAPIER.RigidBody; collider: RAPIER.Collider } => {
-  const rotation = toRotation(
-    box.rotationX ?? 0,
-    box.rotationY ?? 0,
-    box.rotationZ ?? 0,
-  );
+  const rotation = toRotation(box.rotationX ?? 0, box.rotationY ?? 0, box.rotationZ ?? 0);
   const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
     .setTranslation(box.center.x, box.center.y, box.center.z)
     .setRotation(rotation);

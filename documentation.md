@@ -141,12 +141,18 @@
   without jumping through an opaque object. Accommodation eases toward near focus in roughly 0.4 seconds
   and relaxes toward far focus in roughly 0.65 seconds, so the effect reads as eye focus rather than a
   cinematic snap. Lateral sprint direction changes add a restrained roll kick to suggest shifting weight,
-  while movement speed drives a small damped vertical viewport bob that settles when the player stops.
+  while movement speed drives a small damped vertical viewport bob that settles when the player stops. The HUD
+  reticule follows the same damped first-person roll and head-bob offsets as the camera, so rapid left/right weight
+  shifts visibly lag in the aim marker while the focus ray remains anchored to the configured reticule position. The
+  The outer ring follows that motion inverted at -1x; the center dot is tuned to a 5x total displacement without changing
+  the camera transform.
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
   controller. The first collision slice supplies simplified static colliders for the world floor and table body;
   render meshes remain visual-only, and tile/furniture dynamics are intentionally not inferred from every mesh.
   Rapier loads asynchronously from its inlined WASM; if initialization fails, the previous bounded movement path
-  remains available and the scene marks `data-physics-ready="fallback"`.
+  remains available and the scene marks `data-physics-ready="fallback"`. The fallback now uses the same coarse
+  collision runtime as the traversal state machine, so ledge/vault assistance and wall hanging do not silently
+  disappear in a restricted browser.
 - Collision coverage now expands beyond the table: the environment, generated room fixtures, glass, walls,
   furniture, and gateway are converted from meaningful render meshes into coarse world-space AABB colliders.
   Streamed city buildings, props, and skybridges contribute explicit rotated boxes as chunks enter the 3×3
@@ -296,7 +302,9 @@ The same traversal state is active in the live first-person browser controller. 
 debug preset from `?debug=1`; it starts on clear ground facing a dedicated tall training wall. Click the scene to
 capture pointer lock, and run into the wall with `W` or
 the touch joystick. The capsule attaches to the near face without gravity, remains hanging while forward is
-released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump action is used.
+released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump action is used. A
+brief settle beat prevents the approach input from making the hang invisible; holding forward continues into the
+climb after that beat.
 Backward input releases the hang. The climb lifts above the obstacle before crossing onto its top and asks Rapier
 for the final supported position instead of marking the player grounded in midair.
 

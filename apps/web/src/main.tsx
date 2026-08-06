@@ -65,6 +65,8 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
     { value: "low", label: "Low" },
   ];
 const RETICLE_POSITION = DEFAULT_RETICLE_POSITION;
+const RETICLE_RING_MOTION_MULTIPLIER = -1;
+const RETICLE_DOT_MOTION_MULTIPLIER = 5;
 
 const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
 const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
@@ -963,11 +965,13 @@ const App = (): React.JSX.Element => {
   const mountRef = React.useRef<MahjongTableMount | null>(null);
   const [debugMount, setDebugMount] = React.useState<MahjongTableMount | null>(null);
   const joystickKnobRef = React.useRef<HTMLSpanElement>(null);
+  const reticleRef = React.useRef<HTMLDivElement>(null);
   const lastTouchActionAtRef = React.useRef(0);
   const roomSequenceRef = React.useRef(1);
   const hasUserRoomOverrideRef = React.useRef(false);
   const persistedVisualDebugStateRef = React.useRef<PersistedVisualDebugScene | null>(null);
   const hasAppliedPersistedVisualStateRef = React.useRef(false);
+  const reticleBobbingFrame = React.useRef(0);
   const [persistedVisualStateReady, setPersistedVisualStateReady] = React.useState(
     !import.meta.env.DEV || DEBUG_PANEL_ENABLED,
   );
@@ -1055,6 +1059,17 @@ const App = (): React.JSX.Element => {
         setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
         hasAppliedPersistedVisualStateRef.current = false;
+        if (reticleBobbingFrame.current !== 0) {
+          window.cancelAnimationFrame(reticleBobbingFrame.current);
+          reticleBobbingFrame.current = 0;
+        }
+        const reticleElement = reticleRef.current;
+        if (reticleElement !== null) {
+          reticleElement.style.setProperty("--scene-reticule-bob-x", "0px");
+          reticleElement.style.setProperty("--scene-reticule-bob-y", "0px");
+          reticleElement.style.setProperty("--scene-reticule-dot-bob-x", "0px");
+          reticleElement.style.setProperty("--scene-reticule-dot-bob-y", "0px");
+        }
         return;
       }
       const snapshot = mount.debug.getSnapshot();
@@ -1081,11 +1096,53 @@ const App = (): React.JSX.Element => {
         // The scene may be disposed during a concurrent HMR remount.
         return;
       }
+      if (reticleBobbingFrame.current !== 0) {
+        window.cancelAnimationFrame(reticleBobbingFrame.current);
+      }
+      const applyReticleBobbing = (): void => {
+        const reticleElement = reticleRef.current;
+        if (reticleElement === null) {
+          reticleBobbingFrame.current = 0;
+          return;
+        }
+        try {
+          const { x, y } = mount.getReticleBobbingOffset();
+          reticleElement.style.setProperty(
+            "--scene-reticule-bob-x",
+            `${x * RETICLE_RING_MOTION_MULTIPLIER}px`,
+          );
+          reticleElement.style.setProperty(
+            "--scene-reticule-bob-y",
+            `${y * RETICLE_RING_MOTION_MULTIPLIER}px`,
+          );
+          reticleElement.style.setProperty(
+            "--scene-reticule-dot-bob-x",
+            `${x * (RETICLE_DOT_MOTION_MULTIPLIER - RETICLE_RING_MOTION_MULTIPLIER)}px`,
+          );
+          reticleElement.style.setProperty(
+            "--scene-reticule-dot-bob-y",
+            `${y * (RETICLE_DOT_MOTION_MULTIPLIER - RETICLE_RING_MOTION_MULTIPLIER)}px`,
+          );
+          reticleBobbingFrame.current = window.requestAnimationFrame(applyReticleBobbing);
+        } catch {
+          reticleBobbingFrame.current = 0;
+        }
+      };
+      reticleBobbingFrame.current = window.requestAnimationFrame(applyReticleBobbing);
     },
     // Adding `isMotionLookEnabled` as a dependency makes sure the latest UI
     // state is reflected when the mount is recreated (e.g., after a hot reload).
     [isMotionLookEnabled, visualQualityMode],
   );
+
+  React.useEffect(() => {
+    return () => {
+      if (reticleBobbingFrame.current !== 0) {
+        window.cancelAnimationFrame(reticleBobbingFrame.current);
+        reticleBobbingFrame.current = 0;
+      }
+    };
+  }, []);
 
   const applyVisualQualityMode = (mode: VisualQualityMode): void => {
     setVisualQualityMode(mode);
@@ -1382,6 +1439,7 @@ const App = (): React.JSX.Element => {
             />
           ) : null}
           <div
+            ref={reticleRef}
             className="scene-reticule"
             aria-hidden="true"
             style={{ left: `${RETICLE_POSITION.x * 100}%`, top: `${RETICLE_POSITION.y * 100}%` }}
@@ -1514,7 +1572,7 @@ const App = (): React.JSX.Element => {
             <p>
               {isMobile
                 ? "Drag joystick: center slow · edge sprint · Swipe to look · Crouch · Jump · run into tall walls to hang · press Jump to climb"
-                : "Mouse look · WASD move · double-tap W sprint · Shift crouch · Space jump · run into tall walls to hang · hold W/Space to climb · Esc releases pointer"}
+                : "Mouse look · WASD move · double-tap W sprint · Shift crouch · Space jump · run into tall walls, release W to hang, press W/Space to climb · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

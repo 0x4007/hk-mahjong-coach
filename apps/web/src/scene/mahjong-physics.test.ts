@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createMahjongPhysics, type PhysicsBox } from "./mahjong-physics.js";
+import {
+  createFallbackMahjongPhysics,
+  createMahjongPhysics,
+  type PhysicsBox,
+} from "./mahjong-physics.js";
 
 const TEST_COLLIDERS: readonly PhysicsBox[] = [
   {
@@ -14,6 +18,40 @@ const TEST_COLLIDERS: readonly PhysicsBox[] = [
 ];
 
 describe("mahjong physics", () => {
+  it("keeps traversal collisions available in the fallback controller", () => {
+    const wall: PhysicsBox = {
+      center: { x: 0, y: 2, z: -4 },
+      halfExtents: { x: 0.5, y: 2, z: 0.5 },
+    };
+    const physics = createFallbackMahjongPhysics([TEST_COLLIDERS[0]!, wall]);
+    try {
+      const movement = physics.move({ x: 0, y: 0.86, z: -3.2 }, { x: 0, y: 0, z: -0.2 });
+      expect(movement.collisions).toBeGreaterThan(0);
+      expect(movement.position.z).toBeGreaterThan(-3.77);
+      expect(movement.position.z).toBeLessThan(-3.2);
+      expect(movement.grounded).toBe(true);
+    } finally {
+      physics.dispose();
+    }
+  });
+
+  it("autosteps a low platform instead of turning it into a hard wall", () => {
+    const physics = createFallbackMahjongPhysics([
+      TEST_COLLIDERS[0]!,
+      {
+        center: { x: 0, y: 0.11, z: -1 },
+        halfExtents: { x: 0.7, y: 0.11, z: 0.7 },
+      },
+    ]);
+    try {
+      const movement = physics.move({ x: 0, y: 0.86, z: -0.3 }, { x: 0, y: 0, z: -0.8 });
+      expect(movement.position.y).toBeCloseTo(0.22 + 0.86, 5);
+      expect(movement.grounded).toBe(true);
+    } finally {
+      physics.dispose();
+    }
+  });
+
   it("slides a player capsule into the table instead of through it", async () => {
     const physics = await createMahjongPhysics(TEST_COLLIDERS);
     try {

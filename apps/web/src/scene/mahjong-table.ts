@@ -13,6 +13,7 @@ import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahj
 import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
 
 import {
+  createFallbackMahjongPhysics,
   createMahjongPhysics,
   type MahjongPhysicsRuntime,
   type PhysicsBodyState,
@@ -560,6 +561,11 @@ export interface ReticlePosition {
   readonly y: number;
 }
 
+export interface ReticleBobbingOffset {
+  readonly x: number;
+  readonly y: number;
+}
+
 export const DEFAULT_RETICLE_POSITION: ReticlePosition = {
   x: 0.5,
   y: 0.6,
@@ -586,6 +592,7 @@ export interface MahjongTableMount {
   readonly toggleCrouch: () => boolean;
   readonly jump: () => void;
   readonly setReticlePosition: (reticlePosition: ReticlePosition) => void;
+  readonly getReticleBobbingOffset: () => ReticleBobbingOffset;
   readonly getAimRay: () => {
     readonly origin: THREE.Vector3;
     readonly direction: THREE.Vector3;
@@ -987,6 +994,35 @@ const SEAT_STANDING_FOV = 90;
 const SEAT_CROUCHED_FOV = 45;
 const DEBUG_STANDING_FOV = 90;
 const DEBUG_SEATED_FOV = 68;
+
+export interface ReticleZoomViewOffset {
+  /** Normalized view offsets passed to PerspectiveCamera.setViewOffset. */
+  readonly x: number;
+  readonly y: number;
+}
+
+/**
+ * Keep the world point under the reticule fixed while changing the seat FOV.
+ *
+ * The reticule is below the optical center, so a narrow FOV needs an off-axis
+ * projection. The offset is normalized to the full camera view (1 = one full
+ * viewport) and is zero at the standing FOV.
+ */
+export const resolveReticleZoomViewOffset = (
+  fov: number,
+  reticlePosition: ReticlePosition = DEFAULT_RETICLE_POSITION,
+): ReticleZoomViewOffset => {
+  const standingTangent = Math.tan(THREE.MathUtils.degToRad(SEAT_STANDING_FOV) * 0.5);
+  const currentFov = THREE.MathUtils.clamp(fov, 0.001, 179.999);
+  const currentTangent = Math.tan(THREE.MathUtils.degToRad(currentFov) * 0.5);
+  const zoomScale = standingTangent / currentTangent;
+  const reticleNdcX = (Number.isFinite(reticlePosition.x) ? reticlePosition.x : 0.5) * 2 - 1;
+  const reticleNdcY = 1 - (Number.isFinite(reticlePosition.y) ? reticlePosition.y : 0.6) * 2;
+  return {
+    x: (reticleNdcX * (1 - zoomScale)) / 2,
+    y: (-reticleNdcY * (1 - zoomScale)) / 2,
+  };
+};
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
@@ -1019,6 +1055,8 @@ const CAMERA_BOB_AMPLITUDE = 0.025;
 const CAMERA_BOB_DAMPING = 12;
 const CAMERA_BOB_MIN_FREQUENCY = 8.5;
 const CAMERA_BOB_MAX_FREQUENCY = 14;
+const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
+const RETICLE_HEAD_BOB_PIXELS_PER_METER = 160;
 const CAMERA_DIRECTION_MEMORY_SECONDS = 0.24;
 // Approximate the central human eye rather than a portrait lens: 17 mm focal
 // length, a 1 arcminute circle of confusion, and a 4 mm reference pupil. The
@@ -6503,8 +6541,10 @@ export const createMahjongTableScene = (
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
   const focusNdc = new THREE.Vector2();
+  let reticlePosition = resolveReticlePosition(options.reticlePosition);
   const setFocusReticle = (position?: ReticlePosition): void => {
     const normalized = resolveReticlePosition(position);
+    reticlePosition = normalized;
     focusNdc.set(normalized.x * 2 - 1, 1 - normalized.y * 2);
   };
   setFocusReticle(options.reticlePosition);
@@ -6653,6 +6693,31 @@ export const createMahjongTableScene = (
   firstPersonControls.enabled = false;
 
   let activeView = initialView;
+  let viewportAspect = camera.aspect;
+  const syncReticleZoomProjection = (): void => {
+    if (activeView !== "seat") {
+      if (camera.view?.enabled === true) {
+        camera.clearViewOffset();
+      }
+      return;
+    }
+    const offset = resolveReticleZoomViewOffset(camera.fov, reticlePosition);
+    const view = camera.view;
+    if (
+      view?.enabled === true &&
+      view.fullWidth === 1 &&
+      view.fullHeight === 1 &&
+      view.width === 1 &&
+      view.height === 1 &&
+      Math.abs(view.offsetX - offset.x) < 0.000001 &&
+      Math.abs(view.offsetY - offset.y) < 0.000001
+    ) {
+      return;
+    }
+    camera.setViewOffset(1, 1, offset.x, offset.y, 1, 1);
+    camera.aspect = viewportAspect;
+    camera.updateProjectionMatrix();
+  };
   const isTouchDevice =
     navigator.maxTouchPoints > 0 ||
     window.matchMedia("(pointer: coarse)").matches ||
@@ -7184,6 +7249,7 @@ export const createMahjongTableScene = (
     syncPhysicsCharacterToCamera();
     camera.fov = SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
+    syncReticleZoomProjection();
     resetMotionCalibration();
   };
   const setFocusCalibrationVisibility = (): void => {
@@ -7224,6 +7290,7 @@ export const createMahjongTableScene = (
     setCameraPreset(camera, orbitControls, view);
     camera.fov = TABLE_CAMERA_FOV;
     camera.updateProjectionMatrix();
+    syncReticleZoomProjection();
   };
 
   const resetToSpawn = (): void => {
@@ -8017,7 +8084,8 @@ export const createMahjongTableScene = (
     }
     previousWidth = width;
     previousHeight = height;
-    camera.aspect = width / height;
+    viewportAspect = width / height;
+    camera.aspect = viewportAspect;
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     composer.setSize(width, height);
@@ -8056,8 +8124,16 @@ export const createMahjongTableScene = (
       container.dataset.physicsReady = "true";
     },
     () => {
-      // Rendering remains usable if a browser cannot initialize the optional
-      // WASM physics module; the existing bounded movement is the fallback.
+      // Keep the same traversal state machine when Rapier is unavailable.
+      // Previously this branch bypassed collision movement entirely, which
+      // removed both the refined vault assist and wall hanging in the browser.
+      const fallbackRuntime = createFallbackMahjongPhysics(staticPhysicsBoxes);
+      physicsRuntime = fallbackRuntime;
+      syncPhysicsCharacterToCamera();
+      const nextPhysicsBoxes = explorationWorld?.getPhysicsBoxes() ?? [];
+      fallbackRuntime.setDynamicBoxes(nextPhysicsBoxes);
+      dynamicPhysicsBoxes = nextPhysicsBoxes;
+      appliedPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
       container.dataset.physicsReady = "fallback";
     },
   );
@@ -8081,6 +8157,17 @@ export const createMahjongTableScene = (
     return {
       origin: focusRaycaster.ray.origin.clone(),
       direction: focusRaycaster.ray.direction.clone(),
+    };
+  };
+  const getFirstPersonMotionOffsets = (): { readonly roll: number; readonly headBob: number } => ({
+    roll: cameraShiftRoll,
+    headBob: Math.sin(cameraBobPhase) * CAMERA_BOB_AMPLITUDE * cameraBobAmount,
+  });
+  const getReticleBobbingOffset = (): ReticleBobbingOffset => {
+    const motion = getFirstPersonMotionOffsets();
+    return {
+      x: motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN,
+      y: motion.headBob * RETICLE_HEAD_BOB_PIXELS_PER_METER,
     };
   };
   const moveSpeed = 3.4;
@@ -8151,6 +8238,10 @@ export const createMahjongTableScene = (
       camera.fov = nextFov;
       camera.updateProjectionMatrix();
     }
+    // Rebuild the off-axis projection as the smooth crouch/stand FOV changes.
+    // This keeps the world point under the lower reticule fixed instead of
+    // making the zoom pivot around the screen center.
+    syncReticleZoomProjection();
     for (const label of seatLabels) {
       label.visible = !isCrouched || activeView !== "seat";
     }
@@ -8227,10 +8318,7 @@ export const createMahjongTableScene = (
           wallHangElapsed = 0;
           grounded = false;
           verticalVelocity = 0;
-        } else if (
-          wallHangElapsed >= WALL_HANG_SETTLE_DURATION &&
-          (forward > 0.1 || jumpKeyHeld)
-        ) {
+        } else if (wallHangElapsed >= WALL_HANG_SETTLE_DURATION && (forward > 0.1 || jumpKeyHeld)) {
           beginWallClimb();
         }
       }
@@ -8353,21 +8441,25 @@ export const createMahjongTableScene = (
                   z: 0,
                 });
                 const landedPosition: PhysicsVector = {
-                  x: THREE.MathUtils.clamp(landing.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+                  x: THREE.MathUtils.clamp(
+                    landing.position.x,
+                    WORLD_BOUNDS.minX,
+                    WORLD_BOUNDS.maxX,
+                  ),
                   y: landing.position.y,
-                  z: THREE.MathUtils.clamp(landing.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+                  z: THREE.MathUtils.clamp(
+                    landing.position.z,
+                    WORLD_BOUNDS.minZ,
+                    WORLD_BOUNDS.maxZ,
+                  ),
                 };
                 physicsCharacterPosition = landedPosition;
                 grounded = landing.grounded;
                 verticalVelocity = 0;
-                jumpOffset = Math.max(
-                  0,
-                  landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
-                );
+                jumpOffset = Math.max(0, landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
                 camera.position.x = landedPosition.x;
                 camera.position.z = landedPosition.z;
-                baseCameraY =
-                  landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+                baseCameraY = landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
                 wallClimbTransition = null;
               }
             }
@@ -8400,192 +8492,225 @@ export const createMahjongTableScene = (
             y: movement.position.y,
             z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
           };
-        let ledgeGrabTarget: PhysicsVector | null = null;
-        if (
-          !grounded &&
-          !movement.grounded &&
-          verticalVelocity <= 0 &&
-          movement.collisions > 0 &&
-          jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET &&
-          desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002
-        ) {
-          ledgeGrabTarget = resolveLedgeGrabTarget(
-            characterPosition,
-            desiredHorizontalDelta,
-            characterPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
-            staticPhysicsBoxes,
-            dynamicPhysicsBoxes,
+          let ledgeGrabTarget: PhysicsVector | null = null;
+          if (
+            !grounded &&
+            !movement.grounded &&
+            verticalVelocity <= 0 &&
+            movement.collisions > 0 &&
+            jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET &&
+            desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002
+          ) {
+            ledgeGrabTarget = resolveLedgeGrabTarget(
+              characterPosition,
+              desiredHorizontalDelta,
+              characterPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
+              staticPhysicsBoxes,
+              dynamicPhysicsBoxes,
+            );
+          }
+          let wallHangResolution: WallHangResolution | null = null;
+          const horizontalApproachDistance = Math.hypot(
+            desiredHorizontalDelta.x,
+            desiredHorizontalDelta.z,
           );
-        }
-        let wallHangResolution: WallHangResolution | null = null;
-        const horizontalApproachDistance = Math.hypot(
-          desiredHorizontalDelta.x,
-          desiredHorizontalDelta.z,
-        );
-        if (
-          ledgeGrabTarget === null &&
-          ledgeClimbTransition === null &&
-          movement.collisions > 0 &&
-          horizontalApproachDistance > 0.015
-        ) {
-          // Streamed buildings and authored obstacle boxes live in the second
-          // physics set. They are still static for traversal purposes; only
-          // knocked props are marked dynamic and must not become hang points.
-          const wallHangPhysicsBoxes =
-            dynamicPhysicsBoxes.length === 0
-              ? staticPhysicsBoxes
-              : [
-                  ...staticPhysicsBoxes,
-                  ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
-                ];
-          wallHangResolution = resolveWallHangTargetDetails(
-            // Rapier may report a contact position a few centimetres inside a
-            // thin box after resolving a fast frame. Probe from the capsule's
-            // safe pre-move position instead, so a valid approached wall is
-            // not discarded merely because collision correction already ran.
-            characterPosition,
-            {
+          if (
+            ledgeGrabTarget === null &&
+            ledgeClimbTransition === null &&
+            movement.collisions > 0 &&
+            horizontalApproachDistance > 0.015
+          ) {
+            // Streamed buildings and authored obstacle boxes live in the second
+            // physics set. They are still static for traversal purposes; only
+            // knocked props are marked dynamic and must not become hang points.
+            const wallHangPhysicsBoxes =
+              dynamicPhysicsBoxes.length === 0
+                ? staticPhysicsBoxes
+                : [
+                    ...staticPhysicsBoxes,
+                    ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
+                  ];
+            const wallApproach = {
               x: desiredHorizontalDelta.x / horizontalApproachDistance,
               y: 0,
               z: desiredHorizontalDelta.z / horizontalApproachDistance,
-            },
-            wallHangPhysicsBoxes,
-          );
-        }
-        if (ledgeGrabTarget !== null && ledgeClimbTransition === null) {
-          const climbStartX = clampedPosition.x;
-          const climbStartY = clampedPosition.y;
-          const climbStartZ = clampedPosition.z;
-          const clampedX = THREE.MathUtils.clamp(
-            ledgeGrabTarget.x,
-            WORLD_BOUNDS.minX,
-            WORLD_BOUNDS.maxX,
-          );
-          const clampedZ = THREE.MathUtils.clamp(
-            ledgeGrabTarget.z,
-            WORLD_BOUNDS.minZ,
-            WORLD_BOUNDS.maxZ,
-          );
-          const momentum = resolveLedgeClimbMomentum(
-            desiredForward,
-            desiredStrafe,
-            forwardVelocity,
-            strafeVelocity,
-            isSprinting,
-            moveSpeed,
-          );
-          const preservedSpeed = Math.hypot(
-            momentum.preservedForwardVelocity,
-            momentum.preservedStrafeVelocity,
-          );
-          const landingBoostDistance =
-            preservedSpeed > 0
-              ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
-              : 0;
-          clampedPosition.x = clampedX;
-          clampedPosition.z = clampedZ;
-          clampedPosition.y = ledgeGrabTarget.y;
-          ledgeClimbTransition = {
-            duration: LEDGE_CLIMB_DURATION,
-            elapsed: 0,
-            phase: "vault",
-            startX: climbStartX,
-            startY: climbStartY,
-            startZ: climbStartZ,
-            targetX: clampedPosition.x,
-            targetY: clampedPosition.y,
-            targetZ: clampedPosition.z,
-            preservedForwardVelocity: momentum.preservedForwardVelocity,
-            preservedStrafeVelocity: momentum.preservedStrafeVelocity,
-            preserveSprinting: momentum.preserveSprinting,
-            landingBoostDistance,
-          };
-          grounded = true;
-          verticalVelocity = 0;
-        }
-        if (wallHangResolution !== null && ledgeGrabTarget === null) {
-          clampedPosition.x = wallHangResolution.target.x;
-          clampedPosition.y = wallHangResolution.target.y;
-          clampedPosition.z = wallHangResolution.target.z;
-          wallHangState = {
-            target: wallHangResolution.target,
-            wallNormal: wallHangResolution.wallNormal,
-            wallFacePoint: wallHangResolution.wallFacePoint,
-            wallTopY: wallHangResolution.wallTopY,
-            box: wallHangResolution.box,
-            approachDirection: {
-              x: desiredHorizontalDelta.x / horizontalApproachDistance,
-              y: 0,
-              z: desiredHorizontalDelta.z / horizontalApproachDistance,
-            },
-          };
-          grounded = false;
-          verticalVelocity = 0;
-          forwardVelocity = 0;
-          strafeVelocity = 0;
-        }
-        physicsCharacterPosition = clampedPosition;
-        grounded =
-          wallHangResolution !== null
-            ? false
-            : ledgeGrabTarget === null
-              ? movement.grounded
-              : true;
-        jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
-        if (grounded && verticalVelocity < 0) {
-          verticalVelocity = 0;
-        }
-        camera.position.x = clampedPosition.x;
-        camera.position.z = clampedPosition.z;
-        baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
-        if (ledgeClimbTransition !== null) {
-          const transition = ledgeClimbTransition;
-          transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
-          const progress = smoothStep(
-            THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
-          );
-          const transitionX = THREE.MathUtils.lerp(transition.startX, transition.targetX, progress);
-          const transitionZ = THREE.MathUtils.lerp(transition.startZ, transition.targetZ, progress);
-          const transitionY =
-            transition.phase === "vault"
-              ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
-                Math.sin(progress * Math.PI) * LEDGE_CLIMB_ARC_HEIGHT
-              : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
-          camera.position.x = transitionX;
-          camera.position.z = transitionZ;
-          baseCameraY = resolveLedgeClimbTargetCameraY(transitionY);
-          jumpOffset = Math.max(0, transitionY - PLAYER_COLLIDER_CENTER_HEIGHT);
-          forwardVelocity = transition.preservedForwardVelocity;
-          strafeVelocity = transition.preservedStrafeVelocity;
-          physicsCharacterPosition = {
-            x: transitionX,
-            y: transitionY,
-            z: transitionZ,
-          };
-          if (transition.elapsed >= transition.duration) {
-            if (transition.phase === "vault" && transition.landingBoostDistance > 0) {
-              const preservedSpeed = Math.hypot(
-                transition.preservedForwardVelocity,
-                transition.preservedStrafeVelocity,
+            };
+            // Probe the safe pre-move position first. On a long frame Rapier can
+            // sweep the capsule through the resolver's 0.5 m reach before
+            // returning the corrected contact position; the post-move point is
+            // still safe because the helper rejects a point behind the face.
+            wallHangResolution = resolveWallHangTargetDetails(
+              characterPosition,
+              wallApproach,
+              wallHangPhysicsBoxes,
+            );
+            if (wallHangResolution === null) {
+              wallHangResolution = resolveWallHangTargetDetails(
+                clampedPosition,
+                wallApproach,
+                wallHangPhysicsBoxes,
               );
-              const boostDirectionForward =
-                preservedSpeed > 0 ? transition.preservedForwardVelocity / preservedSpeed : 0;
-              const boostDirectionRight =
-                preservedSpeed > 0 ? transition.preservedStrafeVelocity / preservedSpeed : 0;
-              const landingTargetX =
-                transition.targetX + boostDirectionForward * transition.landingBoostDistance;
-              const landingTargetZ =
-                transition.targetZ + boostDirectionRight * transition.landingBoostDistance;
-              transition.startX = transition.targetX;
-              transition.startY = transition.targetY;
-              transition.startZ = transition.targetZ;
-              transition.targetX = landingTargetX;
-              transition.targetY = transition.targetY;
-              transition.targetZ = landingTargetZ;
-              transition.duration = LEDGE_CLIMB_EXIT_BOOST_DURATION;
-              transition.elapsed = 0;
-              transition.phase = "landingBoost";
-            } else {
+            }
+          }
+          if (ledgeGrabTarget !== null && ledgeClimbTransition === null) {
+            const climbStartX = clampedPosition.x;
+            const climbStartY = clampedPosition.y;
+            const climbStartZ = clampedPosition.z;
+            const clampedX = THREE.MathUtils.clamp(
+              ledgeGrabTarget.x,
+              WORLD_BOUNDS.minX,
+              WORLD_BOUNDS.maxX,
+            );
+            const clampedZ = THREE.MathUtils.clamp(
+              ledgeGrabTarget.z,
+              WORLD_BOUNDS.minZ,
+              WORLD_BOUNDS.maxZ,
+            );
+            const momentum = resolveLedgeClimbMomentum(
+              desiredForward,
+              desiredStrafe,
+              forwardVelocity,
+              strafeVelocity,
+              isSprinting,
+              moveSpeed,
+            );
+            const preservedSpeed = Math.hypot(
+              momentum.preservedForwardVelocity,
+              momentum.preservedStrafeVelocity,
+            );
+            const landingBoostDistance =
+              preservedSpeed > 0
+                ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
+                : 0;
+            clampedPosition.x = clampedX;
+            clampedPosition.z = clampedZ;
+            clampedPosition.y = ledgeGrabTarget.y;
+            ledgeClimbTransition = {
+              duration: LEDGE_CLIMB_DURATION,
+              elapsed: 0,
+              phase: "vault",
+              startX: climbStartX,
+              startY: climbStartY,
+              startZ: climbStartZ,
+              targetX: clampedPosition.x,
+              targetY: clampedPosition.y,
+              targetZ: clampedPosition.z,
+              preservedForwardVelocity: momentum.preservedForwardVelocity,
+              preservedStrafeVelocity: momentum.preservedStrafeVelocity,
+              preserveSprinting: momentum.preserveSprinting,
+              landingBoostDistance,
+            };
+            grounded = true;
+            verticalVelocity = 0;
+          }
+          if (wallHangResolution !== null && ledgeGrabTarget === null) {
+            clampedPosition.x = wallHangResolution.target.x;
+            clampedPosition.y = wallHangResolution.target.y;
+            clampedPosition.z = wallHangResolution.target.z;
+            wallHangState = {
+              target: wallHangResolution.target,
+              wallNormal: wallHangResolution.wallNormal,
+              wallFacePoint: wallHangResolution.wallFacePoint,
+              wallTopY: wallHangResolution.wallTopY,
+              box: wallHangResolution.box,
+              approachDirection: {
+                x: desiredHorizontalDelta.x / horizontalApproachDistance,
+                y: 0,
+                z: desiredHorizontalDelta.z / horizontalApproachDistance,
+              },
+            };
+            wallHangElapsed = 0;
+            grounded = false;
+            verticalVelocity = 0;
+            forwardVelocity = 0;
+            strafeVelocity = 0;
+          }
+          physicsCharacterPosition = clampedPosition;
+          grounded =
+            wallHangResolution !== null
+              ? false
+              : ledgeGrabTarget === null
+                ? movement.grounded
+                : true;
+          jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
+          if (grounded && verticalVelocity < 0) {
+            verticalVelocity = 0;
+          }
+          camera.position.x = clampedPosition.x;
+          camera.position.z = clampedPosition.z;
+          baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+          if (ledgeClimbTransition !== null) {
+            const transition = ledgeClimbTransition;
+            transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
+            const progress = smoothStep(
+              THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
+            );
+            const transitionX = THREE.MathUtils.lerp(
+              transition.startX,
+              transition.targetX,
+              progress,
+            );
+            const transitionZ = THREE.MathUtils.lerp(
+              transition.startZ,
+              transition.targetZ,
+              progress,
+            );
+            const transitionY =
+              transition.phase === "vault"
+                ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
+                  Math.sin(progress * Math.PI) * LEDGE_CLIMB_ARC_HEIGHT
+                : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+            camera.position.x = transitionX;
+            camera.position.z = transitionZ;
+            baseCameraY = resolveLedgeClimbTargetCameraY(transitionY);
+            jumpOffset = Math.max(0, transitionY - PLAYER_COLLIDER_CENTER_HEIGHT);
+            forwardVelocity = transition.preservedForwardVelocity;
+            strafeVelocity = transition.preservedStrafeVelocity;
+            physicsCharacterPosition = {
+              x: transitionX,
+              y: transitionY,
+              z: transitionZ,
+            };
+            if (transition.elapsed >= transition.duration) {
+              if (transition.phase === "vault" && transition.landingBoostDistance > 0) {
+                const preservedSpeed = Math.hypot(
+                  transition.preservedForwardVelocity,
+                  transition.preservedStrafeVelocity,
+                );
+                const boostDirectionForward =
+                  preservedSpeed > 0 ? transition.preservedForwardVelocity / preservedSpeed : 0;
+                const boostDirectionRight =
+                  preservedSpeed > 0 ? transition.preservedStrafeVelocity / preservedSpeed : 0;
+                const landingTargetX =
+                  transition.targetX + boostDirectionForward * transition.landingBoostDistance;
+                const landingTargetZ =
+                  transition.targetZ + boostDirectionRight * transition.landingBoostDistance;
+                transition.startX = transition.targetX;
+                transition.startY = transition.targetY;
+                transition.startZ = transition.targetZ;
+                transition.targetX = landingTargetX;
+                transition.targetY = transition.targetY;
+                transition.targetZ = landingTargetZ;
+                transition.duration = LEDGE_CLIMB_EXIT_BOOST_DURATION;
+                transition.elapsed = 0;
+                transition.phase = "landingBoost";
+              } else {
+                const targetX = transition.targetX;
+                const targetY = transition.targetY;
+                const targetZ = transition.targetZ;
+                ledgeClimbTransition = null;
+                grounded = true;
+                verticalVelocity = 0;
+                jumpOffset = Math.max(0, targetY - PLAYER_COLLIDER_CENTER_HEIGHT);
+                physicsCharacterPosition = {
+                  x: targetX,
+                  y: targetY,
+                  z: targetZ,
+                };
+                camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+              }
+            }
+            if (transition.phase === "landingBoost" && transition.elapsed >= transition.duration) {
               const targetX = transition.targetX;
               const targetY = transition.targetY;
               const targetZ = transition.targetZ;
@@ -8601,24 +8726,8 @@ export const createMahjongTableScene = (
               camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
             }
           }
-          if (transition.phase === "landingBoost" && transition.elapsed >= transition.duration) {
-            const targetX = transition.targetX;
-            const targetY = transition.targetY;
-            const targetZ = transition.targetZ;
-            ledgeClimbTransition = null;
-            grounded = true;
-            verticalVelocity = 0;
-            jumpOffset = Math.max(0, targetY - PLAYER_COLLIDER_CENTER_HEIGHT);
-            physicsCharacterPosition = {
-              x: targetX,
-              y: targetY,
-              z: targetZ,
-            };
-            camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
-          }
         }
-      }
-    } else {
+      } else {
         camera.position.x = THREE.MathUtils.clamp(
           camera.position.x,
           WORLD_BOUNDS.minX,
@@ -8666,11 +8775,11 @@ export const createMahjongTableScene = (
           CAMERA_BOB_MAX_FREQUENCY,
           movementSpeedRatio,
         );
-      camera.position.y =
-        baseCameraY + Math.sin(cameraBobPhase) * CAMERA_BOB_AMPLITUDE * cameraBobAmount;
+      const firstPersonMotion = getFirstPersonMotionOffsets();
+      camera.position.y = baseCameraY + firstPersonMotion.headBob;
       camera.updateMatrix();
-      if (Math.abs(cameraShiftRoll) > 0.0001) {
-        cameraRollMatrix.makeRotationZ(cameraShiftRoll);
+      if (Math.abs(firstPersonMotion.roll) > 0.0001) {
+        cameraRollMatrix.makeRotationZ(firstPersonMotion.roll);
         camera.matrix.multiply(cameraRollMatrix);
         camera.matrixWorldNeedsUpdate = true;
       }
@@ -8829,6 +8938,7 @@ export const createMahjongTableScene = (
     toggleCrouch,
     jump,
     setReticlePosition: setFocusReticle,
+    getReticleBobbingOffset,
     getAimRay,
     debug: {
       setCameraPreset: setDebugCameraPreset,
