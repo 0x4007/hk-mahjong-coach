@@ -1285,10 +1285,6 @@ export const resolveDofIntensityForPosture = (_isCrouched: boolean, isZoomed = f
   isZoomed ? ZOOMED_DOF_INTENSITY : STANDING_DOF_INTENSITY;
 const BOKEH_REFERENCE_STRENGTH = STANDING_DOF_INTENSITY;
 
-/** Resolve the default depth-of-field multiplier for the player's posture. */
-export const resolveDofIntensityForPosture = (isCrouched: boolean): number =>
-  isCrouched ? CROUCHING_DOF_INTENSITY : STANDING_DOF_INTENSITY;
-
 /** Normalize the existing global DoF slider around its standing calibration. */
 export const resolveHumanEyeBokehStrengthScale = (strength: number): number => {
   const safeStrength = Number.isFinite(strength) ? Math.max(0, strength) : BOKEH_REFERENCE_STRENGTH;
