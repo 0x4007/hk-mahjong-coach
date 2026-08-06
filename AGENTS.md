@@ -85,6 +85,22 @@ WARNING: UNLESS I SPECIFICALLY SAY IN MY INSTRUCTIONS YOU ARE NOT ALLOWED TO OPE
   the presentation offsets applied after physics resolves that base pose, and reticule/aim feedback must consume
   the same offsets.
 
+## Parametric world systems
+
+- Treat generative gameplay and visual behavior as one shared rule system for the game world. A new weapon or object
+  should need only its primitive parameters; derived size, lifetime, opacity, emission rate, motion, heat response,
+  recoil, and reload behavior must be computed automatically from those parameters.
+- Do not add per-weapon output tables, special-case branches, or magic tuning values when a continuous function can
+  express the relationship. Use explicit bounds and deterministic seeded variation around the shared functions.
+- Keep related outputs coupled: if damage, barrel length, heat, cadence, velocity, or mass changes, every dependent
+  effect should respond through the same model. Use inverse relationships where the world rule requires conservation,
+  such as smaller particles emitting more frequently.
+- For weapon effects, treat total damage per shot (`damage × pellets`) and the measured hot-barrel length as canonical
+  inputs. A generated weapon should therefore receive its smoke size, opacity, expansion, and emission rate without
+  adding separate shotgun, sniper, or machine-gun tuning entries.
+- Document the primitive inputs, derived functions, bounds, and any conservation rules in `documentation.md` and
+  `implementation.md` so generated content remains consistent with the authored world model.
+
 ## Visual-table HMR
 
 - After completing every visual-table feature or batch of scene edits, run

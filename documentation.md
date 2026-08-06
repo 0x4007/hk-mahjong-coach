@@ -488,18 +488,18 @@ match combat or persistence state.
 
 The visual-table scene now includes a seeded pickup and shooting loop in `apps/web/src/scene/weapons.ts`.
 Each normalized room seed produces one starter pistol in the penthouse and a deterministic outdoor spread
-of pistol, shotgun, machine gun, and sniper pickups. The penthouse also stages one visible pickup of each type
+of pistol, shotgun, machine gun, sniper, scoped carbine, and submachine gun pickups. The penthouse also stages one visible pickup of each type
 around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
 physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
 
 The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
 gun, and E equips the nearest pickup while stopped; number keys or Q switch
 owned weapons, 0 holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
-Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. All four procedural gun
+Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. All six procedural gun
 models use a shared near-black finish across their bodies, barrels, sights, and accent details. Each weapon has a
-distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
+distinct firing profile. The pistol, machine gun, sniper, scoped carbine, and submachine gun fire on the live reticule ray with no random
 projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
-recoil, ammo, reload state, and a four-slot HUD make the loop visible. Shot raycasts stay on authored
+recoil, ammo, reload state, and a six-slot HUD make the loop visible. Shot raycasts stay on authored
 scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss. Hitscan shots
 have no weapon-specific distance cap: they continue to the first render surface, while a miss tracer uses only the
 camera's finite far plane to keep its presentation geometry finite.
@@ -551,7 +551,7 @@ not an authoritative enemy, damage, replay, or multiplayer system.
 ## Penthouse armory chart
 
 The penthouse west wall now carries a readable `WeaponDamageAmmoChartSign`. Its chart is generated from
-`WEAPON_CHART_ENTRIES`, which is derived from the four playable weapon definitions, so it stays aligned with the
+`WEAPON_CHART_ENTRIES`, which is derived from the six playable weapon definitions, so it stays aligned with the
 pickup and loadout data. Each row shows the weapon name, damage per projectile, pellets per shot, loaded magazine,
 reserve ammunition, and total starting rounds. The footer defines the ammo order as `loaded / reserve` and calls out
 that shotgun damage is per pellet rather than per shell.
@@ -750,15 +750,18 @@ wall while holding breath, the factors compose to 25% for reticle, weapon, and s
 
 ## Damage-driven barrel heat
 
-The visual weapon prototype tracks a separate heat load for each gun. Only projectiles that hit a render surface add
-heat, using the weapon's per-bullet damage; a shotgun therefore adds one pellet's damage for each pellet that hits.
-Misses do not heat the barrel. At 500 accumulated damage units the barrel reaches the full red-hot red/emissive blend,
-with the material emissive intensity capped at `1`.
+The visual weapon prototype tracks a separate Celsius temperature for each gun. Every projectile that hits a render
+surface adds `0.25°C × damage` using the weapon's per-bullet damage; a shotgun therefore adds one pellet's damage for each
+pellet that hits. Misses do not heat the barrel. Temperature starts at the shared `20°C` ambient value, a very faint
+red glow begins at `500°C`, and the maximum bright cherry-red red/emissive blend is reached at `800°C` with material
+emissive intensity capped at `1`. Seven consecutive `100`-damage sniper hits reach only `195°C`; twenty hits begin the
+glow ramp and thirty-two hits reach the maximum temperature response.
+The linear glow map places `650°C` at half brightness and clamps temperatures at or above `800°C` to maximum.
 
-The barrel cools at a constant `16.67` damage units per second. The cooldown is therefore linear: 100 damage units take
-6 seconds, while 600 damage units take 36 seconds. The 500-damage red-hot threshold itself takes a maximum of 30
-seconds to cool. Cooling continues while the weapon is holstered or another weapon is equipped. Both the held view model
-and world pickup copies use the same weapon heat state.
+Cooling follows Newton's law rather than a linear timer. Each update applies
+`T = 20 + (T - 20) × exp(-0.003 × elapsedSeconds)`, so the barrel cools quickly at first and increasingly slowly as it
+approaches ambient. Cooling continues while the weapon is holstered or another weapon is equipped. Both the held view
+model and world pickup copies use the same weapon temperature state.
 
 ## Pooled barrel smoke
 
@@ -770,16 +773,16 @@ over the first 45% of its five-second life and lingers at maximum size for the r
 five-second lifetime. Opacity follows that expansion:
 source-sized smoke is bright, while the max-size linger is transparent. The plume inherits the nozzle's current world
 velocity, diffuses outward, then slows while rising before it is returned to the pool. Thermal wisps use the pale white
-steam color, scale with a restrained longest-barrel ramp (1× on the handgun to 1.6× on the sniper), and emit at an
-inverse rate (about 6.4 wisps/second on the handgun to 4 on the sniper). They use the same logarithmic expansion and
-inverse-opacity lifecycle as muzzle smoke, with a square-root damage response to avoid oversized shotgun/sniper steam.
-The heat ratio still eases in from 35%; wisps rise with a small deterministic curl, expand, and fade without collision or
+steam color, scale with a restrained longest-barrel ramp, and emit from one inverse-size equation: smaller parametric
+plumes emit more frequently. They use the same logarithmic expansion and inverse-opacity lifecycle as muzzle smoke,
+with a square-root damage response to avoid oversized shotgun/sniper steam.
+The glow ratio still eases in from 35%; wisps rise with a small deterministic curl, expand, and fade without collision or
 shadow work. The pool is attached to the scene world effects root, so smoke remains in place when the player turns,
 walks, holsters, or switches weapons.
 
 Smoke is a rendered world effect. The held muzzle samples the centralized camera/viewmodel pose at spawn, then the
 particle continues in world space with depth testing and normal Bokeh participation. Smoke variation uses the
-room-seeded RNG stream `<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel heat but do not
+room-seeded RNG stream `<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel glow but do not
 emit smoke.
 
 ## Agent test note layout
@@ -806,3 +809,48 @@ aim sway, head bob, roll, recoil, recovery, and the camera-attached viewmodel th
 path. This prevents the weapon sights from drifting away from the reticule when O₂ is low. The machine gun and other
 ordinary weapons still use the deterministic live ray with no random projectile cone; only the shotgun has inherent
 seeded pellet spread.
+
+## Per-shot audio
+
+Each accepted trigger pull creates one deterministic procedural shot, including a miss. No recorded gunshot samples are
+used. The only sound inputs are `damage` and the generated weapon `barrelLength`; the shot does not use room seed,
+pellet count, heat, or any other gameplay state. A fixed-seed `whiteNoise` buffer provides the static source, so equal
+parameters resolve to the same profile and noise sequence.
+
+The four layers are mixed at the same shot start time:
+
+| Layer            | Synthesis and processing                                                                                           | Parameter response                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Muzzle blast     | 50 ms white noise, instant attack, exponential decay, low-pass filter, light compressor, and fixed soft saturation | Damage lowers playback pitch and cutoff (1.15→0.75 pitch, 8200→1600 Hz) and raises level (0.8→1.3)                 |
+| Crack            | 6 ms white-noise burst through a high-pass filter                                                                  | Short barrels are louder; the base mix is 25%                                                                      |
+| Mechanical click | 10 ms square-wave pulse with an exponential envelope                                                               | Fixed 10% mix; damage and barrel length do not change it                                                           |
+| Tail             | White noise with exponential decay and low-pass filtering                                                          | Barrel length extends the tail from 80 to 250 ms, lowers its cutoff, and slightly reduces its level (50% base mix) |
+
+The damage curve uses configured per-bullet damage, not a shotgun's total pellet payload. The barrel curve uses the
+longest generated model barrel as the long-barrel endpoint. A scene-local `AudioContext` is created or resumed from the
+firing gesture; stopped source and filter nodes disconnect after their envelopes finish. Browsers without Web Audio or
+with a blocked autoplay context silently keep the visual shot effects and do not block gameplay.
+
+## Parametric carbine and burst submachine gun
+
+The visual armory now contains six generated weapon profiles. The two new profiles use only primitive gameplay and optic
+inputs; shared functions derive their reload mode, reload duration, recoil, shot sound, heat, smoke, and presentation.
+
+| Weapon         | Primitive profile                                                                                                  | Derived presentation                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Scoped carbine | 36 damage, 1 projectile, 18-round magazine, 0.42 s projectile interval, 3.2× scope                                 | Clip reload from `damage × magazine`, moderate recoil and smoke, reusable projected optic            |
+| Submachine gun | 9 damage, 1 projectile, 36-round magazine, 4-round burst, 0.045 s intra-burst interval, 0.24 s next-burst cooldown | Low per-projectile damage, fast four-shot burst, clip reload, per-projectile heat/recoil/smoke/audio |
+
+`burstSize` is the number of projectiles in one trigger burst. `fireIntervalSeconds` spaces projectiles inside that
+burst, while `burstCooldownSeconds` controls the pause before a held trigger starts the next burst. A released trigger
+does not cancel an active burst. The runtime still decrements one magazine round and emits one authoritative shot/effect
+record per projectile, so burst fire does not bypass hit, heat, recoil, smoke, audio, or HUD accounting.
+
+Scope geometry is described by each definition's optic profile (`magnification`, lens radius, tube dimensions, ring
+dimensions, sight-line height, and lens colour). The shared scope pass projects the actual camera-child glass and uses
+that profile's magnification for its narrow-FOV world feed. Explicit zoom is required; crouching alone does not enable
+the carbine or sniper optic. Number-row keys `5` and `6` select the carbine and submachine gun, and `Q` cycles all six
+owned weapons.
+
+The armory chart and table-side pickup set are generated from `WEAPON_DEFINITIONS`, so changing a primitive profile
+automatically changes its HUD/chart row, pickup model, reload timing, damage-scaled effects, and optic/burst metadata.

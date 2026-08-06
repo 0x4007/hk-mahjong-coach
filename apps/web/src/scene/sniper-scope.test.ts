@@ -82,6 +82,27 @@ describe("sniper scope lens projection", () => {
     expect(resolveSniperScopeCameraFov(45, 1)).toBeCloseTo(45, 8);
   });
 
+  it("uses the equipped optic profile instead of a sniper-only magnification", () => {
+    const camera = new THREE.PerspectiveCamera(45, 16 / 9, 0.05, 1200);
+    camera.lookAt(0, 0, -1);
+    camera.updateMatrixWorld(true);
+    const lens = new THREE.Object3D();
+    lens.position.set(0, 0, -0.8);
+    lens.updateMatrixWorld(true);
+
+    const projection = resolveSniperScopeProjection({
+      enabled: true,
+      camera,
+      lensAnchor: lens,
+      lensRadius: 0.07,
+      viewportWidth: 1600,
+      viewportHeight: 900,
+      magnification: 3.2,
+    });
+
+    expect(projection.magnification).toBe(3.2);
+  });
+
   it("keeps bullet-hole decals in the clean world feed", () => {
     expect(shouldRenderSniperScopeObject({ weaponVisual: true }, false)).toBe(false);
     expect(shouldRenderSniperScopeObject({ weaponVisual: true, bulletHoleRoot: true }, false)).toBe(

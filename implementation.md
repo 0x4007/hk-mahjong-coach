@@ -937,21 +937,27 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 
 ## 2026-08-06 — Damage-driven red-hot barrels
 
-- Added a shared barrel heat model to the visual weapon runtime. Each projectile that resolves against a visible
-  surface adds its configured bullet damage; misses add nothing, and shotgun pellets add independently.
-- A 500-damage heat load reaches the full red-hot material response. Cooling is linear at `10` damage units per
-  second, so 100 damage takes 10 seconds and 600 damage takes 60 seconds to cool. Heat is tracked per weapon and
-  continues cooling while the gun is holstered or another weapon is active.
-- Every procedural barrel receives its own material clone and uses the shared heat ratio to blend toward red emissive
+- Added a shared barrel temperature model to the visual weapon runtime. Each projectile that resolves against a visible
+  surface contributes its configured bullet damage in Celsius; misses add nothing, and shotgun pellets add independently.
+- Replaced damage units with Celsius: barrels start at `20°C`, begin with a very faint glow at `500°C`, and reach the
+  maximum bright cherry-red material response at `800°C`. Each hit adds `0.25°C × damage`, so seven `100`-damage sniper
+  hits reach only `195°C`; twenty hits begin the glow ramp and thirty-two hits reach the maximum response.
+- Cooling now follows Newton's law with `k = 0.003 s⁻¹`: `T = 20 + (T - 20) × exp(-k × elapsedSeconds)`. Heat is
+  tracked per weapon and continues cooling while the gun is holstered or another weapon is active.
+- Every procedural barrel receives its own material clone and uses the shared glow ratio to blend toward red emissive
   steel, capped at `emissiveIntensity = 1`. Pickup and held copies stay visually consistent without changing receiver
   or sight materials.
+- Validation on the final dirty fingerprint: the server-owned test bus passed `431/432` assertions, including all weapon
+  and Celsius-temperature coverage; one unrelated `packages/test-fixtures/src/core-engine.test.ts` property reports
+  `STACK_TRACE_ERROR`. Strict typecheck, production build, targeted Prettier, `git diff --check`, and the explicit Vite
+  HMR request passed. Browser interaction was not opened.
 
 ## 2026-08-06 — Pooled barrel smoke
 
 - Added a deterministic, fixed-budget smoke presentation to each held weapon. A shared procedural 64×64 alpha mask
   drives 192 pooled billboards; trigger pulls emit dense gray muzzle puffs whose size and count scale from total damage
-  per round (`damage × pellets`), while a separate pale-white thermal steam emitter follows the existing barrel heat
-  ratio and produces upward-curling wisps only above 35% heat. Thermal steam uses a restrained longest-barrel scale
+  per round (`damage × pellets`), while a separate pale-white thermal steam emitter follows the shared barrel glow
+  ratio and produces upward-curling wisps only above 35% glow. Thermal steam uses a restrained longest-barrel scale
   ramp from 1× on the handgun to 1.6× on the sniper, while damage still makes high-power rounds larger. Puffs start at
   zero opacity, use a normalized sigmoid fade-in, then rapidly expand with an ease-out logarithmic curve over the first
   45% of the shared five-second lifetime, lingering at maximum size while transparent. Opacity follows the expansion from
@@ -959,12 +965,12 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   while rising; shotgun and sniper rounds intentionally produce much larger clouds. The particle root lives in the scene
   world-effects root; each spawn captures the muzzle's world position and diffuses upward/outward independent of later
   camera movement or weapon switching.
-- Thermal smoke uses the same logarithmic expansion and inverse-opacity lifecycle as muzzle smoke, plus an inverse
-  barrel-size rate: about 6.4 wisps per second on the handgun down to the base four on the sniper. Its square-root
-  damage response keeps shotgun/sniper steam bounded, while heat still eases the rate in from 35% to full at 80%.
+- Thermal smoke uses the same logarithmic expansion and inverse-opacity lifecycle as muzzle smoke, with one inverse-size
+  emission equation: smaller parametric plumes emit more frequently. Its square-root damage response keeps shotgun/sniper
+  steam bounded, while glow still eases the rate in from 35% to full at 80%.
   Particles use no shadows, collision, or per-frame allocation, and their RNG stream is isolated from projectile spread.
-  Pickup copies keep the red-hot
-  material response but do not create smoke emitters. Full red-hot barrel saturation cools completely within 30 seconds.
+  Pickup copies keep the red-hot material response but do not create smoke emitters. Thermal temperature decays
+  exponentially toward the shared ambient value.
 - Validation: the server-owned test bus passed all 20 weapon-file assertions, including the new thermal-smoke curve
   regression; one unrelated dirty-lane `packages/test-fixtures/src/core-engine.test.ts` property failed with
   `STACK_TRACE_ERROR`. Web strict typecheck and production build passed. The explicit HMR request was sent while the
@@ -1004,3 +1010,40 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   regression coverage and the visual-table oxygen documentation.
 - Validation: the server-owned test bus passed all 427 assertions, strict typecheck, targeted ESLint, Prettier,
   production build, `git diff --check`, and the explicit Vite HMR request. Browser interaction was not opened.
+
+## 2026-08-06 — Damage-pitched per-shot audio
+
+- Added a four-layer procedural shot for every accepted trigger pull, including misses: a low-passed/compressed and
+  saturated muzzle-blast noise, a high-passed crack noise, a square-wave mechanical click, and a low-passed decaying
+  tail noise. No recorded samples are used.
+- The profile has exactly two inputs, per-bullet `damage` and generated `barrelLength`. Damage lowers playback pitch and
+  the muzzle cutoff while raising muzzle level; barrel length makes the crack quieter and the tail longer, darker, and
+  slightly quieter. The shotgun therefore uses one pellet's damage for its sound rather than its total payload.
+- The noise buffer uses a fixed seed independent of the room seed. A scene-local `AudioContext` is created or resumed
+  from the firing gesture, all four layers start together, envelopes decay exponentially, and stopped nodes disconnect.
+  Unsupported or autoplay-blocked audio fails soft and leaves the visual shot path active.
+- Added pure regressions for fixed `whiteNoise`, damage and barrel monotonic mappings, finite-input fallback, and exact
+  repeatability for identical parameters. The server-owned test bus passed `432/432` assertions on run
+  `1786022381638-32746-a407746c`; strict typecheck, targeted ESLint, the web production build, Prettier, `git diff --check`,
+  and the explicit Vite HMR request also passed. Browser audio interaction remains unverified because no new browser
+  session was opened.
+
+## 2026-08-06 — Parametric scoped carbine and burst submachine gun
+
+- Extended the shared weapon definition table with a scoped carbine and a low-damage submachine gun. The carbine
+  uses a 36-damage projectile, 0.42-second cadence, 18-round magazine, and a 3.2× optic. The submachine gun uses
+  9-damage projectiles, a 0.045-second intra-burst interval, four rounds per burst, and a 0.24-second next-burst
+  cooldown.
+- Added generic derived `fireMode`, `burstSize`, and `burstCooldownSeconds` fields. The runtime completes an active
+  burst after the trigger is released, then repeats bursts only while the trigger remains held; ammo, heat, recoil,
+  smoke, audio, hit effects, and shot counts still resolve per projectile through the existing shared paths.
+- Moved scope geometry and projection inputs into a reusable optic profile. Both the existing sniper and the new
+  carbine now use the same camera-child lens anchor and projected world feed, with magnification supplied by the
+  equipped weapon instead of a sniper-only constant.
+- Added deterministic table-side pickups, number-row slots 5 and 6, six-row armory chart output, and HUD guidance for
+  all six weapons. New derived chart rows expose fire mode, burst size, cooldown, and optic magnification directly from
+  the definitions.
+- Validation on the final dirty fingerprint: the server-owned test bus passed all `432/432` assertions, including
+  the six-profile, burst, and reusable optic regressions. Strict typecheck, focused weapon/scope ESLint, the web
+  production build, `git diff --check`, and the explicit Vite HMR request passed. Broader lint still reports existing
+  dirty-lane diagnostics in `main.tsx` and `mahjong-table.ts`; no additional browser session was opened.

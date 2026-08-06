@@ -1844,9 +1844,9 @@ const App = (): React.JSX.Element => {
                 ? "Reloading…"
                 : activeWeaponDefinition === null
                   ? hasOwnedWeapon
-                    ? "Q / 1–4 equip"
+                    ? "Q / 1–6 equip"
                     : "Find a glowing pickup"
-                  : "Click fire · R reload · 0 holster · Q / 1–4 switch"}
+                  : "Click fire · R reload · 0 holster · Q / 1–6 switch"}
             </small>
           </div>
           {isMobile && (
@@ -1912,7 +1912,7 @@ const App = (): React.JSX.Element => {
             <p>
               {isMobile
                 ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk into / E equip · click fire · right-click toggle aim · R reload · Q / 1–4 switch · Shift crouch · Space jump · Esc releases pointer"}
+                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk into / E equip · click fire · right-click toggle aim · R reload · Q / 1–6 switch · Shift crouch · Space jump · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

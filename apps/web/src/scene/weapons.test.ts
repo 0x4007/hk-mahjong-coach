@@ -6,6 +6,8 @@ import {
   resolveWeaponEffectOpacity,
   resolveWeaponReloadDuration,
   resolveWeaponReloadMode,
+  resolveWeaponBurstCooldownSeconds,
+  resolveWeaponBurstSize,
   resolveWeaponReloadPose,
   resolveWeaponReloadInsertionImpulse,
   resolveWeaponRoundReloadPose,
@@ -18,21 +20,27 @@ import {
   WEAPON_BULLET_HOLE_FADE_SECONDS,
   WEAPON_BULLET_HOLE_LIFETIME_SECONDS,
   WEAPON_BULLET_HOLE_MAX_COUNT,
-  WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND,
-  WEAPON_BARREL_HEAT_COOLDOWN_SECONDS,
-  WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD,
-  WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS,
+  WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
+  WEAPON_BARREL_GLOW_TEMPERATURE_C,
+  WEAPON_BARREL_RED_HOT_TEMPERATURE_C,
+  WEAPON_BARREL_HEAT_CELSIUS_PER_DAMAGE,
+  WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND,
   WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO,
   WEAPON_BARREL_SMOKE_START_HEAT_RATIO,
   WEAPON_PICKUP_RANGE_METERS,
   WEAPON_RELOAD_SKY_PITCH_RADIANS,
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
+  WEAPON_SHOT_SOUND_WAVEFORM,
   WEAPON_TRACER_LIFETIME_SECONDS,
   resolveWeaponSpreadRadians,
-  resolveWeaponBarrelCooldownSeconds,
-  resolveWeaponBarrelHeatDamage,
-  resolveWeaponBarrelHeatRatio,
+  resolveWeaponBarrelTemperatureC,
+  resolveWeaponBarrelGlowRatio,
   resolveWeaponBarrelSmokeRatio,
+  resolveGunAudioProfile,
+  GUN_AUDIO_MIN_DAMAGE,
+  GUN_AUDIO_MAX_DAMAGE,
+  GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+  GUN_AUDIO_MAX_BARREL_LENGTH_METERS,
   type WeaponSpawnRect,
 } from "./weapons.js";
 
@@ -41,20 +49,49 @@ describe("weapon definitions", () => {
     expect(resolveWeaponHotkey("Digit0")).toBeNull();
     expect(resolveWeaponHotkey("Digit1")).toBe("pistol");
     expect(resolveWeaponHotkey("Digit4")).toBe("sniper");
-    expect(resolveWeaponHotkey("Digit5")).toBeUndefined();
+    expect(resolveWeaponHotkey("Digit5")).toBe("carbine");
+    expect(resolveWeaponHotkey("Digit6")).toBe("submachineGun");
+    expect(resolveWeaponHotkey("Digit7")).toBeUndefined();
     expect(resolveWeaponHotkey("Numpad0")).toBeUndefined();
   });
 
-  it("contains the four playable weapon profiles", () => {
-    expect(WEAPON_IDS).toEqual(["pistol", "shotgun", "machineGun", "sniper"]);
+  it("contains the six playable weapon profiles", () => {
+    expect(WEAPON_IDS).toEqual([
+      "pistol",
+      "shotgun",
+      "machineGun",
+      "sniper",
+      "carbine",
+      "submachineGun",
+    ]);
     for (const weapon of WEAPON_IDS) {
       const definition = WEAPON_DEFINITIONS[weapon];
       expect(definition.magazineSize).toBeGreaterThan(0);
       expect(definition.reserveAmmo).toBeGreaterThan(definition.magazineSize);
       expect(definition.pellets).toBeGreaterThan(0);
       expect(definition.fireIntervalSeconds).toBeGreaterThan(0);
+      expect(definition.burstSize).toBeGreaterThan(0);
+      expect(definition.burstCooldownSeconds).toBeGreaterThanOrEqual(0);
       expect("range" in definition).toBe(false);
     }
+  });
+
+  it("derives a slow scoped carbine and an ultra-fast low-damage burst profile", () => {
+    const carbine = WEAPON_DEFINITIONS.carbine;
+    const submachineGun = WEAPON_DEFINITIONS.submachineGun;
+    expect(carbine.scope?.magnification).toBe(3.2);
+    expect(carbine.fireIntervalSeconds).toBeGreaterThan(
+      WEAPON_DEFINITIONS.machineGun.fireIntervalSeconds,
+    );
+    expect(carbine.damage).toBeGreaterThan(submachineGun.damage);
+    expect(submachineGun.fireMode).toBe("burst");
+    expect(submachineGun.burstSize).toBe(4);
+    expect(submachineGun.fireIntervalSeconds).toBeLessThan(
+      WEAPON_DEFINITIONS.machineGun.fireIntervalSeconds,
+    );
+    expect(submachineGun.damage).toBeLessThan(WEAPON_DEFINITIONS.machineGun.damage);
+    expect(resolveWeaponBurstSize(submachineGun)).toBe(4);
+    expect(resolveWeaponBurstCooldownSeconds(submachineGun)).toBeCloseTo(0.24, 8);
   });
 
   it("keeps the armory chart rows aligned with loaded and reserve ammunition", () => {
@@ -68,6 +105,10 @@ describe("weapon definitions", () => {
       expect(entry.totalAmmo).toBe(definition.magazineSize + definition.reserveAmmo);
       expect(entry.reloadMode).toBe(definition.reloadMode);
       expect(entry.reloadSeconds).toBe(definition.reloadSeconds);
+      expect(entry.burstSize).toBe(definition.burstSize);
+      expect(entry.burstCooldownSeconds).toBe(definition.burstCooldownSeconds);
+      expect(entry.fireMode).toBe(definition.fireMode);
+      expect(entry.scopeMagnification).toBe(definition.scope?.magnification ?? null);
     }
   });
 
@@ -76,9 +117,13 @@ describe("weapon definitions", () => {
     expect(resolveWeaponReloadMode(WEAPON_DEFINITIONS.machineGun)).toBe("clip");
     expect(resolveWeaponReloadMode(WEAPON_DEFINITIONS.shotgun)).toBe("round");
     expect(resolveWeaponReloadMode(WEAPON_DEFINITIONS.sniper)).toBe("round");
+    expect(resolveWeaponReloadMode(WEAPON_DEFINITIONS.carbine)).toBe("clip");
+    expect(resolveWeaponReloadMode(WEAPON_DEFINITIONS.submachineGun)).toBe("clip");
 
     expect(WEAPON_DEFINITIONS.pistol.reloadSeconds).toBeCloseTo(28 * 12 * 0.01, 8);
     expect(WEAPON_DEFINITIONS.machineGun.reloadSeconds).toBeCloseTo(12 * 30 * 0.01, 8);
+    expect(WEAPON_DEFINITIONS.carbine.reloadSeconds).toBeCloseTo(36 * 18 * 0.01, 8);
+    expect(WEAPON_DEFINITIONS.submachineGun.reloadSeconds).toBeCloseTo(9 * 36 * 0.01, 8);
     expect(WEAPON_DEFINITIONS.shotgun.totalDamagePerShot).toBe(16 * 8);
     expect(WEAPON_DEFINITIONS.shotgun.reloadSeconds).toBeCloseTo(16 * 8 * 0.01, 8);
     expect(WEAPON_DEFINITIONS.sniper.reloadSeconds).toBeCloseTo(100 * 0.01, 8);
@@ -122,7 +167,7 @@ describe("weapon definitions", () => {
   });
 
   it("keeps ordinary guns on the live aim ray and reserves inherent spread for the shotgun", () => {
-    for (const weapon of ["pistol", "machineGun", "sniper"] as const) {
+    for (const weapon of ["pistol", "machineGun", "sniper", "carbine", "submachineGun"] as const) {
       expect(resolveWeaponSpreadRadians(WEAPON_DEFINITIONS[weapon])).toBe(0);
     }
 
@@ -169,16 +214,18 @@ describe("procedural weapon pickups", () => {
       worldHalfSize: 80,
       pickupCountPerWeapon: 2,
     });
-    expect(pickups).toHaveLength(9);
+    expect(pickups).toHaveLength(13);
     expect(pickups[0]?.starter).toBe(true);
     expect(pickups[0]?.weapon).toBe("pistol");
     const tableSidePickups = pickups.filter((pickup) => pickup.nearTable === true);
-    expect(tableSidePickups).toHaveLength(4);
+    expect(tableSidePickups).toHaveLength(6);
     expect(tableSidePickups.map((pickup) => pickup.weapon)).toEqual([
       "pistol",
       "shotgun",
       "machineGun",
       "sniper",
+      "carbine",
+      "submachineGun",
     ]);
     for (const pickup of tableSidePickups) {
       expect(Math.hypot(pickup.position[0], pickup.position[2])).toBeLessThan(5);
@@ -311,32 +358,106 @@ describe("shot effect lifetimes", () => {
   });
 });
 
-describe("damage-driven barrel heat", () => {
-  it("uses hit damage, reaches red-hot at 500, and cools linearly", () => {
-    expect(WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD).toBe(500);
-    expect(WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS).toBe(30);
-    expect(WEAPON_BARREL_HEAT_COOLDOWN_SECONDS).toBe(30);
-    expect(WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND).toBeCloseTo(500 / 30, 8);
+describe("damage-driven shot audio", () => {
+  it("derives the layered gunshot profile from damage and barrel length", () => {
+    expect(WEAPON_SHOT_SOUND_WAVEFORM).toBe("whiteNoise");
+    const light = resolveGunAudioProfile({
+      damage: GUN_AUDIO_MIN_DAMAGE,
+      barrelLength: GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+    });
+    const heavy = resolveGunAudioProfile({
+      damage: GUN_AUDIO_MAX_DAMAGE,
+      barrelLength: GUN_AUDIO_MAX_BARREL_LENGTH_METERS,
+    });
+    expect(light.damagePitch).toBeGreaterThan(heavy.damagePitch);
+    expect(light.damageVolume).toBeLessThan(heavy.damageVolume);
+    expect(light.muzzleCutoffFrequencyHz).toBeGreaterThan(heavy.muzzleCutoffFrequencyHz);
+    expect(light.crackVolume).toBeGreaterThan(heavy.crackVolume);
+    expect(light.tailDurationSeconds).toBeLessThan(heavy.tailDurationSeconds);
+    expect(light.tailCutoffFrequencyHz).toBeGreaterThan(heavy.tailCutoffFrequencyHz);
+    expect(resolveGunAudioProfile({ damage: Number.NaN, barrelLength: Number.NaN })).toEqual(
+      resolveGunAudioProfile({
+        damage: GUN_AUDIO_MIN_DAMAGE,
+        barrelLength: GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+      }),
+    );
+  });
 
-    expect(resolveWeaponBarrelHeatDamage(0, 500)).toBe(500);
-    expect(resolveWeaponBarrelHeatRatio(500)).toBe(1);
-    expect(resolveWeaponBarrelHeatRatio(250)).toBeCloseTo(0.5, 8);
-    expect(resolveWeaponBarrelCooldownSeconds(100)).toBeCloseTo(6, 8);
-    expect(resolveWeaponBarrelCooldownSeconds(600)).toBeCloseTo(36, 8);
-    expect(resolveWeaponBarrelHeatDamage(250, 0, 25)).toBeCloseTo(0, 8);
-    expect(resolveWeaponBarrelHeatDamage(500, 0, 30)).toBeCloseTo(0, 8);
+  it("returns the exact same profile for identical parameters", () => {
+    const parameters = { damage: 50, barrelLength: 0.8 } as const;
+    expect(resolveGunAudioProfile(parameters)).toEqual(resolveGunAudioProfile(parameters));
+  });
+});
+
+describe("damage-driven barrel temperature", () => {
+  it("uses Celsius thresholds and exponential Newton cooling", () => {
+    expect(WEAPON_BARREL_AMBIENT_TEMPERATURE_C).toBe(20);
+    expect(WEAPON_BARREL_GLOW_TEMPERATURE_C).toBe(500);
+    expect(WEAPON_BARREL_RED_HOT_TEMPERATURE_C).toBe(800);
+    expect(WEAPON_BARREL_HEAT_CELSIUS_PER_DAMAGE).toBe(0.25);
+    expect(WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND).toBe(0.003);
+
+    expect(resolveWeaponBarrelTemperatureC(WEAPON_BARREL_AMBIENT_TEMPERATURE_C, 0)).toBe(20);
+    expect(resolveWeaponBarrelGlowRatio(WEAPON_BARREL_AMBIENT_TEMPERATURE_C)).toBe(0);
+    expect(resolveWeaponBarrelGlowRatio(WEAPON_BARREL_GLOW_TEMPERATURE_C)).toBe(0);
+    expect(resolveWeaponBarrelGlowRatio(650)).toBeCloseTo(0.5, 8);
+    expect(resolveWeaponBarrelGlowRatio(WEAPON_BARREL_RED_HOT_TEMPERATURE_C)).toBe(1);
+    expect(resolveWeaponBarrelGlowRatio(800)).toBe(1);
+
+    const cooledTemperature = resolveWeaponBarrelTemperatureC(
+      WEAPON_BARREL_RED_HOT_TEMPERATURE_C,
+      0,
+      10,
+    );
+    expect(cooledTemperature).toBeCloseTo(
+      WEAPON_BARREL_AMBIENT_TEMPERATURE_C +
+        (WEAPON_BARREL_RED_HOT_TEMPERATURE_C - WEAPON_BARREL_AMBIENT_TEMPERATURE_C) *
+          Math.exp(-WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND * 10),
+      8,
+    );
+    expect(cooledTemperature).toBeGreaterThan(WEAPON_BARREL_AMBIENT_TEMPERATURE_C);
   });
 
   it("adds each hit pellet's damage while misses add nothing", () => {
     const shotgunPelletDamage = 16;
-    const afterMiss = resolveWeaponBarrelHeatDamage(0, 0);
+    const afterMiss = resolveWeaponBarrelTemperatureC(WEAPON_BARREL_AMBIENT_TEMPERATURE_C, 0);
     const afterEightPelletHits = Array.from({ length: 8 }).reduce<number>(
-      (heat: number) => resolveWeaponBarrelHeatDamage(heat, shotgunPelletDamage),
+      (temperatureC: number) => resolveWeaponBarrelTemperatureC(temperatureC, shotgunPelletDamage),
       afterMiss,
     );
 
-    expect(afterMiss).toBe(0);
-    expect(afterEightPelletHits).toBe(128);
+    expect(afterMiss).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C);
+    expect(afterEightPelletHits).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C + 128);
+  });
+
+  it("keeps seven 100-damage sniper hits below the glow threshold", () => {
+    const sniperDamage = WEAPON_DEFINITIONS.sniper.damage;
+    const afterSevenRounds = Array.from({ length: 7 }).reduce<number>(
+      (temperatureC: number) => resolveWeaponBarrelTemperatureC(temperatureC, sniperDamage),
+      WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
+    );
+
+    expect(sniperDamage).toBe(100);
+    expect(afterSevenRounds).toBe(195);
+    expect(afterSevenRounds).toBeLessThan(WEAPON_BARREL_GLOW_TEMPERATURE_C);
+    expect(resolveWeaponBarrelGlowRatio(afterSevenRounds)).toBe(0);
+  });
+
+  it("reaches the glow and maximum thresholds only after the scaled sniper heat load", () => {
+    const sniperDamage = WEAPON_DEFINITIONS.sniper.damage;
+    const afterTwentyRounds = Array.from({ length: 20 }).reduce<number>(
+      (temperatureC: number) => resolveWeaponBarrelTemperatureC(temperatureC, sniperDamage),
+      WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
+    );
+    const afterThirtyTwoRounds = Array.from({ length: 32 }).reduce<number>(
+      (temperatureC: number) => resolveWeaponBarrelTemperatureC(temperatureC, sniperDamage),
+      WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
+    );
+
+    expect(afterTwentyRounds).toBe(520);
+    expect(afterTwentyRounds).toBeGreaterThan(WEAPON_BARREL_GLOW_TEMPERATURE_C);
+    expect(afterThirtyTwoRounds).toBe(820);
+    expect(resolveWeaponBarrelGlowRatio(afterThirtyTwoRounds)).toBe(1);
   });
 
   it("keeps thermal smoke off cool barrels and eases it into the full rate", () => {

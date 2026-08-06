@@ -1,7 +1,17 @@
 import { createSeededRandom } from "@hk-mahjong/core/public";
 
-export const WEAPON_IDS = ["pistol", "shotgun", "machineGun", "sniper"] as const;
+export const WEAPON_IDS = [
+  "pistol",
+  "shotgun",
+  "machineGun",
+  "sniper",
+  "carbine",
+  "submachineGun",
+] as const;
 export type WeaponId = (typeof WEAPON_IDS)[number];
+
+/** Trigger presentation derived from the primitive burst size. */
+export type WeaponFireMode = "automatic" | "burst";
 
 /** The two reload mechanisms used by the visual weapon prototype. */
 export type WeaponReloadMode = "clip" | "round";
@@ -17,10 +27,11 @@ export const resolveWeaponHotkey = (code: string): WeaponId | null | undefined =
   if (code === "Digit0") {
     return null;
   }
-  if (!/^Digit[1-4]$/u.test(code)) {
+  if (!/^Digit[1-9]$/u.test(code)) {
     return undefined;
   }
-  return WEAPON_IDS[Number(code.slice(-1)) - 1];
+  const index = Number(code.slice(-1)) - 1;
+  return WEAPON_IDS[index];
 };
 
 /** Presentation lifetimes for the deterministic shot effects. */
@@ -31,19 +42,76 @@ export const WEAPON_BULLET_HOLE_FADE_SECONDS = 12;
 /** Keep sustained automatic fire from accumulating unbounded scene objects. */
 export const WEAPON_BULLET_HOLE_MAX_COUNT = 256;
 
-/** Damage payload that makes a barrel fully red hot. */
-export const WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD = 500;
-/** Full red-hot saturation cools back to ambient within thirty seconds. */
-export const WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS = 30;
-/** Linear cooling rate shared by every weapon barrel. */
-export const WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND =
-  WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD / WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS;
-/** Cooling time for the full red-hot threshold at the shared linear rate. */
-export const WEAPON_BARREL_HEAT_COOLDOWN_SECONDS = WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS;
+/** Fixed sound sources supported by the procedural shot-audio path. */
+export type WeaponShotSoundWaveform = OscillatorType | "whiteNoise";
+/** One deliberately static white-noise timbre for every trigger pull. */
+export const WEAPON_SHOT_SOUND_WAVEFORM: WeaponShotSoundWaveform = "whiteNoise";
+export interface GunAudioParameters {
+  readonly damage: number;
+  readonly barrelLength: number;
+}
 
-/** Heat band in which a barrel begins to produce a visible thermal wisp. */
+export interface GunAudioProfile {
+  readonly damagePitch: number;
+  readonly damageVolume: number;
+  readonly muzzleCutoffFrequencyHz: number;
+  readonly crackVolume: number;
+  readonly tailDurationSeconds: number;
+  readonly tailVolume: number;
+  readonly tailCutoffFrequencyHz: number;
+}
+
+/** Damage bounds used by the continuous procedural gunshot curve. */
+export const GUN_AUDIO_MIN_DAMAGE = 12;
+export const GUN_AUDIO_MAX_DAMAGE = 100;
+/** Barrel bounds used by the continuous resonance curve. */
+export const GUN_AUDIO_MIN_BARREL_LENGTH_METERS = 0.34;
+export const GUN_AUDIO_MAX_BARREL_LENGTH_METERS = 1.35;
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+/** Resolve the four-layer gunshot controls from damage and barrel length only. */
+export const resolveGunAudioProfile = ({
+  damage,
+  barrelLength,
+}: GunAudioParameters): GunAudioProfile => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : GUN_AUDIO_MIN_DAMAGE;
+  const damageRatio = clamp01(
+    (safeDamage - GUN_AUDIO_MIN_DAMAGE) / (GUN_AUDIO_MAX_DAMAGE - GUN_AUDIO_MIN_DAMAGE),
+  );
+  const damageCurve = Math.sqrt(damageRatio);
+  const safeBarrelLength = Number.isFinite(barrelLength)
+    ? Math.max(0, barrelLength)
+    : GUN_AUDIO_MIN_BARREL_LENGTH_METERS;
+  const barrelRatio = clamp01(
+    (safeBarrelLength - GUN_AUDIO_MIN_BARREL_LENGTH_METERS) /
+      (GUN_AUDIO_MAX_BARREL_LENGTH_METERS - GUN_AUDIO_MIN_BARREL_LENGTH_METERS),
+  );
+  return {
+    damagePitch: 1.15 - damageCurve * 0.4,
+    damageVolume: 0.8 + damageCurve * 0.5,
+    muzzleCutoffFrequencyHz: 8200 - damageCurve * 6600,
+    crackVolume: 0.25 - barrelRatio * 0.13,
+    tailDurationSeconds: 0.08 + barrelRatio * 0.17,
+    tailVolume: 0.5 - barrelRatio * 0.1,
+    tailCutoffFrequencyHz: 3600 - barrelRatio * 2200,
+  };
+};
+
+/** Surrounding temperature used as the lower bound for every weapon barrel. */
+export const WEAPON_BARREL_AMBIENT_TEMPERATURE_C = 20;
+/** A barrel begins its very faint visible red glow at this temperature. */
+export const WEAPON_BARREL_GLOW_TEMPERATURE_C = 500;
+/** A barrel reaches the maximum bright cherry-red material response at this temperature. */
+export const WEAPON_BARREL_RED_HOT_TEMPERATURE_C = 800;
+/** A quarter degree Celsius of barrel heat is added for each point of hit damage. */
+export const WEAPON_BARREL_HEAT_CELSIUS_PER_DAMAGE = 0.25;
+/** Newton-cooling coefficient shared by every weapon barrel. */
+export const WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND = 0.003;
+
+/** Glow band in which a barrel begins to produce a visible thermal wisp. */
 export const WEAPON_BARREL_SMOKE_START_HEAT_RATIO = 0.35;
-/** Heat band at which the thermal wisp emitter reaches its full rate. */
+/** Glow band at which the thermal wisp emitter reaches its full rate. */
 export const WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO = 0.8;
 /** Base thermal-wisp rate for the longest heated barrel; shorter barrels emit more often. */
 export const WEAPON_BARREL_SMOKE_MAX_RATE = 4;
@@ -51,42 +119,47 @@ export const WEAPON_BARREL_SMOKE_MAX_RATE = 4;
 export const WEAPON_BARREL_SMOKE_POOL_SIZE = 192;
 
 /**
- * Resolve a barrel's remaining heat load after one hit and one elapsed-time
- * slice. Hit damage is deliberately separate from shots fired: a miss adds no
- * heat, and every shotgun pellet that hits contributes its own damage.
+ * Resolve a barrel temperature after one hit and one elapsed-time slice.
+ * Cooling is exponential (Newton's law of cooling), so the result is
+ * independent of frame rate. Hit damage is deliberately separate from shots
+ * fired: a miss adds no heat, and every shotgun pellet that hits contributes
+ * its own damage.
  */
-export const resolveWeaponBarrelHeatDamage = (
-  currentDamage: number,
+export const resolveWeaponBarrelTemperatureC = (
+  currentTemperatureC: number,
   hitDamage = 0,
   elapsedSeconds = 0,
 ): number => {
-  const current = Number.isFinite(currentDamage) ? Math.max(0, currentDamage) : 0;
+  const current = Number.isFinite(currentTemperatureC)
+    ? Math.max(WEAPON_BARREL_AMBIENT_TEMPERATURE_C, currentTemperatureC)
+    : WEAPON_BARREL_AMBIENT_TEMPERATURE_C;
   const added = Number.isFinite(hitDamage) ? Math.max(0, hitDamage) : 0;
   const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
-  return Math.max(0, current + added - elapsed * WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND);
+  const cooledTemperature =
+    WEAPON_BARREL_AMBIENT_TEMPERATURE_C +
+    (current - WEAPON_BARREL_AMBIENT_TEMPERATURE_C) *
+      Math.exp(-WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND * elapsed);
+  return cooledTemperature + added * WEAPON_BARREL_HEAT_CELSIUS_PER_DAMAGE;
 };
 
-/** Resolve the clamped red-hot presentation ratio for a heat load. */
-export const resolveWeaponBarrelHeatRatio = (damage: number): number => {
-  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : 0;
-  return Math.min(1, safeDamage / WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD);
+/** Resolve the clamped red-glow presentation ratio for a Celsius temperature. */
+export const resolveWeaponBarrelGlowRatio = (temperatureC: number): number => {
+  const safeTemperature = Number.isFinite(temperatureC)
+    ? Math.max(WEAPON_BARREL_AMBIENT_TEMPERATURE_C, temperatureC)
+    : WEAPON_BARREL_AMBIENT_TEMPERATURE_C;
+  const glowSpan = WEAPON_BARREL_RED_HOT_TEMPERATURE_C - WEAPON_BARREL_GLOW_TEMPERATURE_C;
+  return Math.min(1, Math.max(0, (safeTemperature - WEAPON_BARREL_GLOW_TEMPERATURE_C) / glowSpan));
 };
 
-/** Resolve a smoothed thermal-smoke ratio from the normalized barrel heat. */
-export const resolveWeaponBarrelSmokeRatio = (heatRatio: number): number => {
-  const safeRatio = Number.isFinite(heatRatio) ? Math.max(0, Math.min(1, heatRatio)) : 0;
+/** Resolve a smoothed thermal-smoke ratio from the normalized barrel glow. */
+export const resolveWeaponBarrelSmokeRatio = (glowRatio: number): number => {
+  const safeRatio = Number.isFinite(glowRatio) ? Math.max(0, Math.min(1, glowRatio)) : 0;
   const span = WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO - WEAPON_BARREL_SMOKE_START_HEAT_RATIO;
   const normalized = Math.max(
     0,
     Math.min(1, (safeRatio - WEAPON_BARREL_SMOKE_START_HEAT_RATIO) / span),
   );
   return normalized * normalized * (3 - 2 * normalized);
-};
-
-/** Resolve the linear cooldown time for a barrel's current heat load. */
-export const resolveWeaponBarrelCooldownSeconds = (damage: number): number => {
-  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : 0;
-  return safeDamage / WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND;
 };
 
 export type WeaponEffectKind = "tracer" | "impact" | "bulletHole";
@@ -133,6 +206,18 @@ export interface WeaponIronSightProfile {
   readonly railWidth: number;
 }
 
+/** Primitive optic inputs used to derive the shared projected scope effect. */
+export interface WeaponScopeProfile {
+  readonly magnification: number;
+  readonly lensRadius: number;
+  readonly bodyLength: number;
+  readonly bodyRadius: number;
+  readonly ringRadius: number;
+  readonly ringTubeRadius: number;
+  readonly modelY: number;
+  readonly lensColor: number;
+}
+
 interface WeaponDefinitionInput {
   readonly id: WeaponId;
   readonly label: string;
@@ -142,22 +227,49 @@ interface WeaponDefinitionInput {
   readonly magazineSize: number;
   readonly reserveAmmo: number;
   readonly fireIntervalSeconds: number;
+  /** Number of projectiles in one trigger burst; one means continuous fire. */
+  readonly burstSize?: number;
+  /** Cooldown before a held trigger can start the next burst. */
+  readonly burstCooldownSeconds?: number;
   /** Explicit override for unusual weapons; ordinary new guns use the damage threshold. */
   readonly reloadMode?: WeaponReloadMode;
   /** Inherent projectile cone. Non-shotguns keep this at zero and rely on the shared aim stack. */
   readonly spreadRadians: number;
   readonly color: number;
   readonly ironSight: WeaponIronSightProfile;
+  readonly scope?: WeaponScopeProfile;
 }
 
-export interface WeaponDefinition extends Omit<WeaponDefinitionInput, "reloadMode"> {
+export interface WeaponDefinition extends Omit<
+  WeaponDefinitionInput,
+  "reloadMode" | "burstSize" | "burstCooldownSeconds"
+> {
   /** Clip reloads finish once; round reloads insert one round per interval. */
   readonly reloadMode: WeaponReloadMode;
+  readonly burstSize: number;
+  readonly burstCooldownSeconds: number;
+  readonly fireMode: WeaponFireMode;
   /** Damage represented by one reload operation, derived from the weapon profile. */
   readonly totalDamagePerShot: number;
   /** Full-clip duration for clip weapons, or one round/shell duration for round weapons. */
   readonly reloadSeconds: number;
 }
+
+/** Resolve a valid projectile count for one trigger burst. */
+export const resolveWeaponBurstSize = (
+  definition: Pick<WeaponDefinitionInput, "burstSize">,
+): number => {
+  const burstSize = definition.burstSize ?? 1;
+  return Number.isFinite(burstSize) ? Math.max(1, Math.floor(burstSize)) : 1;
+};
+
+/** Resolve the pause before a held trigger can begin its next burst. */
+export const resolveWeaponBurstCooldownSeconds = (
+  definition: Pick<WeaponDefinitionInput, "fireIntervalSeconds" | "burstCooldownSeconds">,
+): number => {
+  const cooldown = definition.burstCooldownSeconds ?? definition.fireIntervalSeconds;
+  return Number.isFinite(cooldown) ? Math.max(0, cooldown) : 0;
+};
 
 /** Resolve whether a weapon reloads as a full clip or as individual rounds. */
 export const resolveWeaponReloadMode = (
@@ -201,9 +313,12 @@ export const canInterruptWeaponReload = (
 /** Build a definition so all future guns inherit the damage-based reload rule. */
 const defineWeapon = (input: WeaponDefinitionInput): WeaponDefinition => {
   const reloadMode = input.reloadMode ?? resolveWeaponReloadMode(input);
-  const definition = { ...input, reloadMode } as const;
+  const burstSize = resolveWeaponBurstSize(input);
+  const burstCooldownSeconds = resolveWeaponBurstCooldownSeconds(input);
+  const definition = { ...input, burstSize, burstCooldownSeconds, reloadMode } as const;
   return {
     ...definition,
+    fireMode: burstSize > 1 ? "burst" : "automatic",
     totalDamagePerShot: input.damage * input.pellets,
     reloadSeconds: resolveWeaponReloadSeconds(definition),
   };
@@ -305,6 +420,16 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     fireIntervalSeconds: 1.1,
     spreadRadians: 0,
     color: 0xb98ee8,
+    scope: {
+      magnification: 5,
+      lensRadius: 0.062,
+      bodyLength: 0.56,
+      bodyRadius: 0.061,
+      ringRadius: 0.07,
+      ringTubeRadius: 0.012,
+      modelY: 0.11979078,
+      lensColor: 0x6edbe9,
+    },
     ironSight: {
       frontZ: -1.16,
       frontBaseY: 0.018,
@@ -320,6 +445,74 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
       railY: 0.06,
       railHeight: 0.016,
       railWidth: 0.08,
+    },
+  }),
+  carbine: defineWeapon({
+    id: "carbine",
+    label: "Scoped carbine",
+    shortLabel: "CARBINE",
+    damage: 36,
+    pellets: 1,
+    magazineSize: 18,
+    reserveAmmo: 90,
+    fireIntervalSeconds: 0.42,
+    spreadRadians: 0,
+    color: 0x9bd37a,
+    scope: {
+      magnification: 3.2,
+      lensRadius: 0.07,
+      bodyLength: 0.48,
+      bodyRadius: 0.055,
+      ringRadius: 0.064,
+      ringTubeRadius: 0.01,
+      modelY: 0.11979078,
+      lensColor: 0x9ce8c2,
+    },
+    ironSight: {
+      frontZ: -0.86,
+      frontBaseY: 0.018,
+      frontHeight: 0.095,
+      frontWidth: 0.03,
+      frontDepth: 0.045,
+      rearZ: 0.44,
+      rearBaseY: 0.035,
+      rearHeight: 0.06,
+      rearEarWidth: 0.024,
+      rearNotchWidth: 0.075,
+      rearDepth: 0.065,
+      railY: 0.062,
+      railHeight: 0.016,
+      railWidth: 0.08,
+    },
+  }),
+  submachineGun: defineWeapon({
+    id: "submachineGun",
+    label: "Submachine gun",
+    shortLabel: "BURST",
+    damage: 9,
+    pellets: 1,
+    magazineSize: 36,
+    reserveAmmo: 180,
+    fireIntervalSeconds: 0.045,
+    burstSize: 4,
+    burstCooldownSeconds: 0.24,
+    spreadRadians: 0,
+    color: 0xf28aaf,
+    ironSight: {
+      frontZ: -0.52,
+      frontBaseY: 0.016,
+      frontHeight: 0.082,
+      frontWidth: 0.028,
+      frontDepth: 0.042,
+      rearZ: 0.26,
+      rearBaseY: 0.035,
+      rearHeight: 0.055,
+      rearEarWidth: 0.022,
+      rearNotchWidth: 0.07,
+      rearDepth: 0.06,
+      railY: 0.06,
+      railHeight: 0.015,
+      railWidth: 0.075,
     },
   }),
 };
@@ -339,6 +532,10 @@ export interface WeaponChartEntry {
   readonly totalAmmo: number;
   readonly reloadMode: WeaponReloadMode;
   readonly reloadSeconds: number;
+  readonly burstSize: number;
+  readonly burstCooldownSeconds: number;
+  readonly fireMode: WeaponFireMode;
+  readonly scopeMagnification: number | null;
 }
 
 export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map((weapon) => {
@@ -354,6 +551,10 @@ export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map(
     totalAmmo: definition.magazineSize + definition.reserveAmmo,
     reloadMode: definition.reloadMode,
     reloadSeconds: definition.reloadSeconds,
+    burstSize: definition.burstSize,
+    burstCooldownSeconds: definition.burstCooldownSeconds,
+    fireMode: definition.fireMode,
+    scopeMagnification: definition.scope?.magnification ?? null,
   };
 });
 
@@ -368,7 +569,7 @@ export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map(
  * cone; it only contributes to the reticle and presentation motion.
  */
 export const resolveWeaponSpreadRadians = (definition: WeaponDefinition): number =>
-  definition.id === "shotgun" ? definition.spreadRadians : 0;
+  Math.max(0, Number.isFinite(definition.spreadRadians) ? definition.spreadRadians : 0);
 
 /**
  * Resolve the short local view-model slide from the same per-projectile
@@ -558,7 +759,7 @@ export const WEAPON_PICKUP_RANGE_METERS = 3.5;
 
 /**
  * Keep one readable pickup for every weapon in the table-first penthouse
- * composition. The four pads sit outside the table footprint, with the
+ * composition. The six pads sit outside the table footprint, with the
  * starter pistol closest to the initial south-seat camera.
  */
 const TABLE_SIDE_PICKUP_LAYOUT = [
@@ -581,6 +782,16 @@ const TABLE_SIDE_PICKUP_LAYOUT = [
     weapon: "sniper",
     position: [-2.65, PICKUP_HEIGHT, -3.55],
     rotation: Math.PI + 0.32,
+  },
+  {
+    weapon: "carbine",
+    position: [4.25, PICKUP_HEIGHT, 0],
+    rotation: -Math.PI / 2,
+  },
+  {
+    weapon: "submachineGun",
+    position: [-4.25, PICKUP_HEIGHT, 0],
+    rotation: Math.PI / 2,
   },
 ] as const satisfies readonly {
   readonly weapon: WeaponId;
@@ -659,7 +870,7 @@ const fallbackCandidate = (
  * Generate deterministic weapon pickups for one room seed.
  *
  * One pickup for each weapon is staged beside the penthouse mahjong table so
- * the four weapon types are visible and immediately testable. Remaining
+ * all weapon types are visible and immediately testable. Remaining
  * pickups are seeded across the streamed world. Reserved authored play areas
  * and coarse scene obstacles apply to those outdoor placements; the deliberate
  * table-side set is the only placement inside the penthouse reservation.

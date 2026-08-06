@@ -42,6 +42,8 @@ export interface ResolveSniperScopeProjectionInput {
   readonly lensRadius: number;
   readonly viewportWidth: number;
   readonly viewportHeight: number;
+  /** Optical power supplied by the equipped weapon's scope profile. */
+  readonly magnification?: number | undefined;
   /** Optional 0–1 transition amount for crouch presentation. */
   readonly blend?: number;
 }
@@ -93,13 +95,17 @@ export const shouldRenderSniperScopeObject = (
 const safeViewportDimension = (value: number): number =>
   Math.max(1, Number.isFinite(value) ? value : 1);
 
-const disabledProjection = (width: number, height: number): SniperScopeProjection => ({
+const disabledProjection = (
+  width: number,
+  height: number,
+  magnification: number,
+): SniperScopeProjection => ({
   enabled: false,
   center: { x: 0.5, y: 0.5 },
   radius: SNIPER_SCOPE_DEFAULT_RADIUS,
   resolution: { x: width, y: height },
   sceneResolution: { x: 1, y: 1 },
-  magnification: SNIPER_SCOPE_MAGNIFICATION,
+  magnification,
   feather: SNIPER_SCOPE_FEATHER,
   blend: 0,
 });
@@ -117,9 +123,13 @@ export const resolveSniperScopeProjection = (
 ): SniperScopeProjection => {
   const width = safeViewportDimension(input.viewportWidth);
   const height = safeViewportDimension(input.viewportHeight);
+  const magnification = Math.max(
+    1,
+    Number.isFinite(input.magnification) ? (input.magnification ?? 1) : SNIPER_SCOPE_MAGNIFICATION,
+  );
   const blend = clamp(input.blend ?? (input.enabled ? 1 : 0), 0, 1);
   if (!input.enabled || input.lensAnchor === null || blend <= 0) {
-    return disabledProjection(width, height);
+    return disabledProjection(width, height, magnification);
   }
 
   const radius = Math.max(
@@ -159,7 +169,7 @@ export const resolveSniperScopeProjection = (
     radius: resolvedRadius,
     resolution: { x: width, y: height },
     sceneResolution: { x: sceneSize, y: sceneSize },
-    magnification: SNIPER_SCOPE_MAGNIFICATION,
+    magnification,
     feather: SNIPER_SCOPE_FEATHER,
     blend,
   };
