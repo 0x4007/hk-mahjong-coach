@@ -183,9 +183,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   distance, target kind, pupil diameter, and blur intensity, and the debug menu now includes a 0–25× DoF-strength
   slider for visual comparison, with posture defaults of 12.5× standing and 25× crouching; higher values remain
   available for stronger cinematic bokeh experiments. The practical distance envelope now uses a smooth eased curve
-  calibrated from the focus lab for telemetry. The post-process shader now evaluates a thin-lens circle of confusion
-  per depth-buffer sample: the reciprocal object-distance term makes near geometry blur ramp up sharply toward the eye,
-  while distant geometry near the gaze distance remains sharp; pupil dilation scales the response in low light.
+  calibrated from the focus lab for telemetry. The physical eye-CoC shader experiment is checkpointed separately and
+  currently disabled after visual review; the active post-process uses the stock normalized depth response while the
+  blur scale and depth-buffer mapping are reassessed.
   The original physical-glass transmission/opacity
   values are restored as well. GTAO remains available as a separately toggled reduced-resolution pass.
 - `?debug=1` now exposes adaptive/high/medium/low quality selection plus live Bokeh, GTAO, glass mode,
@@ -637,7 +637,7 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Updated the first-person control hints and documentation to describe the directional double-tap behavior. Added a
   focused regression for all eight movement keys, cross-key isolation, key-repeat suppression, and the timing bounds.
 
-## 2026-08-06 — Physical near-field eye DoF experiment
+## 2026-08-06 — Physical near-field eye DoF experiment (checkpointed, disabled)
 
 - Added `resolveHumanEyeCircleOfConfusion()`, a pure thin-lens model using the existing 17 mm eye, adaptive pupil,
   gaze focus distance, and per-object depth. The reciprocal object-distance term makes blur increase nonlinearly as
@@ -646,7 +646,8 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   The camera-child weapon remains excluded from gaze-target selection but participates in the normal depth pass, so
   near ironsights can blur while the distant world stays comparatively sharp without an ADS-specific state.
 - Added focused regressions for near-depth monotonicity, zero blur on the focus plane, and reduced far-depth defocus.
-- The existing Vite lane received `pnpm hmr "Experiment: compare physical near-field blur at 0.25m, 0.5m, 2m, and distant focus; keep far world sharp"`.
+- The experiment was checkpointed at `534f04b` and then disabled after the existing Vite lane showed excessive whole-world
+  blur during zoom. The active renderer is back on the prior stock Bokeh depth response; no ADS-specific state was added.
 
 ## 2026-08-06 — Presentation-driven projectile spread
 

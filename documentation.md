@@ -205,15 +205,14 @@
   approximation with a 1 arcminute central acuity threshold: bright rooms settle near a 2.5 mm pupil,
   ordinary indoor light near 4 mm, and dark rooms expand toward 6.5 mm. That pupil drives the aperture and
   hyperfocal distance, so close tiles and near camera-child geometry can soften while the room and skyline stay
-  legible. The Bokeh shader now uses a thin-lens circle-of-confusion response, so near blur grows rapidly as depth
-  approaches the eye while surfaces near the gaze distance remain sharp. Shader readiness
+  legible. The renderer currently keeps the stock normalized Bokeh depth response; the physical per-sample eye
+  circle-of-confusion experiment is checkpointed but paused after visual review. Shader readiness
   uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
   warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
   intensity for visual tuning, with a 0–25× DoF-intensity slider; the posture defaults are 12.5× standing and
-  25× crouching, while the slider remains available for stronger cinematic bokeh experiments. The practical blur envelope uses a smooth
-  eased focus envelope for the debug telemetry, while the physical depth response is evaluated per depth-buffer
-  sample; pupil dilation scales the circle of confusion in low light.
+  25× crouching, while the slider remains available for stronger cinematic bokeh experiments. The practical blur
+  envelope uses a smooth eased focus envelope for the debug telemetry.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
   cyan system and skyline window materials modulate only with a subtle ambient pulse.
 - The skyline adds a local PMREM room environment, six depth-compressed near-rooftop masses, and a visible
@@ -617,9 +616,9 @@ commands and are not included in the bus.
 The server bus runs unit tests only. Coverage, simulation, build, lint, typecheck, browser, and HMR checks remain
 explicit commands and are not silently run by the scheduler.
 
-## Physical near-field eye depth of field
+## Physical near-field eye depth of field (checkpointed, currently disabled)
 
-The experimental DoF path uses a thin-lens circle-of-confusion calculation for every depth-buffer sample. It keeps
-the existing reticule gaze distance and adaptive pupil, then applies the reciprocal object-distance term so a gun or
-iron sight held close to the eye becomes increasingly soft as it approaches the camera. Geometry near the focus plane
-remains sharp, and the held weapon is not made a focus target or given an ADS-specific branch.
+The physical eye-CoC path is preserved in checkpoint commit `534f04b` for later calibration, but it is disabled in the
+current runtime because the first visual pass made the whole scene too soft during zoom. The active renderer uses the
+previous stock normalized Bokeh response while we reassess the blur scale and depth-buffer mapping. No ADS-specific
+state was added.

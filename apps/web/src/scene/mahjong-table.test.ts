@@ -23,7 +23,6 @@ import {
   readVisualDebugPreferences,
   readVisualSceneState,
   resolveFocusAccommodationDamping,
-  resolveHumanEyeCircleOfConfusion,
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
@@ -110,20 +109,6 @@ const debugPreferences: VisualDebugPreferences = {
 };
 
 describe("human-eye bokeh model", () => {
-  it("ramps near-field defocus nonlinearly as geometry approaches the eye", () => {
-    const focusDistance = 12;
-    const nearHalfMetre = resolveHumanEyeCircleOfConfusion(0.5, focusDistance, 4);
-    const nearQuarterMetre = resolveHumanEyeCircleOfConfusion(0.25, focusDistance, 4);
-    const nearTwoMetres = resolveHumanEyeCircleOfConfusion(2, focusDistance, 4);
-    const focusPlane = resolveHumanEyeCircleOfConfusion(focusDistance, focusDistance, 4);
-    const farTwentyMetres = resolveHumanEyeCircleOfConfusion(20, focusDistance, 4);
-
-    expect(nearQuarterMetre).toBeGreaterThan(nearHalfMetre);
-    expect(nearHalfMetre).toBeGreaterThan(nearTwoMetres);
-    expect(focusPlane).toBeCloseTo(0, 8);
-    expect(farTwentyMetres).toBeLessThan(nearTwoMetres);
-  });
-
   it("maps bright, indoor, and dark luminance to plausible pupil sizes", () => {
     const bright = resolveHumanEyePupilDiameter(1.45);
     const indoor = resolveHumanEyePupilDiameter(1);
