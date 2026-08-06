@@ -1269,7 +1269,7 @@ const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
 // runtime still applies camera-FOV and global posture-strength normalization;
 // no weapon or ADS branch changes this response.
 const BOKEH_COC_TO_BLUR_PER_STRENGTH = 1 / (HUMAN_EYE_FOCAL_LENGTH_METERS * 10);
-const BOKEH_BASE_MAX_BLUR = 0.02;
+const BOKEH_BASE_MAX_BLUR = 0.003;
 const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
 /** Debug-only multiplier cap; zoom mode uses the full available range. */
 export const DEBUG_BOKEH_STRENGTH_MAX = 25;
