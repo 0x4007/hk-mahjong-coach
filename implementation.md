@@ -681,6 +681,9 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - The first angular-scale calibration was visibly too strong: the full eye-focal-length mapping blurred the whole
   scene, especially through the magnified sniper compositor. Reduced the shared mapping by 10× and the shared blur
   cap back to the known-stable 0.003; this is still one global depth response and has no gun-specific condition.
+- Added a smooth 0.04 mm sub-acuity threshold to the shared shader CoC before the 41-tap gather. Ordinary room depths
+  now resolve to zero visible blur while the same continuous response remains active for genuinely near viewmodel
+  geometry; no weapon, scope, or ADS-specific branch was introduced.
 - Focused format, strict typecheck, and the web production build pass in this lane. Browser/HMR proof is pending because
   the only running Vite/browser lane belongs to the separate dirty checkout.
 

@@ -657,3 +657,7 @@ This branch is rebased on the latest source checkpoint and intentionally re-enab
 calibration. The source branch keeps the zoom-only intensity rule: 12.5× outside explicit ADS and 25× while aiming,
 covering both iron sights and the sniper scope; crouching alone does not increase blur. The physical experiment remains
 separate from that state decision and uses the same centralized depth response for every renderable object.
+
+The shader applies a smooth sub-acuity CoC threshold before the 41-tap gather. This prevents the physical model from
+making the whole world permanently soft at ordinary distances while preserving the full response for very near
+viewmodel geometry.

@@ -26,6 +26,7 @@ import {
   resolveHumanEyeCircleOfConfusion,
   resolveHumanEyeBokehProjectionScale,
   resolveHumanEyeBokehStrengthScale,
+  resolveHumanEyeVisibleCircleOfConfusion,
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
@@ -125,6 +126,14 @@ describe("human-eye bokeh model", () => {
     expect(nearHalfMetre).toBeGreaterThan(nearTwoMetres);
     expect(focusPlane).toBeCloseTo(0, 8);
     expect(farTwentyMetres).toBeLessThan(nearTwoMetres);
+  });
+
+  it("removes always-on sub-acuity softness but preserves near geometry blur", () => {
+    const worldCircle = resolveHumanEyeCircleOfConfusion(3, 12, 4);
+    const nearCircle = resolveHumanEyeCircleOfConfusion(0.25, 12, 4);
+
+    expect(resolveHumanEyeVisibleCircleOfConfusion(worldCircle)).toBe(0);
+    expect(resolveHumanEyeVisibleCircleOfConfusion(nearCircle)).toBeCloseTo(nearCircle, 8);
   });
 
   it("maps bright, indoor, and dark luminance to plausible pupil sizes", () => {
