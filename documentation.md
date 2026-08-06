@@ -526,14 +526,15 @@ base 100-damage impulse carries the aim 25% beyond that radius; the current shar
 sniper 250% beyond the centre. Pistol, shotgun, and machine-gun impulses use the same distance algorithm scaled by
 their 28/16/12 damage values. That output is applied to the camera matrix, the
 reticule's CSS/NDC position, and the camera-child held weapon, so movement, breathing, posture, and prior recoil all
-participate in the next shot's live direction. Each kick holds its outward offset for 60 ms, then adds a shared
-1.5× return impulse through the rest point, so a rapid sequence visibly jerks outward and overshoots to the other
-side before the next machine-gun shot instead of aligning back on center. The recovery is the same for every weapon; only the existing
-per-projectile damage scale changes the kick size. The shotgun uses 16 damage per pellet rather than multiplying the
-visual kick by its eight-pellet count. Ordinary guns do not add a second random projectile offset; the shotgun is the
-only weapon with an inherent fixed pellet cone. Every pellet cone is centered on the current live reticule ray;
-O₂ does not widen or tighten it. O₂-driven sway still moves the reticule and therefore moves the cone's center.
-
+participate in the next shot's live direction. The kick is an immediate displacement into a shared under-damped
+second-order response: the spring pulls it back through the rest point and produces the opposite-side overshoot. The
+response never reads weapon type, fire interval, or magazine state. A rapid weapon simply submits impulses before the
+previous response settles, while a slow weapon naturally gets a clean recovery; future weapons use the same path without
+new cadence branches. Only the existing per-projectile damage scale changes the kick size. The shotgun uses 16 damage
+per pellet rather than multiplying the visual kick by its eight-pellet count. Ordinary guns do not add a second random
+projectile offset; the shotgun is the only weapon with an inherent fixed pellet cone. Every pellet cone is centered on
+the current live reticule ray; O₂ does not widen or tighten it. O₂-driven sway still moves the reticule and therefore
+moves the cone's center.
 During sprint movement, the reticle centre dot fades out and fades back in when sprinting stops. The outer circle is
 kept visible as the persistent movement/aim reference.
 During a reload, the browser shell fades only the centre reticle dot to zero opacity from the authoritative weapon

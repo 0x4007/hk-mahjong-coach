@@ -737,3 +737,18 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Kept the default DoF multiplier at 12.5× while standing or crouching. Explicit zoom, including iron sights and the
   sniper scope, now switches the shared Bokeh aperture/maxblur multiplier to 25× through the existing ADS state.
 - Added regressions proving that posture alone never raises the multiplier and that both postures use 25× while zoomed.
+
+## 2026-08-06 — Weapon-agnostic recoil recovery
+
+- Replaced the fire-rate-sensitive recovery phase with one shared under-damped second-order response in
+  `apps/web/src/scene/camera-motion.ts`. A shot adds only its damage-scaled directional displacement; the central
+  spring pulls every impulse through the reticule rest point and naturally overshoots to the opposite side.
+- The camera damper does not receive weapon type, fire interval, magazine, or cadence metadata. A fast weapon submits
+  impulses while the response is still moving, so they accumulate and produce spread; a slow weapon lets the same
+  response settle. Future weapons use the same event contract without a new recovery branch.
+- Updated camera-motion regressions to cover under-damped overshoot for low, medium, and reference shot strengths and
+  the machine-gun cadence crossing the rest point. The server-owned bus passed 405/405 assertions on the integrated
+  commit, including these recoil checks. Strict typecheck, targeted ESLint, the production web build, targeted
+  Prettier, `git diff --check`, and the existing-lane HMR request also passed; no new browser session was opened.
+- The repository-wide format gate still reports the pre-existing `artifacts/visual/visual-debug-state.json` mismatch,
+  and full ESLint remains blocked by unrelated dirty-lane diagnostics outside the recoil module.
