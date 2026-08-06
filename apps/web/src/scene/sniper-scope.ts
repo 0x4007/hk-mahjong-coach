@@ -53,7 +53,7 @@ export interface SniperScopeActivationInput {
   readonly lensAvailable: boolean;
 }
 
-/** The scope follows explicit ADS; crouching alone never activates the optic. */
+/** The scope follows explicit zoom; crouching alone never activates the optic. */
 export const shouldEnableSniperScope = (input: SniperScopeActivationInput): boolean =>
   input.firstPersonActive && input.seatView && input.aimingDownSights && input.lensAvailable;
 

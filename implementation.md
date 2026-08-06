@@ -153,7 +153,7 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   not alter movement physics or the authoritative game state.
 - The scene reticule now reads the same damped first-person roll and head-bob offsets as the camera. Rapid lateral
   direction changes therefore produce a matching lag, while the focus ray remains anchored to the configured
-  reticule position. The outer ring is inverted at -1x and the center dot is tuned to a 5x total displacement.
+  reticule position. The outer ring follows at 5x and the center dot is tuned to a 5x total displacement.
   The current experiment multiplies the underlying camera weight-shift targets by 2x; the reticule still reads
   the raw shared camera output.
 - The first-person controller now uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule.
@@ -181,7 +181,7 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   2.5–6.5 mm pupil adapts slowly to the estimated room luminance, changing the hyperfocal distance and blur
   ceiling; ordinary focus stays restrained while close tile focus remains visible. Debug metrics expose focus
   distance, target kind, pupil diameter, and blur intensity, and the debug menu now includes a 0–25× DoF-strength
-  slider for visual comparison, with defaults of 12.5× outside zoom and 25× during explicit ADS; higher values remain
+  slider for visual comparison, with defaults of 12.5× outside zoom and 25× during explicit zoom; higher values remain
   available for stronger cinematic bokeh experiments. The practical distance envelope now uses a smooth eased curve
   calibrated from the focus lab for telemetry. The physical eye-CoC shader experiment is checkpointed separately and
   currently disabled after visual review; the active post-process uses the stock normalized depth response while the
@@ -376,15 +376,15 @@ restart/resume path before beginning dependent CLI/server integration.
   crouched stationary +10/s, sprinting -3.33/s, crouch walking -1.67/s, jump -5, and stand from crouch
   -5. Sprint, crouch-walk, and jump recovery delays are stateful and frame-accurate. Focused tests cover
   all rates, delays, twenty-jump depletion, capacity clamping, and post-exhaustion recovery.
-- Added pure hold-breath state transitions. Right mouse requests ADS plus hold breath in the scene; the
+- Added pure hold-breath state transitions. Right mouse requests zoom plus hold breath in the scene; the
   model drains -15/s, auto-stops at zero, and prevents reactivation until O₂ is above 25.
 - Added `apps/web/src/scene/o2-stability.ts`, a smooth reserve-to-presentation curve shared by camera
   reticle sway and weapon viewmodel calculations. No reserve-percentage accuracy or sway thresholds
-  are used; explicit hold-breath and free wall-brace states are the full-stabilisation modes. The HUD reports active
+  are used; explicit hold-breath and free wall-brace states are the half-strength stabilisation modes. The HUD reports active
   hold-breath and rearm status, while `data-player-o2` remains the numeric reserve.
-- Hold-breath presentation now removes reticle and weapon sway, and pauses the stationary breathing bob
-  while O₂ remains above zero; the normal reserve-driven motion returns as soon as the hold ends or O₂ is
-  depleted.
+- Hold-breath presentation leaves half of the rested baseline reticle, weapon, and stationary breathing sway while O₂
+  remains above zero, suppressing reserve-driven breathing destabilisation; the normal reserve-driven motion returns as
+  soon as the hold ends or O₂ is depleted.
 - Focused validation passed: `pnpm exec vitest run apps/web/src/scene/player-vitals.test.ts apps/web/src/scene/camera-motion.test.ts apps/web/src/scene/o2-stability.test.ts apps/web/src/scene/reticle-aim.test.ts apps/web/src/scene/weapons.test.ts` (50 tests), strict
   `pnpm exec tsc --noEmit --pretty false`, the web production build, Prettier, and focused ESLint. The broader
   scene directory is 99/100 because of an unrelated pre-existing wall-hang fixture failure; browser acceptance
@@ -392,7 +392,7 @@ restart/resume path before beginning dependent CLI/server integration.
 
 ## 2026-08-06 — Left Command hold-breath binding
 
-- Bound the physical left Command key (`MetaLeft`) to the same shared ADS/hold-breath state as right mouse.
+- Bound the physical left Command key (`MetaLeft`) to the same shared zoom/hold-breath state as right mouse.
 - While left Command is held, the scene prevents default keyboard shortcuts for every delivered key event so
   `Command+W` continues to move in-game instead of closing the tab. Right Command remains unbound.
 - Added pure left-Command detection/capture helpers and regression coverage. Browser acceptance remains unverified
@@ -401,7 +401,7 @@ restart/resume path before beginning dependent CLI/server integration.
 
 ## 2026-08-06 — Right mouse no longer holds breath
 
-- Kept right mouse as ADS-only and made left Command the sole desktop hold-breath binding.
+- Kept right mouse as zoom-only and made left Command the sole desktop hold-breath binding.
 - Added a pure input-resolution regression test proving right mouse aims without setting `holdingBreath`.
 - Documented that a normal browser page cannot guarantee suppression of browser-reserved `Command+W`; use an app/window
   shell or a browser extension if tab-close protection is required.
@@ -420,7 +420,7 @@ restart/resume path before beginning dependent CLI/server integration.
 ## 2026-08-06 — Procedural weapons prototype
 
 - Added typed pistol, shotgun, machine gun, and sniper definitions with distinct damage, pellet count,
-  inherent pellet-cone, magazine, reload, and range profiles. The scene uses a seeded RNG for both pickup placement
+  inherent pellet-cone, magazine, and reload profiles. The scene uses a seeded RNG for both pickup placement
   and shot presentation. Only the shotgun consumes shot RNG for its inherent pellet cone; ordinary-gun
   aim stays on the shared live reticule ray.
 - Added a table-side pickup set (starter pistol plus one of each other weapon) and preserved the existing seeded
@@ -458,6 +458,36 @@ restart/resume path before beginning dependent CLI/server integration.
   An explicit `pnpm hmr` request was sent to the running Vite lane with the reload test note. The broader scene
   ESLint command still reports pre-existing dirty-lane violations; browser combat interaction remains unverified
   and no new browser session was opened.
+
+## 2026-08-06 — Damage-derived clip and round reload timing
+
+- Replaced the four fixed reload durations with a shared damage-based rule. A trigger pull's total damage is
+  `damage per projectile × pellets`; profiles at or above 100 damage use round reloads, while lower-damage
+  profiles use clip reloads. New weapon definitions inherit this classifier and timing through `defineWeapon`.
+- Clip weapons reload their whole magazine in `0.01 × damage × magazine size` seconds: the 28-damage pistol takes
+  `3.36 s` and the 12-damage machine gun takes `3.6 s`. Round weapons load one bullet or shell at a time using
+  `0.01 × total damage per trigger pull`: the 100-damage sniper takes `1 s` per bullet and the eight-pellet,
+  16-damage shotgun represents `128` damage and takes `1.28 s` per shell.
+- Round reloads now insert ammunition progressively and continue until the magazine or reserve is exhausted;
+  clip reloads still fill in one operation. `resolveWeaponReloadDuration` exposes the total for a requested number
+  of rounds without putting reload rules in the scene UI.
+- The server-owned test bus recorded all 15 `apps/web/src/scene/weapons.test.ts` assertions as passing for this
+  dirty state. Strict TypeScript, the web production build, focused weapon ESLint, Prettier, and `git diff --check`
+  also passed. The latest full server-owned snapshot passed all 420 assertions. An explicit `pnpm hmr` request was
+  sent while the existing Vite lane was running; a new browser session was not opened.
+
+## 2026-08-06 — Swift reload pose and round-reload interruption
+
+- Shortened the shared reload lift to the first 10% of the normalized duration and the return to the final 10%.
+  The reload hand motion stays at the raised pose for the middle 80%, so the weapon moves up quickly, performs the
+  reload work while raised, and recentres quickly without a floaty transition.
+- Round reloads now keep that raised pose across every shell/bullet chambering interval. The final recenter phase starts
+  only after the last round or when a round reload is interrupted, so the weapon does not dip between shells.
+- The final 0.12 seconds of each reload interval now plays the upward insertion impulse; the shell/bullet or clip is
+  committed when that pulse ends, keeping the visible animation and UI chamber timing aligned.
+- Round-based weapons can now interrupt between inserted bullets or shells. Holding fire cancels the pending next
+  round as soon as one is chambered and fires immediately; an empty round-based magazine still waits for the first
+  chambered round. Clip-based reloads remain atomic and cannot be interrupted by firing.
 
 ## 2026-08-06 — Crouched iron-sight viewmodel posture
 
@@ -523,9 +553,9 @@ restart/resume path before beginning dependent CLI/server integration.
   targeted ESLint, Prettier, production web build, and `git diff --check`. The latest full bus snapshot passed all
   403 assertions; no new browser session was opened.
 - Added a 60 ms outward phase followed by a 1.5× shared return-velocity impulse for every damage-scaled shot. The
-  presentation stack now crosses back through the reticule rest point before the next machine-gun shot and overshoots
-  to the opposite side instead of hiding the outward jerk in same-frame recovery; this remains a common damper response,
-  not a weapon-specific rule.
+  presentation stack now queues each recovery in the central damper, crosses back through the reticule rest point before
+  the next machine-gun shot, and overshoots to the opposite side instead of hiding the outward jerk in same-frame recovery;
+  this remains a common damper response, not a weapon-specific rule.
 - Doubled the shared outward shot impulse for all weapons through `CAMERA_RECOIL_SHOT_MULTIPLIER = 2`; the existing
   proportional return velocity scales with the same impulse instead of introducing a weapon-specific recovery path.
 
@@ -548,7 +578,7 @@ restart/resume path before beginning dependent CLI/server integration.
 - Kept the scope tube open at both ends and placed the glass just beyond the rear rim; the default cylinder cap had
   rendered as a solid black panel over the lens.
 - The effect activates in the first-person seat view whenever the sniper is equipped and the player is crouched;
-  right-mouse ADS remains independent from left-Command hold-breath. A clean world-only render target feeds the magnified sample, so
+  right-mouse zoom remains independent from left-Command hold-breath. A clean world-only render target feeds the magnified sample, so
   floating sprites and weapon/UI overlays cannot overpower the underlying scene geometry. Existing Bokeh remains
   before the lens pass and `OutputPass` remains last for tone mapping and colour-space conversion.
 - Tuned the sniper optic assembly to its measured local sight-line height (0.11979078 m) so the projected glass centre
@@ -669,11 +699,11 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   geometry approaches the eye; the focus plane resolves to zero circle of confusion.
 - Replaced the stock linear Bokeh depth delta with the same physical response in the centralized post-process shader.
   The camera-child weapon remains excluded from gaze-target selection but participates in the normal depth pass, so
-  near ironsights can blur while the distant world stays comparatively sharp without an ADS-specific state.
+  near ironsights can blur while the distant world stays comparatively sharp without a zoom-specific state.
 - Added focused regressions for near-depth monotonicity, zero blur on the focus plane, and reduced far-depth defocus.
 - The experiment was checkpointed at `534f04b` and then disabled after the existing Vite lane showed excessive whole-world
   blur during zoom. The active renderer is back on the prior stock Bokeh depth response; the physical experiment itself
-  does not add a separate ADS-specific shader state.
+  does not add a separate zoom-specific shader state.
 
 ## 2026-08-06 — Presentation-driven projectile spread
 
@@ -685,15 +715,15 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Added a weapon regression covering the zero-cone ordinary guns and fixed positive shotgun cone. The runtime also
   avoids consuming shot RNG when a weapon has no inherent spread.
 
-## 2026-08-06 — Explicit ADS toggle and intermediate crouch posture
+## 2026-08-06 — Explicit zoom toggle and intermediate crouch posture
 
-- Right mouse now toggles persistent aim-down-sights state on each secondary-button press; releasing the button no
-  longer exits ADS. Left Command remains the hold-breath/aim binding.
+- Right mouse now toggles persistent zoom state on each secondary-button press; releasing the button no
+  longer exits zoom. Left Command remains the hold-breath/aim binding.
 - Crouching no longer changes the seat FOV or activates the sniper optic. It keeps the lower eye height but uses an
-  intermediate camera-damper weapon pose between standing hip fire and full ADS. Explicit ADS owns the smooth 90° →
+  intermediate camera-damper weapon pose between standing hip fire and full zoom. Explicit zoom owns the smooth 90° →
   45° reticule-anchored zoom and restores the original crouched sight pose exactly (`x: 0, y: -0.22, z: -0.54`) so
   ironsights and the sniper optic stay aligned.
-- A directional movement double-tap clears the persistent right-mouse ADS toggle before sprinting. Focused camera-motion
+- A directional movement double-tap clears the persistent right-mouse zoom toggle before sprinting. Focused camera-motion
   and sniper-scope regressions cover the new separation; browser interaction remains tied to the existing connected Vite
   tab and no additional browser session was opened.
 
@@ -713,9 +743,9 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 
 - Added a capsule-side contact probe over the active physics boxes. It accepts the controller's small separation
   margin, handles yaw-rotated boxes, and excludes floor/platform-only contact and sloped ramps.
-- Wall contact now feeds a separate shared presentation signal. While aiming down sights, the centralized camera
-  damper and camera-attached weapon use the same sway and breathing suppression as hold-breath, including at empty
-  O₂, without setting the paid holdingBreath state or spending reserve.
+- Wall contact now feeds a separate shared presentation signal. While zoomed, the centralized camera
+  damper and camera-attached weapon apply the independent wall-brace stability factor, including at empty O₂, without
+  setting the paid holdingBreath state or spending reserve.
 - Published data-player-wall-contact and data-player-wall-braced for local diagnostics. Added focused contact,
   O₂ stability, and camera regressions; full bus/type/lint/build evidence remains pending for this dirty state.
 
@@ -735,7 +765,7 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 ## 2026-08-06 — Zoom-only DoF intensity
 
 - Kept the default DoF multiplier at 12.5× while standing or crouching. Explicit zoom, including iron sights and the
-  sniper scope, now switches the shared Bokeh aperture/maxblur multiplier to 25× through the existing ADS state.
+  sniper scope, now switches the shared Bokeh aperture/maxblur multiplier to 25× through the existing zoom state.
 - Added regressions proving that posture alone never raises the multiplier and that both postures use 25× while zoomed.
 
 ## 2026-08-06 — Weapon-agnostic recoil recovery
@@ -752,3 +782,209 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   Prettier, `git diff --check`, and the existing-lane HMR request also passed; no new browser session was opened.
 - The repository-wide format gate still reports the pre-existing `artifacts/visual/visual-debug-state.json` mismatch,
   and full ESLint remains blocked by unrelated dirty-lane diagnostics outside the recoil module.
+
+## 2026-08-06 — 10× recoil amplitude experiment
+
+- Raised the shared `CAMERA_RECOIL_SHOT_MULTIPLIER` from 2× to 10× for a deliberately strong tuning pass. The
+  reticle-following direction, centralized damper, and weapon-agnostic recovery remain unchanged.
+- Removed the global 8° presentation clamp so the 10× response remains proportional and the bullet-power difference is
+  readable. A future exceptional heavy weapon can opt into its own limit without constraining ordinary weapons.
+
+## 2026-08-06 — Reload locomotion
+
+- Reused the existing oxygen-neutral jog calculation as a standing reload speed cap. Walking remains walking during
+  reload; a sprint request is capped to trot and resumes full sprint only when the next O₂ drain slice is affordable.
+- Crouch movement keeps its existing lower speed priority. Automatic empty-magazine reloads follow the same temporary
+  trot path.
+- The fresh server-owned bus passed 407/407 assertions for the revised behavior. Root typecheck, full lint, web build,
+  targeted formatting/diff checks, and the final scene HMR request also passed. Browser gameplay interaction was not
+  independently observed in this turn.
+
+## 2026-08-06 — Projectile damage O₂ fatigue
+
+- Added the weapon-agnostic firing charge `O₂ cost = 0.25 × projectile damage` to the pure player-vitals helpers.
+  The runtime sends the configured projectile count with each shot, so the eight 16-damage shotgun pellets cost
+  32 O₂ in total; pistol, machine-gun, and the unchanged 100-damage sniper cost 7, 3, and 25 O₂ respectively.
+- Firing consumes the remaining partial reserve instead of rejecting a shot when the full charge is unavailable.
+  This keeps O₂ a fatigue resource rather than a second ammunition gate; the shared low-reserve presentation curve
+  supplies the resulting aim and weapon sway.
+- Added pure regressions for the quarter-damage charges, pellet counting, sniper value, and final-reserve clamp.
+
+## 2026-08-06 — Debug speedometer
+
+- Added a minimal `SPD 0.0 m/s` readout to the bottom-left of the visual-table scene. It is rendered only when
+  the existing development debug mode is enabled (`?debug=1`), and it stays above the mobile movement joystick.
+- The scene reports its damped horizontal movement speed at a low UI update rate, so the readout reflects walk,
+  reload trot, and sprint speeds without driving a React update every render frame. The speed resets on scene disposal.
+
+## 2026-08-06 — HUD hierarchy pass
+
+- Refined the live scene HUD into labeled segments for preview state, round/seat, area, and room identity, with a
+  compact status chip that reflects ready, crouched, sprinting, steady aim, and reloading states.
+- Added consistent panel headings and glass treatment to player systems and loadout, tightened the bar and slot
+  rhythm, and added visible critical-health, low-O₂, and reload accents without changing gameplay state.
+- The metadata rail and panels keep their existing responsive placement, so the centre of the scene and mobile
+  movement controls remain clear. Typecheck, web build, and targeted formatting passed; browser appearance remains
+  tied to the existing connected preview.
+
+## 2026-08-06 — Uncapped hitscan shots
+
+- Removed the per-weapon range fields and raycaster distance limits. Every shot now resolves against the first
+  render surface along its aim ray, regardless of weapon type.
+- A miss tracer uses the camera's finite far plane only to keep the short-lived presentation line finite; it is not
+  a gameplay projectile limit.
+
+## 2026-08-06 — Free mini hop at depleted O₂
+
+- A grounded player who cannot afford the full 5-point jump charge now receives a free mini hop instead of a rejected
+  jump. Its launch speed uses the neutral balance of standing recovery and full-jump cost,
+  `12 / (12 + 5) = 70.6%` of the full launch speed, for about half the full jump apex.
+- The fallback does not change O₂ or add the full-jump recovery delay. Full jumps still pay the complete charge, and
+  the existing crouch-to-stand transition applies to both accepted launch paths.
+- Added pure regressions for the derived O₂ blend and the reduced launch-speed selection.
+
+## 2026-08-06 — Traversal weapon lower
+
+- Routed ledge vaults, wall hangs, and staged wall climbs into the existing centralized camera-motion viewmodel
+  damper. The held gun now uses the same muzzle-down, below-frame pose as a weapon put-away transition while
+  traversal is active.
+- The pose holds until traversal ends, then reuses the existing raise phase. Physics, weapon ownership, firing, and
+  reload state remain unchanged; this is presentation-only.
+- Added a camera-motion regression for the lower/hold/raise sequence. The traversal regression passed in the
+  server-owned bus; the aggregate snapshot was 412/413 because an unrelated core-engine property test failed. Strict
+  typecheck, targeted ESLint/Prettier, the web build, `git diff --check`, and the explicit HMR request also passed.
+  Browser interaction remains unverified because this worktree cannot open another browser session.
+
+## 2026-08-06 — Shared breathing destabilisation emphasis
+
+- Applied a shared 2× fatigue emphasis to the O₂ reticle and camera-damper sway outputs, preserving independent
+  horizontal/vertical phases so the response remains multi-axis rather than a straight recoil line.
+- Left the centralized shot-recoil spring and its recovery/overshoot tuning unchanged.
+
+## 2026-08-06 — O₂ fatigue vision blur
+
+- Routed the shared O₂ response through a lightweight full-screen shader pass after depth of field and the sniper-scope
+  composite. The response follows the same continuous fatigue curve as aim sway and stays at zero while rested.
+- Capped the exhausted view at 1 CSS pixel normally and 2 CSS pixels while zoomed (scaled to the device pixel ratio),
+  keeping the effect bounded while retaining the existing Bokeh treatment. Replaced the contrast lift with a black
+  radial vignette that eases continuously from the live reticule point (slightly below screen centre) to the corners,
+  with deterministic transition dithering to avoid a hard colour band, and reaches 1.0 strength at zero O₂; contrast
+  remains neutral at 1×. The existing auto/manual
+  exposure target remains unchanged.
+  Added `data-o2-vision-*` diagnostics to the scene container, pure endpoint/intermediate-value coverage, and verified
+  the web build.
+
+## 2026-08-06 — Half-strength wall bracing
+
+- Wall-braced zoom keeps 50% of the reserve-driven reticle, weapon, and stationary camera-breathing instability instead
+  of forcing a perfectly static presentation. Holding breath keeps 50% of the rested baseline and suppresses its
+  reserve-driven breathing destabilisation while O₂ remains above zero.
+- The wall brace remains free and does not change the player's O₂ reserve. Added regressions for the half-strength
+  sway and accuracy response in the O₂ model and camera damper.
+
+## 2026-08-06 — Sprint exits crouch
+
+- A successful WASD/arrow double-tap sprint request now uses the existing crouch-to-stand transition before starting
+  sprinting, so one sprint input both stands and accelerates.
+- The normal 5-point stand O₂ cost remains required. If the reserve cannot pay it, the player stays crouched and
+  sprint does not start. Added a focused posture regression.
+
+## 2026-08-06 — Zoom recovery direction feedback
+
+- Kept the existing hip-fire shot-direction feedback, including prior recoil, so the machine-gun's natural spread is
+  unchanged.
+- While zoomed, the visible recovery pulse still uses the shared camera damper, but its opposite-side overshoot no
+  longer selects the next shot direction. This keeps the response deterministic while preserving the actual pulse on
+  the camera, reticule, and held weapon.
+- Added a pure regression for the hip-fire versus zoom shot-direction input split. Browser gameplay remains dependent on
+  the existing connected preview; no additional browser session was opened.
+
+## 2026-08-06 — Restore deterministic zoom recoil feedback
+
+- Restored prior-recoil feedback to zoomed shot-direction selection instead of removing it entirely. Zoom now uses a
+  fixed half-strength contribution, while hip fire keeps the full contribution.
+- This keeps recovery pulses relevant to the next machine-gun shot without adding random projectile spread or making
+  zoom as loose as hip fire.
+
+## 2026-08-06 — Match zoom and hip-fire sway
+
+- Removed the zoom-only 72% sway reduction. Zoom and hip fire now use the same base reticle and weapon sway amplitude.
+- Holding breath and wall bracing still apply their existing deterministic stability factors on top of that shared base.
+
+## 2026-08-06 — Penthouse armory chart
+
+- Added a west-wall `WeaponDamageAmmoChartSign` to the authored penthouse. The textured sign lists pistol, shotgun,
+  machine gun, and sniper damage per projectile, pellet count, loaded/reserve ammunition, and total starting rounds.
+- Chart rows come from `WEAPON_CHART_ENTRIES`, a typed view derived directly from `WEAPON_DEFINITIONS`, so the visual
+  reference cannot drift from the gameplay pickup and HUD values. Added a focused regression for that alignment.
+- Validation: the chart regression passed in the latest server-owned bus snapshot (418/419 tests; one unrelated
+  core-engine property test failed with `STACK_TRACE_ERROR`), strict typecheck passed, weapon-file ESLint passed, the
+  web production build passed, and both explicit HMR requests were accepted by the running Vite server. Full repository
+  lint remains blocked by existing dirty-lane diagnostics outside this feature; no browser session was opened.
+
+## 2026-08-06 — Held-breath feedback and stacked wall bracing
+
+- Holding breath no longer applies reserve-driven breathing destabilisation to reticle or weapon sway, and its camera
+  breathing amplitude and frequency use the rested baseline while O₂ remains above zero. O₂ drain and automatic
+  release at zero are unchanged.
+- Holding breath and wall bracing each retain 50% instability; when both are active their factors multiply to 25% for
+  an ultra-stable aim, weapon, and stationary-breathing presentation. Wall-only behavior remains unchanged.
+- Added regressions for high-versus-low O₂ held-breath stability and the combined wall-plus-hold quarter response.
+- The latest server-owned bus passed all changed camera/O₂ assertions (418/419 total); an unrelated dirty-lane
+  `packages/test-fixtures/src/core-engine.test.ts` property failed. Strict typecheck, targeted ESLint/Prettier, the
+  production build, HMR request, and `git diff --check` passed. Full ESLint remains blocked by unrelated dirty-lane
+  diagnostics outside these O₂/camera files; browser interaction remains unverified.
+
+## 2026-08-06 — Damage-driven red-hot barrels
+
+- Added a shared barrel heat model to the visual weapon runtime. Each projectile that resolves against a visible
+  surface adds its configured bullet damage; misses add nothing, and shotgun pellets add independently.
+- A 500-damage heat load reaches the full red-hot material response. Cooling is linear at `10` damage units per
+  second, so 100 damage takes 10 seconds and 600 damage takes 60 seconds to cool. Heat is tracked per weapon and
+  continues cooling while the gun is holstered or another weapon is active.
+- Every procedural barrel receives its own material clone and uses the shared heat ratio to blend toward red emissive
+  steel, capped at `emissiveIntensity = 1`. Pickup and held copies stay visually consistent without changing receiver
+  or sight materials.
+
+## 2026-08-06 — Pooled barrel smoke
+
+- Added a deterministic, fixed-budget smoke presentation to each held weapon. A shared procedural 64×64 alpha mask
+  drives 16 pooled billboards; trigger pulls emit bright white muzzle puffs whose size and count scale from total
+  damage per round (`damage × pellets`), while a separate thermal emitter follows the existing barrel heat ratio and
+  produces upward-curling wisps only above 35% heat. Puffs remain prominent for roughly ten seconds, with shotgun and
+  sniper rounds intentionally producing much larger clouds. The particle root lives in the scene world-effects root;
+  each spawn captures the muzzle's world position and diffuses upward/outward for roughly ten seconds, independent of
+  later camera movement or weapon switching.
+- Thermal smoke eases to a maximum rate of four particles per second at 80% heat. Particles use no shadows, collision,
+  or per-frame allocation, and their RNG stream is isolated from projectile spread. Pickup copies keep the red-hot
+  material response but do not create smoke emitters.
+- Validation: the server-owned test bus passed all 20 weapon-file assertions, including the new thermal-smoke curve
+  regression; one unrelated dirty-lane `packages/test-fixtures/src/core-engine.test.ts` property failed with
+  `STACK_TRACE_ERROR`. Web strict typecheck and production build passed. The explicit HMR request was sent while the
+  Vite lane was running; browser interaction remains unverified.
+
+## 2026-08-06 — Reload temporarily leaves zoom
+
+- Reload now suppresses the requested zoom state through the shared first-person input path. The camera FOV, reticule,
+  viewmodel, O₂ stability, and breath state therefore leave zoom together while a clip or round reload is active.
+- The requested zoom input is retained, so a player who keeps right-mouse zoom or left Command held returns to zoom only
+  after the weapon's reload and final recenter presentation reports ready. Releasing zoom during reload leaves the player
+  unzoomed.
+- Added a pure regression for the unzoom/restore handoff. The server-owned bus passed that assertion and all other web
+  assertions; one unrelated dirty-lane core-engine property test failed with `STACK_TRACE_ERROR`. Strict typecheck,
+  targeted Prettier, web production build, and the explicit HMR request passed. Browser interaction remains unverified
+  because this worktree cannot open another browser session.
+
+## 2026-08-06 — Unify held-weapon breathing pose
+
+- Removed the weapon runtime's second `weaponSwayPhase` oscillator. It was applied after the held model had already
+  aimed at the live reticule ray, so low-O₂ breathing could rotate the sights away from the reticule.
+- The held model now stays on the camera-attached viewmodel pose and live reticule ray; camera breathing, aim sway,
+  recoil, and recovery remain the single perspective-motion path. No random projectile spread was added.
+- Web build passed after the change. Browser/HMR acceptance remains pending on the existing connected preview.
+
+## 2026-08-06 — Agent test note follows player vitals
+
+- The HMR agent test note now sits in the same layout stack as Player systems and follows the vitals panel in normal
+  child flow. Its position therefore tracks the panel height instead of using an independent top-right overlay, with
+  matching responsive and debug-panel placement.

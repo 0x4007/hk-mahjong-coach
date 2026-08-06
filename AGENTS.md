@@ -59,6 +59,11 @@ WARNING: UNLESS I SPECIFICALLY SAY IN MY INSTRUCTIONS YOU ARE NOT ALLOWED TO OPE
 - Do not add online multiplayer, wagering, Japanese rules, or cloud accounts.
 - Do not leave critical-path placeholders, mocked core behavior, disabled tests, or empty screens.
 
+## Communication and terminology
+
+- Call the sighted camera mode `zoom`. Do not use the acronym `ADS` or a longer alternate name
+  in user-facing updates, documentation, comments, and test names.
+
 ## First-person perspective motion
 
 - Treat the centralized camera damper in `apps/web/src/scene/camera-motion.ts` as the single presentation

@@ -1024,6 +1024,7 @@ const App = (): React.JSX.Element => {
   const hasAttemptedMotionReenable = React.useRef(false);
   const [isCrouched, setIsCrouched] = React.useState(false);
   const [isSprinting, setIsSprinting] = React.useState(false);
+  const [playerSpeed, setPlayerSpeed] = React.useState(0);
   const [isCapsLockOn, setIsCapsLockOn] = React.useState(false);
   const [playerVitals, setPlayerVitals] = React.useState<PlayerVitalsState>(() =>
     createPlayerVitals(),
@@ -1138,6 +1139,7 @@ const App = (): React.JSX.Element => {
         // When the scene unmounts we reset motion‑look related UI state.
         setIsCrouched(false);
         setIsSprinting(false);
+        setPlayerSpeed(0);
         setWeaponState(createEmptyWeaponStateSnapshot());
         setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
@@ -1519,6 +1521,18 @@ const App = (): React.JSX.Element => {
       : playerVitals.o2 >= PLAYER_MAX_O2
         ? "Ready"
         : "Recovering";
+  const hudStatus: {
+    readonly label: string;
+    readonly tone: "ready" | "crouched" | "sprinting" | "focused" | "reloading";
+  } = weaponState.reloading
+    ? { label: "Reloading", tone: "reloading" }
+    : playerVitals.holdingBreath
+      ? { label: "Steady aim", tone: "focused" }
+      : isSprinting
+        ? { label: "Sprint", tone: "sprinting" }
+        : isCrouched
+          ? { label: "Crouched", tone: "crouched" }
+          : { label: "Ready", tone: "ready" };
   const activeWeaponDefinition =
     weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
   const activeWeaponSlot =
@@ -1551,6 +1565,7 @@ const App = (): React.JSX.Element => {
               onMount={handleMount}
               onMotionLookStatusChange={handleMotionLookStatusChange}
               onSprintingChange={setIsSprinting}
+              onSpeedChange={setPlayerSpeed}
               onVitalsChange={setPlayerVitals}
               onWeaponStateChange={setWeaponState}
             />
@@ -1664,89 +1679,136 @@ const App = (): React.JSX.Element => {
               </label>
             ) : null}
           </div>
-          {hmrTestMessage !== null ? (
-            <aside
-              aria-label="Agent test note"
-              aria-live="polite"
-              className="scene-test-note"
-              data-hmr-test-note="true"
-              role="status"
-            >
-              <span>Agent test note</span>
-              <p>{hmrTestMessage}</p>
-            </aside>
-          ) : null}
-          <div className="scene-hud" aria-label="Scene details">
-            <span>
-              <i aria-hidden="true" /> Live 3D preview
+          <div className="scene-hud" aria-label="Session status">
+            <span className="scene-hud-item scene-hud-live">
+              <i aria-hidden="true" />
+              <span className="scene-hud-label">Live</span>
+              <strong>3D preview</strong>
             </span>
-            <span>Round 1 · East</span>
-            <span>
-              {explorationArea} · {roomVariant} · {roomSeed}
+            <span aria-hidden="true" className="scene-hud-divider" />
+            <span className="scene-hud-item scene-hud-round">
+              <span className="scene-hud-label">Round</span>
+              <strong>1 · East</strong>
+            </span>
+            <span className="scene-hud-item scene-hud-location">
+              <span className="scene-hud-label">Area</span>
+              <strong>{explorationArea}</strong>
+              <em>
+                {roomVariant} · {roomSeed}
+              </em>
+            </span>
+            <span
+              className={`scene-hud-status scene-hud-status-${hudStatus.tone}`}
+              data-status={hudStatus.tone}
+            >
+              <i aria-hidden="true" />
+              <strong>{hudStatus.label}</strong>
             </span>
           </div>
-          <div className="scene-vitals" aria-label="Player vitals">
-            <div className="scene-vitals-row scene-vitals-shield">
-              <div className="scene-vitals-heading">
-                <span>Shield</span>
-                <strong>{shieldPercent}%</strong>
+          {DEBUG_PANEL_ENABLED ? (
+            <output
+              aria-label="Player speed"
+              className="scene-speedometer"
+              data-debug-speedometer="true"
+              data-speed-mps={playerSpeed.toFixed(2)}
+            >
+              SPD {playerSpeed.toFixed(1)} m/s
+            </output>
+          ) : null}
+          <div className="scene-vitals-stack">
+            <div
+              className="scene-vitals"
+              aria-label="Player vitals"
+              data-health-state={
+                playerVitals.isDead ? "down" : healthPercent <= 25 ? "critical" : "stable"
+              }
+              data-o2-state={o2Percent <= 25 ? "low" : "stable"}
+            >
+              <div className="scene-panel-heading">
+                <span>Player systems</span>
+                <small>Live telemetry</small>
               </div>
-              <div
-                aria-label={`Shield ${shieldPercent}%`}
-                aria-valuemax={PLAYER_MAX_SHIELD}
-                aria-valuemin={0}
-                aria-valuenow={playerVitals.shield}
-                className="scene-vitals-track"
-                role="progressbar"
-              >
-                <span style={{ width: `${shieldPercent}%` }} />
+              <div className="scene-vitals-row scene-vitals-shield">
+                <div className="scene-vitals-heading">
+                  <span>Shield</span>
+                  <strong>{shieldPercent}%</strong>
+                </div>
+                <div
+                  aria-label={`Shield ${shieldPercent}%`}
+                  aria-valuemax={PLAYER_MAX_SHIELD}
+                  aria-valuemin={0}
+                  aria-valuenow={playerVitals.shield}
+                  className="scene-vitals-track"
+                  role="progressbar"
+                >
+                  <span style={{ width: `${shieldPercent}%` }} />
+                </div>
+                <small>{shieldStatus}</small>
               </div>
-              <small>{shieldStatus}</small>
+              <div className="scene-vitals-row scene-vitals-health">
+                <div className="scene-vitals-heading">
+                  <span>Health</span>
+                  <strong>{healthPercent}%</strong>
+                </div>
+                <div
+                  aria-label={`Health ${healthPercent}%`}
+                  aria-valuemax={PLAYER_MAX_HEALTH}
+                  aria-valuemin={0}
+                  aria-valuenow={playerVitals.health}
+                  className="scene-vitals-track"
+                  role="progressbar"
+                >
+                  <span style={{ width: `${healthPercent}%` }} />
+                </div>
+                <small>
+                  {playerVitals.isDead ? "Down" : healthPercent <= 25 ? "Critical" : "Stable"}
+                </small>
+              </div>
+              <div className="scene-vitals-row scene-vitals-o2">
+                <div className="scene-vitals-heading">
+                  <span>O2</span>
+                  <strong>{o2Percent}%</strong>
+                </div>
+                <div
+                  aria-label={`O2 ${o2Percent}%`}
+                  aria-valuemax={PLAYER_MAX_O2}
+                  aria-valuemin={0}
+                  aria-valuenow={playerVitals.o2}
+                  className="scene-vitals-track"
+                  role="progressbar"
+                >
+                  <span style={{ width: `${o2Percent}%` }} />
+                </div>
+                <small>{o2Status}</small>
+              </div>
             </div>
-            <div className="scene-vitals-row scene-vitals-health">
-              <div className="scene-vitals-heading">
-                <span>Health</span>
-                <strong>{healthPercent}%</strong>
-              </div>
-              <div
-                aria-label={`Health ${healthPercent}%`}
-                aria-valuemax={PLAYER_MAX_HEALTH}
-                aria-valuemin={0}
-                aria-valuenow={playerVitals.health}
-                className="scene-vitals-track"
-                role="progressbar"
+            {hmrTestMessage !== null ? (
+              <aside
+                aria-label="Agent test note"
+                aria-live="polite"
+                className="scene-test-note"
+                data-hmr-test-note="true"
+                role="status"
               >
-                <span style={{ width: `${healthPercent}%` }} />
-              </div>
-              <small>
-                {playerVitals.isDead ? "Down" : healthPercent <= 25 ? "Critical" : "Stable"}
-              </small>
-            </div>
-            <div className="scene-vitals-row scene-vitals-o2">
-              <div className="scene-vitals-heading">
-                <span>O2</span>
-                <strong>{o2Percent}%</strong>
-              </div>
-              <div
-                aria-label={`O2 ${o2Percent}%`}
-                aria-valuemax={PLAYER_MAX_O2}
-                aria-valuemin={0}
-                aria-valuenow={playerVitals.o2}
-                className="scene-vitals-track"
-                role="progressbar"
-              >
-                <span style={{ width: `${o2Percent}%` }} />
-              </div>
-              <small>{o2Status}</small>
-            </div>
+                <span>Agent test note</span>
+                <p>{hmrTestMessage}</p>
+              </aside>
+            ) : null}
           </div>
           <div
             aria-label="Weapon loadout"
             className="scene-weapons"
             data-bullet-hole-count={weaponState.bulletHoleCount}
+            data-reloading={weaponState.reloading ? "true" : "false"}
             data-shots-fired={weaponState.shotsFired}
             data-shots-hit={weaponState.shotsHit}
           >
+            <div className="scene-panel-heading">
+              <span>Loadout</span>
+              <small>
+                {weaponState.reloading ? "Reloading" : hasOwnedWeapon ? "Ready" : "Unarmed"}
+              </small>
+            </div>
             <div className="scene-weapons-heading">
               <span>{activeWeaponDefinition?.label ?? "No weapon"}</span>
               <strong>

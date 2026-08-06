@@ -13,7 +13,9 @@ import {
   O2_IDLE_RECOVERY_PER_SECOND,
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_MINI_HOP_SPEED_BLEND,
   O2_NEUTRAL_JOG_SPEED_BLEND,
+  O2_PROJECTILE_DAMAGE_FACTOR,
   O2_STAND_COST,
   O2_SPRINT_DRAIN_PER_SECOND,
   O2_SPRINT_RECOVERY_DELAY_SECONDS,
@@ -22,8 +24,10 @@ import {
   SHIELD_RECHARGE_RATE_PER_SECOND,
   applyPlayerDamage,
   applyPlayerO2Cost,
+  applyPlayerProjectileO2Cost,
   canAffordPlayerO2Cost,
   createPlayerVitals,
+  resolveProjectileO2Cost,
   setPlayerHoldingBreath,
   tickPlayerVitals,
 } from "./player-vitals.js";
@@ -137,6 +141,35 @@ describe("player vitals model", () => {
     expect(afterJump.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.95, 8);
     expect(next.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.9, 8);
     expect(afterJump.oxygenRecoveryDelaySeconds).toBe(O2_JUMP_RECOVERY_DELAY_SECONDS);
+  });
+
+  it("derives the free mini-hop blend from standing recovery and the full jump charge", () => {
+    expect(O2_MINI_HOP_SPEED_BLEND).toBeCloseTo(
+      O2_IDLE_RECOVERY_PER_SECOND / (O2_IDLE_RECOVERY_PER_SECOND + O2_JUMP_COST),
+      8,
+    );
+    expect(O2_MINI_HOP_SPEED_BLEND).toBeGreaterThan(0.5);
+    expect(O2_MINI_HOP_SPEED_BLEND).toBeLessThan(1);
+  });
+
+  it("charges one quarter of every projectile's damage and counts every pellet", () => {
+    expect(O2_PROJECTILE_DAMAGE_FACTOR).toBe(0.25);
+    expect(resolveProjectileO2Cost(28)).toBe(7);
+    expect(resolveProjectileO2Cost(12)).toBe(3);
+    expect(resolveProjectileO2Cost(16, 8)).toBe(32);
+    expect(resolveProjectileO2Cost(100)).toBe(25);
+
+    const afterSniperRound = applyPlayerProjectileO2Cost(createPlayerVitals(), 100);
+    expect(afterSniperRound.o2).toBe(75);
+
+    let exhausted = afterSniperRound;
+    for (let index = 0; index < 3; index += 1) {
+      exhausted = applyPlayerProjectileO2Cost(exhausted, 100);
+    }
+    expect(exhausted.o2).toBe(0);
+
+    const partialReserve = applyPlayerO2Cost(createPlayerVitals(), 90);
+    expect(applyPlayerProjectileO2Cost(partialReserve, 100).o2).toBe(0);
   });
 
   it("requires enough reserve to pay each discrete action cost", () => {

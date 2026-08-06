@@ -11,7 +11,7 @@ import {
 } from "./sniper-scope.js";
 
 describe("sniper scope lens projection", () => {
-  it("activates only for a sniper in explicit ADS", () => {
+  it("activates only for a sniper in explicit zoom", () => {
     expect(
       shouldEnableSniperScope({
         firstPersonActive: true,

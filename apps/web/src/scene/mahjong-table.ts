@@ -13,23 +13,34 @@ import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahj
 import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
 import {
   generateWeaponPickups,
+  canInterruptWeaponReload,
   resolveWeaponEffectOpacity,
   WEAPON_DEFINITIONS,
+  WEAPON_CHART_ENTRIES,
   WEAPON_BULLET_HOLE_LIFETIME_SECONDS,
   WEAPON_BULLET_HOLE_MAX_COUNT,
   WEAPON_IMPACT_LIFETIME_SECONDS,
   WEAPON_IDS,
   WEAPON_PICKUP_RANGE_METERS,
   WEAPON_TRACER_LIFETIME_SECONDS,
+  WEAPON_RELOAD_LIFT_FRACTION,
+  WEAPON_RELOAD_RETURN_FRACTION,
+  WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
+  WEAPON_BARREL_SMOKE_MAX_RATE,
+  WEAPON_BARREL_SMOKE_POOL_SIZE,
+  resolveWeaponBarrelSmokeRatio,
   type WeaponId,
   type WeaponEffectKind,
   type WeaponIronSightProfile,
   type WeaponInventorySnapshot,
   type WeaponPickupSpawn,
   resolveWeaponReloadPose,
+  resolveWeaponRoundReloadPose,
   resolveWeaponRecoilAmount,
   resolveWeaponSpreadRadians,
   resolveWeaponHotkey,
+  resolveWeaponBarrelHeatDamage,
+  resolveWeaponBarrelHeatRatio,
   type WeaponSpawnRect,
   type WeaponStateSnapshot,
 } from "./weapons.js";
@@ -47,6 +58,7 @@ import {
 import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_MINI_HOP_SPEED_BLEND,
   O2_NEUTRAL_JOG_SPEED_BLEND,
   O2_SPRINT_DRAIN_PER_SECOND,
   O2_STAND_COST,
@@ -55,6 +67,7 @@ import {
   SHIELD_RECHARGE_DELAY_SECONDS,
   applyPlayerDamage,
   applyPlayerO2Cost,
+  applyPlayerProjectileO2Cost,
   canAffordPlayerO2Cost,
   createPlayerVitals,
   resetPlayerVitals,
@@ -77,7 +90,13 @@ import {
   type CameraMotionOffsets,
   type CameraMotionUpdateInput,
 } from "./camera-motion.js";
-import { resolveO2Stability } from "./o2-stability.js";
+import {
+  createO2BlurPass,
+  setO2BlurPassCenter,
+  setO2BlurPassPixels,
+  setO2BlurPassSize,
+  setO2BlurPassVignette,
+} from "./o2-blur.js";
 import { isPlayerTouchingWall } from "./wall-contact.js";
 import {
   applySniperScopeProjection,
@@ -134,7 +153,7 @@ export interface DesktopAimInputState {
   readonly holdingBreath: boolean;
 }
 
-/** Left Command owns hold-breath; right mouse supplies a persistent ADS toggle. */
+/** Left Command owns hold-breath; right mouse supplies a persistent zoom toggle. */
 export const resolveDesktopAimInput = (
   leftCommandHeld: boolean,
   rightMouseAiming: boolean,
@@ -142,6 +161,16 @@ export const resolveDesktopAimInput = (
   aimingDownSights: leftCommandHeld || rightMouseAiming,
   holdingBreath: leftCommandHeld,
 });
+
+/**
+ * Reloading temporarily owns the perspective presentation. Keep the player's
+ * requested zoom input so it can be restored when the gun is ready, but do not
+ * let the camera, reticule, or breath state stay sighted during the reload.
+ */
+export const resolveReloadAimingDownSights = (
+  aimingDownSightsRequested: boolean,
+  reloading: boolean,
+): boolean => aimingDownSightsRequested && !reloading;
 
 export const MOVEMENT_DOUBLE_TAP_WINDOW_MS = 300;
 
@@ -179,6 +208,12 @@ export const resolveCrouchedStateAfterJump = (
   isCrouched: boolean,
   jumpAccepted: boolean,
 ): boolean => (jumpAccepted ? false : isCrouched);
+
+/** A sprint request leaves crouch only when the required stand transition succeeds. */
+export const resolveCrouchedStateAfterSprint = (
+  isCrouched: boolean,
+  sprintAccepted: boolean,
+): boolean => (sprintAccepted ? false : isCrouched);
 
 export const VISUAL_SCENE_STATE_VERSION = 1 as const;
 
@@ -696,6 +731,7 @@ export interface MahjongTableSceneOptions {
   readonly onExplorationAreaChange?: (area: string) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
   readonly onSprintingChange?: (sprinting: boolean) => void;
+  readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
   readonly onReady?: () => void;
@@ -985,6 +1021,7 @@ interface SceneAmbientResources {
 interface ArchitectureResources {
   readonly ambient: SceneAmbientResources;
   readonly teacherTexture: THREE.CanvasTexture;
+  readonly weaponChartTexture: THREE.CanvasTexture;
   readonly glassSurfaces: readonly THREE.Mesh[];
   readonly simpleGlassMaterial: THREE.MeshStandardMaterial;
   readonly physicalGlassMaterial: THREE.MeshPhysicalMaterial;
@@ -1213,6 +1250,12 @@ export const resolveReticleZoomViewOffset = (
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
+const MINI_HOP_SPEED = JUMP_SPEED * O2_MINI_HOP_SPEED_BLEND;
+
+/** Use the full launch only after its complete O₂ charge is accepted. */
+export const resolveJumpLaunchSpeed = (fullJumpAccepted: boolean): number =>
+  fullJumpAccepted ? JUMP_SPEED : MINI_HOP_SPEED;
+
 // Climbing over ledges should feel like a short climb-up, not a snap.
 const LEDGE_CLIMB_DURATION = 0.24;
 const LEDGE_CLIMB_ARC_HEIGHT = 0.09;
@@ -1236,13 +1279,82 @@ const WALK_SPEED_RATIO = 1 / SPRINT_MULTIPLIER;
 const NEUTRAL_JOG_SPEED_RATIO =
   WALK_SPEED_RATIO + (1 - WALK_SPEED_RATIO) * O2_NEUTRAL_JOG_SPEED_BLEND;
 const NEUTRAL_JOG_SPEED_MULTIPLIER = SPRINT_MULTIPLIER * NEUTRAL_JOG_SPEED_RATIO;
+
+export interface PlayerMovementSpeedInput {
+  readonly crouching: boolean;
+  readonly sprinting: boolean;
+  readonly jogging: boolean;
+  readonly reloading: boolean;
+}
+
+/**
+ * Resolve the grounded movement multiplier.
+ *
+ * Reloading caps the requested standing speed at the O₂-neutral trot. It does
+ * not promote ordinary walking to trot, and it never allows a full sprint
+ * while the weapon is being reloaded.
+ */
+export const resolvePlayerMovementSpeedMultiplier = ({
+  crouching,
+  sprinting,
+  jogging,
+  reloading,
+}: PlayerMovementSpeedInput): number => {
+  if (crouching) {
+    return 0.5;
+  }
+  const requestedMultiplier = sprinting
+    ? SPRINT_MULTIPLIER
+    : jogging
+      ? NEUTRAL_JOG_SPEED_MULTIPLIER
+      : 1;
+  return reloading
+    ? Math.min(requestedMultiplier, NEUTRAL_JOG_SPEED_MULTIPLIER)
+    : requestedMultiplier;
+};
+
 const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
 const RETICLE_AIM_SWAY_PIXELS_PER_RADIAN = 260;
 const RETICLE_HEAD_BOB_PIXELS_PER_METER = 160;
 const RETICLE_RECOIL_PIXELS_PER_RADIAN = 180;
+/** Keep zoom steadier than hip fire without removing deterministic recoil feedback. */
+export const ZOOM_RECOIL_FEEDBACK_MULTIPLIER = 0.5;
 /** CSS motion applied to the reticule ring and its centre dot. */
-export const RETICLE_RING_MOTION_MULTIPLIER = -1;
+export const RETICLE_RING_MOTION_MULTIPLIER = 5;
 export const RETICLE_DOT_MOTION_MULTIPLIER = 5;
+
+/**
+ * Resolve the reticule displacement used to choose a shot's direction. Hip
+ * fire keeps the full prior recoil in that feedback path for its existing
+ * natural spread. Zoom keeps a reduced deterministic portion of that recoil,
+ * so recovery still affects the next shot without making sighted fire as loose
+ * as hip fire.
+ */
+export const resolveWeaponShotReticleOffset = (
+  motion: Pick<
+    CameraMotionOffsets,
+    "roll" | "verticalOffset" | "aimSwayX" | "aimSwayY" | "recoilYaw" | "recoilPitch"
+  >,
+  includeRecoil = true,
+  recoilFeedbackMultiplier = 1,
+): ReticleBobbingOffset => {
+  const safeRecoilFeedbackMultiplier = Number.isFinite(recoilFeedbackMultiplier)
+    ? Math.max(0, Math.min(1, recoilFeedbackMultiplier))
+    : 0;
+  const recoilScale = includeRecoil ? safeRecoilFeedbackMultiplier : 0;
+  return {
+    x:
+      (motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
+        motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
+        motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN * recoilScale) *
+      RETICLE_DOT_MOTION_MULTIPLIER,
+    y:
+      (motion.verticalOffset * RETICLE_HEAD_BOB_PIXELS_PER_METER +
+        motion.aimSwayY * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
+        motion.recoilPitch * RETICLE_RECOIL_PIXELS_PER_RADIAN * recoilScale) *
+      RETICLE_DOT_MOTION_MULTIPLIER,
+  };
+};
 // Approximate the central human eye rather than a portrait lens: 17 mm focal
 // length, a 1 arcminute circle of confusion, and a 4 mm reference pupil. The
 // scene is authored in metre-like units, so photographic distances map
@@ -3770,6 +3882,41 @@ const createLabelSprite = (label: string, accent: string): THREE.Sprite => {
   return sprite;
 };
 
+/** Create one small deterministic alpha mask shared by every held weapon. */
+const makeWeaponSmokeTexture = (): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create a canvas context for weapon smoke");
+  }
+  const imageData = context.createImageData(canvas.width, canvas.height);
+  const data = imageData.data;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const normalizedX = ((x + 0.5) / canvas.width) * 2 - 1;
+      const normalizedY = ((y + 0.5) / canvas.height) * 2 - 1;
+      const distance = Math.sqrt(normalizedX ** 2 + normalizedY ** 2);
+      const edge = Math.max(0, 1 - distance);
+      const noise = 0.72 + fbmNoise(x / 18, y / 18, 41) * 0.28;
+      const alpha = Math.round(Math.pow(edge, 1.45) * noise * 255);
+      const pixelIndex = (y * canvas.width + x) * 4;
+      data[pixelIndex] = 226;
+      data[pixelIndex + 1] = 232;
+      data[pixelIndex + 2] = 228;
+      data[pixelIndex + 3] = alpha;
+    }
+  }
+  context.putImageData(imageData, 0, 0);
+  const texture = createCanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+};
+
 const addLabel = (
   scene: THREE.Scene,
   label: string,
@@ -3783,9 +3930,35 @@ const addLabel = (
   return sprite;
 };
 
+interface WeaponBarrelResources {
+  readonly mesh: THREE.Mesh;
+  readonly material: THREE.MeshStandardMaterial;
+  readonly baseColor: THREE.Color;
+  readonly baseEmissive: THREE.Color;
+  readonly baseEmissiveIntensity: number;
+}
+
+interface WeaponSmokeParticle {
+  readonly sprite: THREE.Sprite;
+  readonly material: THREE.SpriteMaterial;
+  readonly velocity: THREE.Vector3;
+  readonly phase: number;
+  age: number;
+  lifetime: number;
+  startScale: number;
+  endScale: number;
+  startOpacity: number;
+  riseAcceleration: number;
+  spin: number;
+  active: boolean;
+}
+
 interface WeaponModelResources {
   readonly root: THREE.Group;
   readonly muzzleFlash: THREE.Mesh;
+  readonly barrels: readonly WeaponBarrelResources[];
+  readonly muzzleSmokeRoot: THREE.Group | null;
+  readonly smokeParticles: readonly WeaponSmokeParticle[];
   readonly scopeLensAnchor: THREE.Object3D | null;
   readonly scopeLensRadius: number;
 }
@@ -3794,6 +3967,7 @@ interface WeaponPickupVisual {
   readonly spawn: WeaponPickupSpawn;
   readonly root: THREE.Group;
   readonly baseY: number;
+  readonly barrels: readonly WeaponBarrelResources[];
   collected: boolean;
 }
 
@@ -3818,14 +3992,11 @@ interface WeaponRuntime {
     viewActive: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
-    oxygenRatio: number,
-    aimingDownSights: boolean,
-    holdingBreath: boolean,
-    stabilizedByWall: boolean,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
   readonly reload: () => void;
+  readonly isReloading: () => boolean;
   readonly interact: () => void;
   readonly holster: () => void;
   readonly cycleWeapon: (direction?: 1 | -1) => void;
@@ -3843,6 +4014,10 @@ const getWeaponAccent = (weapon: WeaponId): string =>
 
 /** Shared near-black finish for every procedural gun body and sight detail. */
 const WEAPON_BLACK = 0x050607;
+/** Hot steel colour used once a barrel has carried the full hit-damage load. */
+const WEAPON_BARREL_HEAT_COLOR = new THREE.Color(0xff3518);
+const WEAPON_BARREL_HEAT_EMISSIVE = new THREE.Color(0xff1600);
+const WEAPON_BARREL_HEAT_EMISSIVE_INTENSITY = 1;
 
 const addWeaponBox = (
   root: THREE.Group,
@@ -3864,14 +4039,28 @@ const addWeaponBarrel = (
   length: number,
   radius: number,
   z: number,
-  material: THREE.Material,
-): THREE.Mesh => {
-  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, length, 12), material);
+  material: THREE.MeshStandardMaterial,
+): WeaponBarrelResources => {
+  // A barrel has its own material so the heat response never changes the
+  // receiver, sights, or other dark details that share the source finish.
+  const barrelMaterial = material.clone();
+  barrelMaterial.emissive = barrelMaterial.emissive.clone();
+  const barrel = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius, length, 12),
+    barrelMaterial,
+  );
   barrel.rotation.x = Math.PI / 2;
   barrel.position.z = z;
   barrel.castShadow = true;
+  barrel.userData = { weaponVisual: true, weaponBarrel: true };
   root.add(barrel);
-  return barrel;
+  return {
+    mesh: barrel,
+    material: barrelMaterial,
+    baseColor: barrelMaterial.color.clone(),
+    baseEmissive: barrelMaterial.emissive.clone(),
+    baseEmissiveIntensity: barrelMaterial.emissiveIntensity,
+  };
 };
 
 /** Add a low front post and split rear notch while keeping the sight channel open. */
@@ -3932,6 +4121,51 @@ const addWeaponIronSights = (
   root.add(bead);
 };
 
+const createWeaponSmokeParticles = (
+  root: THREE.Group,
+  texture: THREE.Texture,
+): WeaponSmokeParticle[] => {
+  const particles: WeaponSmokeParticle[] = [];
+  for (let index = 0; index < WEAPON_BARREL_SMOKE_POOL_SIZE; index += 1) {
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      color: 0x8b9692,
+      transparent: true,
+      opacity: 0,
+      // World smoke must be occluded by the room after it leaves the muzzle.
+      // It remains depth-write-free so overlapping wisps blend into a cloud.
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.name = "WeaponBarrelSmokeParticle";
+    sprite.visible = false;
+    // The pool is tiny, and world particles can move outside the camera
+    // frustum before their ten-second fade completes. Keep them eligible for
+    // the explicit lifetime path instead of letting frustum culling pop them.
+    sprite.frustumCulled = false;
+    sprite.scale.setScalar(0.01);
+    sprite.userData = { weaponVisual: true, dofIgnore: true, weaponSmoke: true };
+    root.add(sprite);
+    particles.push({
+      sprite,
+      material,
+      velocity: new THREE.Vector3(),
+      phase: index * 1.913,
+      age: 0,
+      lifetime: 0,
+      startScale: 0,
+      endScale: 0,
+      startOpacity: 0,
+      riseAcceleration: 0,
+      spin: 0,
+      active: false,
+    });
+  }
+  return particles;
+};
+
 const createRightHandViewModel = (): THREE.Group => {
   const handRoot = new THREE.Group();
   handRoot.name = "WeaponRightHand";
@@ -3959,7 +4193,12 @@ const createRightHandViewModel = (): THREE.Group => {
   return handRoot;
 };
 
-const createWeaponModel = (weapon: WeaponId, scale: number, held = false): WeaponModelResources => {
+const createWeaponModel = (
+  weapon: WeaponId,
+  scale: number,
+  held = false,
+  smokeTexture?: THREE.Texture,
+): WeaponModelResources => {
   const definition = WEAPON_DEFINITIONS[weapon];
   const root = new THREE.Group();
   root.name = `WeaponModel:${weapon}`;
@@ -3968,15 +4207,18 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
   const bodyMaterial = createMaterial(WEAPON_BLACK, 0.28, 0.68);
   const darkMaterial = createMaterial(WEAPON_BLACK, 0.4, 0.58);
   const accentMaterial = createAccentMaterial(WEAPON_BLACK, 0.26, 0.25, 0.6);
+  const barrels: WeaponBarrelResources[] = [];
+  let muzzleSmokeRoot: THREE.Group | null = null;
+  let smokeParticles: WeaponSmokeParticle[] = [];
   let muzzleZ: number;
   let scopeLensAnchor: THREE.Object3D | null = null;
   let scopeLensRadius = 0;
   if (weapon === "pistol") {
     // Keep the receiver below the sight line. The old full-width orange cap
-    // sat directly behind the front post and covered the reticle in ADS.
+    // sat directly behind the front post and covered the reticle while zoomed.
     addWeaponBox(root, [0.2, 0.14, 0.4], [0, -0.015, 0], bodyMaterial, 0.035);
     addWeaponBox(root, [0.12, 0.28, 0.16], [0, -0.19, 0.12], darkMaterial, 0.025);
-    addWeaponBarrel(root, 0.34, 0.043, -0.35, darkMaterial);
+    barrels.push(addWeaponBarrel(root, 0.34, 0.043, -0.35, darkMaterial));
     // Retain a coloured detail as a narrow side plate, never across the
     // central sight channel.
     addWeaponBox(root, [0.05, 0.035, 0.18], [0.08, 0.015, -0.04], accentMaterial, 0.01);
@@ -3984,7 +4226,7 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
   } else if (weapon === "shotgun") {
     addWeaponBox(root, [0.23, 0.17, 0.72], [0, -0.015, 0.12], bodyMaterial, 0.04);
     addWeaponBox(root, [0.24, 0.15, 0.4], [0, -0.035, 0.62], darkMaterial, 0.04);
-    addWeaponBarrel(root, 1.05, 0.055, -0.65, darkMaterial);
+    barrels.push(addWeaponBarrel(root, 1.05, 0.055, -0.65, darkMaterial));
     addWeaponBox(root, [0.16, 0.22, 0.3], [0, -0.2, 0.26], accentMaterial, 0.025);
     muzzleZ = -1.2;
   } else if (weapon === "machineGun") {
@@ -3993,7 +4235,7 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
     addWeaponBox(root, [0.28, 0.17, 0.62], [0, -0.015, 0.08], bodyMaterial, 0.04);
     addWeaponBox(root, [0.13, 0.3, 0.2], [0, -0.21, 0.2], darkMaterial, 0.025);
     addWeaponBox(root, [0.16, 0.34, 0.22], [0, -0.25, -0.08], accentMaterial, 0.03);
-    addWeaponBarrel(root, 0.62, 0.05, -0.55, darkMaterial);
+    barrels.push(addWeaponBarrel(root, 0.62, 0.05, -0.55, darkMaterial));
     // Move the orange status rail to the receiver side so the centre notch
     // remains open when the weapon is raised into the sight line.
     addWeaponBox(root, [0.06, 0.04, 0.2], [0.11, 0.03, -0.14], accentMaterial, 0.012);
@@ -4001,9 +4243,9 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
   } else {
     addWeaponBox(root, [0.22, 0.16, 0.92], [0, -0.01, 0.16], bodyMaterial, 0.035);
     addWeaponBox(root, [0.24, 0.15, 0.38], [0, -0.035, 0.72], darkMaterial, 0.04);
-    addWeaponBarrel(root, 1.35, 0.045, -0.98, darkMaterial);
+    barrels.push(addWeaponBarrel(root, 1.35, 0.045, -0.98, darkMaterial));
     addWeaponBox(root, [0.12, 0.12, 0.4], [0, 0.19, -0.2], accentMaterial, 0.03);
-    addWeaponBarrel(root, 0.34, 0.055, -0.19, accentMaterial);
+    barrels.push(addWeaponBarrel(root, 0.34, 0.055, -0.19, accentMaterial));
     // The camera-child scope is a real piece of the held model. Its rear
     // glass is kept in front of the camera near plane, while the full-screen
     // lens pass below samples the rendered scene through this projected disk.
@@ -4076,7 +4318,40 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
   if (held) {
     root.add(createRightHandViewModel());
   }
-  return { root, muzzleFlash, scopeLensAnchor, scopeLensRadius };
+  if (held && smokeTexture !== undefined) {
+    muzzleSmokeRoot = new THREE.Group();
+    muzzleSmokeRoot.name = "WeaponMuzzleSmoke";
+    // Seed the group near the forward barrel while it is assembled. The
+    // runtime detaches this pool to the scene world before the first spawn;
+    // every particle then receives an exact muzzle world position.
+    muzzleSmokeRoot.position.set(0, 0.2, muzzleZ + 0.24);
+    muzzleSmokeRoot.userData = { weaponVisual: true, dofIgnore: true, weaponSmoke: true };
+    root.add(muzzleSmokeRoot);
+    smokeParticles = createWeaponSmokeParticles(muzzleSmokeRoot, smokeTexture);
+  }
+  return {
+    root,
+    muzzleFlash,
+    barrels,
+    muzzleSmokeRoot,
+    smokeParticles,
+    scopeLensAnchor,
+    scopeLensRadius,
+  };
+};
+
+/** Apply one weapon's normalized heat response to every visible model copy. */
+const applyWeaponBarrelHeatVisual = (barrel: WeaponBarrelResources, heatRatio: number): void => {
+  const ratio = THREE.MathUtils.clamp(Number.isFinite(heatRatio) ? heatRatio : 0, 0, 1);
+  barrel.material.color.copy(barrel.baseColor).lerp(WEAPON_BARREL_HEAT_COLOR, ratio);
+  barrel.material.emissive.copy(barrel.baseEmissive).lerp(WEAPON_BARREL_HEAT_EMISSIVE, ratio);
+  barrel.material.emissiveIntensity = THREE.MathUtils.lerp(
+    barrel.baseEmissiveIntensity,
+    WEAPON_BARREL_HEAT_EMISSIVE_INTENSITY,
+    ratio,
+  );
+  barrel.material.needsUpdate = true;
+  barrel.mesh.userData.weaponBarrelHeat = ratio;
 };
 
 const isWeaponVisual = (object: THREE.Object3D): boolean => {
@@ -4104,7 +4379,7 @@ const createWeaponRuntime = (
   roomSeed: string,
   pickups: readonly WeaponPickupSpawn[],
   onStateChange?: (state: WeaponStateSnapshot) => void,
-  onWeaponShot?: (damage: number) => void,
+  onWeaponShot?: (damage: number, projectileCount: number) => void,
   onWeaponSwitch?: (hasOutgoingWeapon: boolean) => void,
 ): WeaponRuntime => {
   const pickupRoot = new THREE.Group();
@@ -4115,6 +4390,7 @@ const createWeaponRuntime = (
   effectsRoot.name = "WeaponEffectsRoot";
   effectsRoot.userData = { dofIgnore: true, weaponVisual: true };
   scene.add(effectsRoot);
+  const weaponSmokeTexture = makeWeaponSmokeTexture();
   const bulletHoleRoot = new THREE.Group();
   bulletHoleRoot.name = "WeaponBulletHoleRoot";
   // Bullet holes are presentation-only scene objects, but they should still
@@ -4164,12 +4440,28 @@ const createWeaponRuntime = (
     label.scale.set(0.86, 0.2, 1);
     pickup.add(label);
     pickupRoot.add(pickup);
-    pickupVisuals.push({ spawn, root: pickup, baseY: spawn.position[1], collected: false });
+    pickupVisuals.push({
+      spawn,
+      root: pickup,
+      baseY: spawn.position[1],
+      barrels: model.barrels,
+      collected: false,
+    });
   }
 
   const viewModels = new Map<WeaponId, WeaponModelResources>();
   for (const weapon of WEAPON_IDS) {
-    const model = createWeaponModel(weapon, 0.92, true);
+    const model = createWeaponModel(weapon, 0.92, true, weaponSmokeTexture);
+    // Smoke is a world effect, not a camera-child decoration. Detach the
+    // pooled particle root once so every sprite can keep its captured world
+    // position while the player turns, walks, holsters, or switches weapons.
+    if (model.muzzleSmokeRoot !== null) {
+      model.muzzleSmokeRoot.removeFromParent();
+      model.muzzleSmokeRoot.position.set(0, 0, 0);
+      model.muzzleSmokeRoot.rotation.set(0, 0, 0);
+      model.muzzleSmokeRoot.scale.setScalar(1);
+      effectsRoot.add(model.muzzleSmokeRoot);
+    }
     model.root.position.set(
       CAMERA_VIEWMODEL_STANDING_OFFSET.x,
       CAMERA_VIEWMODEL_STANDING_OFFSET.y,
@@ -4188,11 +4480,17 @@ const createWeaponRuntime = (
   for (const weapon of WEAPON_IDS) {
     inventory.set(weapon, { owned: false, ammoInMagazine: 0, reserveAmmo: 0 });
   }
+  const barrelHeatDamage = new Map<WeaponId, number>(WEAPON_IDS.map((weapon) => [weapon, 0]));
   let activeWeapon: WeaponId | null = null;
   let switchAnimation: WeaponSwitchAnimation | null = null;
   let switchStartedSinceLastUpdate = false;
+  let viewmodelTransitionActive = false;
   let nearbyPickup: WeaponId | null = null;
   let reloadingSeconds = 0;
+  let roundReloadLiftElapsedSeconds = 0;
+  let roundReloadReturnElapsedSeconds: number | null = null;
+  let reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
+  let reloadInsertionPending = false;
   let fireCooldownSeconds = 0;
   let muzzleFlashSeconds = 0;
   let recoilAmount = 0;
@@ -4202,14 +4500,13 @@ const createWeaponRuntime = (
   let controlsActive = false;
   let viewActive = false;
   let pickupPositionInitialized = false;
-  let oxygenRatio = 1;
-  let aimingDownSights = false;
-  let holdingBreath = false;
-  let weaponSwayPhase = 0;
+  let smokeSpawnAccumulator = 0;
+  let smokeAccumulatorWeapon: WeaponId | null = null;
   let latestAimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 } | null =
     null;
   let lastSnapshotSerialized = "";
   const shotRandom = createSeededRandom(`${roomSeed}|weapons|combat|v1`);
+  const smokeRandom = createSeededRandom(`${roomSeed}|weapons|smoke|v1`);
   const shotRaycaster = new THREE.Raycaster();
   // Sprite.raycast requires a camera even when the sprite is later filtered
   // out as a non-surface target. Supplying it also keeps label sprites from
@@ -4237,6 +4534,15 @@ const createWeaponRuntime = (
   const weaponReloadQuaternion = new THREE.Quaternion();
   const weaponReloadEuler = new THREE.Euler(0, 0, 0, "XYZ");
   const lastPickupCheckPosition = new THREE.Vector3();
+  const smokeWorldUp = new THREE.Vector3(0, 1, 0);
+  const smokeMuzzleWorld = new THREE.Vector3();
+  const smokeForwardWorld = new THREE.Vector3();
+  const smokeRightWorld = new THREE.Vector3();
+  const smokeSpawnWorld = new THREE.Vector3();
+  const smokeFallbackAxis = new THREE.Vector3(1, 0, 0);
+
+  const isReloadPresentationActive = (): boolean =>
+    reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null;
 
   const getSnapshot = (): WeaponStateSnapshot => ({
     activeWeapon,
@@ -4250,7 +4556,7 @@ const createWeaponRuntime = (
         reserveAmmo: slot?.reserveAmmo ?? 0,
       };
     }),
-    reloading: reloadingSeconds > 0,
+    reloading: isReloadPresentationActive(),
     shotsFired,
     shotsHit,
     bulletHoleCount: bulletHoleEffects.length,
@@ -4263,9 +4569,198 @@ const createWeaponRuntime = (
       onStateChange?.(snapshot);
     }
   };
+  const resetRoundReloadPresentation = (): void => {
+    roundReloadLiftElapsedSeconds = 0;
+    roundReloadReturnElapsedSeconds = null;
+    reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
+    reloadInsertionPending = false;
+  };
+  const triggerReloadInsertionImpulse = (): void => {
+    reloadInsertionImpulseElapsedSeconds = 0;
+    reloadInsertionPending = true;
+  };
+  const beginRoundReloadReturn = (): void => {
+    if (activeWeapon !== null && WEAPON_DEFINITIONS[activeWeapon].reloadMode === "round") {
+      if (reloadInsertionPending) {
+        reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
+        reloadInsertionPending = false;
+      }
+      roundReloadReturnElapsedSeconds = 0;
+    }
+  };
   const showWeaponViewModel = (weapon: WeaponId | null): void => {
     for (const [entry, model] of viewModels) {
       model.root.visible = viewActive && entry === weapon;
+    }
+  };
+  const applyWeaponBarrelHeat = (weapon: WeaponId, damage: number): void => {
+    const heatRatio = resolveWeaponBarrelHeatRatio(damage);
+    const viewModel = viewModels.get(weapon);
+    for (const barrel of viewModel?.barrels ?? []) {
+      applyWeaponBarrelHeatVisual(barrel, heatRatio);
+    }
+    for (const pickup of pickupVisuals) {
+      if (pickup.spawn.weapon !== weapon) {
+        continue;
+      }
+      for (const barrel of pickup.barrels) {
+        applyWeaponBarrelHeatVisual(barrel, heatRatio);
+      }
+    }
+  };
+  const resetWeaponSmoke = (model: WeaponModelResources): void => {
+    for (const particle of model.smokeParticles) {
+      particle.active = false;
+      particle.age = 0;
+      particle.material.opacity = 0;
+      particle.sprite.visible = false;
+    }
+  };
+  /** Keep visual smoke power tied to one trigger round's total damage. */
+  const resolveWeaponSmokePower = (damagePerRound: number): number => {
+    const safeDamage = Number.isFinite(damagePerRound) ? Math.max(0, damagePerRound) : 0;
+    return Math.max(0.45, safeDamage / 32);
+  };
+  const updateWeaponSmokeWorldFrame = (model: WeaponModelResources): void => {
+    model.root.updateMatrixWorld(true);
+    model.muzzleFlash.getWorldPosition(smokeMuzzleWorld);
+    smokeForwardWorld.set(0, 0, -1).transformDirection(model.root.matrixWorld).normalize();
+    if (smokeForwardWorld.lengthSq() < 0.0001) {
+      smokeForwardWorld.set(0, 0, -1);
+    }
+  };
+  const spawnWeaponSmoke = (
+    model: WeaponModelResources,
+    thermal: boolean,
+    smokePower: number,
+  ): void => {
+    let particle = model.smokeParticles.find((candidate) => !candidate.active);
+    if (particle === undefined) {
+      particle = model.smokeParticles[0];
+      for (const candidate of model.smokeParticles) {
+        if (particle === undefined || candidate.age > particle.age) {
+          particle = candidate;
+        }
+      }
+    }
+    if (particle === undefined) {
+      return;
+    }
+    const random = (): number => smokeRandom.nextFloat();
+    const safePower = Number.isFinite(smokePower) ? Math.max(0.45, smokePower) : 0.45;
+    const powerSpread = Math.min(3, safePower);
+    const lateralSpread = (thermal ? 0.06 : 0.09) * (0.8 + powerSpread * 0.2);
+    const concentratedSpread = lateralSpread * 0.24;
+    smokeRightWorld.crossVectors(smokeForwardWorld, smokeWorldUp);
+    if (smokeRightWorld.lengthSq() < 0.0001) {
+      smokeRightWorld.crossVectors(smokeForwardWorld, smokeFallbackAxis);
+    }
+    smokeRightWorld.normalize();
+    particle.active = true;
+    particle.age = 0;
+    // Keep the first frame dense at the captured muzzle point, then expand
+    // the billboard and push it outward for a ten-second diffusion fade.
+    particle.lifetime = thermal ? 9.6 + random() * 1.2 : 9.2 + random() * 1.6;
+    particle.startScale = (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) * safePower;
+    particle.endScale =
+      particle.startScale * (thermal ? 5.2 + random() * 1.6 : 4.8 + random() * 1.5);
+    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.86 + random() * 0.14;
+    particle.riseAcceleration = thermal ? 0.1 + random() * 0.06 : 0.08 + random() * 0.06;
+    particle.spin = (random() - 0.5) * (thermal ? 2.2 : 3.6);
+    smokeSpawnWorld
+      .copy(smokeMuzzleWorld)
+      .addScaledVector(smokeRightWorld, (random() - 0.5) * concentratedSpread)
+      .addScaledVector(smokeWorldUp, (random() - 0.5) * concentratedSpread * 0.45)
+      .addScaledVector(smokeForwardWorld, random() * (thermal ? 0.025 : 0.045));
+    particle.sprite.position.copy(smokeSpawnWorld);
+    const outwardSpeed = (thermal ? 0.045 : 0.12) * (0.85 + powerSpread * 0.25);
+    const upwardSpeed = (thermal ? 0.08 : 0.1) + random() * (thermal ? 0.08 : 0.12);
+    particle.velocity
+      .copy(smokeForwardWorld)
+      .multiplyScalar(outwardSpeed)
+      .addScaledVector(smokeRightWorld, (random() - 0.5) * lateralSpread)
+      .addScaledVector(smokeWorldUp, upwardSpeed);
+    // White smoke is the muzzle-flash companion; the alpha mask supplies the
+    // soft edge so even the large shotgun and sniper plumes stay billowy.
+    particle.material.color.setHex(thermal ? 0xf1f4ef : 0xffffff);
+    particle.material.opacity = particle.startOpacity;
+    particle.sprite.rotation.set(0, 0, random() * Math.PI * 2);
+    particle.sprite.scale.set(
+      particle.startScale,
+      particle.startScale * (0.82 + random() * 0.3),
+      1,
+    );
+    particle.sprite.visible = true;
+  };
+  const updateWeaponSmoke = (
+    model: WeaponModelResources,
+    weapon: WeaponId,
+    deltaSeconds: number,
+    emitThermal = true,
+  ): void => {
+    if (model.smokeParticles.length === 0) {
+      return;
+    }
+    const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    if (emitThermal) {
+      updateWeaponSmokeWorldFrame(model);
+      const heatDamage = barrelHeatDamage.get(weapon) ?? 0;
+      const heatRatio = resolveWeaponBarrelHeatRatio(heatDamage);
+      const thermalRatio = resolveWeaponBarrelSmokeRatio(heatRatio);
+      const smokePower = resolveWeaponSmokePower(WEAPON_DEFINITIONS[weapon].totalDamagePerShot);
+      smokeSpawnAccumulator += safeDelta * WEAPON_BARREL_SMOKE_MAX_RATE * thermalRatio;
+      let thermalSpawns = 0;
+      while (smokeSpawnAccumulator >= 1 && thermalSpawns < 2) {
+        smokeSpawnAccumulator -= 1;
+        spawnWeaponSmoke(model, true, smokePower);
+        thermalSpawns += 1;
+      }
+      if (thermalRatio <= 0) {
+        smokeSpawnAccumulator = Math.min(smokeSpawnAccumulator, 0.99);
+      }
+    }
+    for (const particle of model.smokeParticles) {
+      if (!particle.active) {
+        continue;
+      }
+      particle.age += safeDelta;
+      const progress = Math.min(1, particle.age / Math.max(0.001, particle.lifetime));
+      particle.velocity.y += particle.riseAcceleration * safeDelta;
+      particle.sprite.position.addScaledVector(particle.velocity, safeDelta);
+      particle.sprite.position.x +=
+        Math.sin(particle.phase + particle.age * 4.2) * 0.012 * safeDelta;
+      particle.sprite.position.z +=
+        Math.cos(particle.phase + particle.age * 3.4) * 0.008 * safeDelta;
+      particle.sprite.rotation.z += particle.spin * safeDelta;
+      const easedProgress = progress * progress * (3 - 2 * progress);
+      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, easedProgress);
+      particle.sprite.scale.set(scale, scale * (0.84 + easedProgress * 0.26), 1);
+      particle.material.opacity = particle.startOpacity * (1 - progress) ** 1.25;
+      if (progress >= 1) {
+        particle.active = false;
+        particle.sprite.visible = false;
+        particle.material.opacity = 0;
+      }
+    }
+  };
+  const addWeaponHitHeat = (weapon: WeaponId, damage: number): void => {
+    const currentDamage = barrelHeatDamage.get(weapon) ?? 0;
+    const nextDamage = resolveWeaponBarrelHeatDamage(currentDamage, damage);
+    barrelHeatDamage.set(weapon, nextDamage);
+    applyWeaponBarrelHeat(weapon, nextDamage);
+  };
+  const coolWeaponBarrels = (deltaSeconds: number): void => {
+    for (const weapon of WEAPON_IDS) {
+      const currentDamage = barrelHeatDamage.get(weapon) ?? 0;
+      if (currentDamage <= 0) {
+        continue;
+      }
+      const nextDamage = resolveWeaponBarrelHeatDamage(currentDamage, 0, deltaSeconds);
+      if (nextDamage === currentDamage) {
+        continue;
+      }
+      barrelHeatDamage.set(weapon, nextDamage);
+      applyWeaponBarrelHeat(weapon, nextDamage);
     }
   };
   const setActiveWeapon = (weapon: WeaponId | null): void => {
@@ -4275,6 +4770,7 @@ const createWeaponRuntime = (
     const previousWeapon = activeWeapon;
     activeWeapon = weapon;
     reloadingSeconds = 0;
+    resetRoundReloadPresentation();
     if (previousWeapon !== weapon) {
       switchAnimation = { fromWeapon: previousWeapon, toWeapon: weapon };
       switchStartedSinceLastUpdate = true;
@@ -4418,7 +4914,12 @@ const createWeaponRuntime = (
     }
   };
   const reload = (): void => {
-    if (activeWeapon === null || reloadingSeconds > 0 || switchAnimation !== null) {
+    if (
+      activeWeapon === null ||
+      reloadingSeconds > 0 ||
+      switchAnimation !== null ||
+      viewmodelTransitionActive
+    ) {
       return;
     }
     const definition = WEAPON_DEFINITIONS[activeWeapon];
@@ -4431,6 +4932,52 @@ const createWeaponRuntime = (
       return;
     }
     reloadingSeconds = definition.reloadSeconds;
+    resetRoundReloadPresentation();
+    emitState(true);
+  };
+
+  /**
+   * Finish one reload operation. Clip weapons fill the magazine in one step;
+   * high-damage weapons insert one bullet or shell and automatically continue
+   * until the magazine is full or the reserve is empty.
+   */
+  const completeReloadOperation = (): void => {
+    if (activeWeapon === null) {
+      reloadingSeconds = 0;
+      reloadInsertionPending = false;
+      return;
+    }
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const slot = inventory.get(activeWeapon);
+    if (slot === undefined) {
+      reloadingSeconds = 0;
+      reloadInsertionPending = false;
+      return;
+    }
+    const needed = definition.magazineSize - slot.ammoInMagazine;
+    if (needed <= 0 || slot.reserveAmmo <= 0) {
+      reloadingSeconds = 0;
+      reloadInsertionPending = false;
+      return;
+    }
+    if (definition.reloadMode === "clip") {
+      const loaded = Math.min(needed, slot.reserveAmmo);
+      slot.ammoInMagazine += loaded;
+      slot.reserveAmmo -= loaded;
+      reloadingSeconds = 0;
+      reloadInsertionPending = false;
+    } else {
+      slot.ammoInMagazine += 1;
+      slot.reserveAmmo -= 1;
+      reloadInsertionPending = false;
+      reloadingSeconds =
+        slot.ammoInMagazine < definition.magazineSize && slot.reserveAmmo > 0
+          ? definition.reloadSeconds
+          : 0;
+      if (reloadingSeconds === 0) {
+        beginRoundReloadReturn();
+      }
+    }
     emitState(true);
   };
   const addTracer = (
@@ -4573,10 +5120,11 @@ const createWeaponRuntime = (
   const findWeaponHit = (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
-    range: number,
   ): THREE.Intersection | undefined => {
     shotRaycaster.set(origin, direction);
-    shotRaycaster.far = range;
+    // Shots are hitscan and continue until the first render surface. Keep the
+    // raycaster unbounded instead of applying a weapon-specific distance cap.
+    shotRaycaster.far = Number.POSITIVE_INFINITY;
     try {
       // Chunks and other streamed render roots can be added after weapon
       // construction. Resolve the current scene children for every shot so
@@ -4592,7 +5140,8 @@ const createWeaponRuntime = (
         );
     } catch {
       // A malformed or concurrently-disposed render subtree must not take
-      // down the interactive scene. The tracer still renders to max range.
+      // down the interactive scene. The tracer still renders to the camera's
+      // finite view distance as a presentation-only miss fallback.
       return undefined;
     }
   };
@@ -4601,7 +5150,7 @@ const createWeaponRuntime = (
       !controlsActive ||
       activeWeapon === null ||
       switchAnimation !== null ||
-      reloadingSeconds > 0 ||
+      viewmodelTransitionActive ||
       fireCooldownSeconds > 0
     ) {
       return;
@@ -4618,20 +5167,35 @@ const createWeaponRuntime = (
     if (latestAimRay === null) {
       return;
     }
+    if (reloadingSeconds > 0 && !canInterruptWeaponReload(definition, slot.ammoInMagazine)) {
+      return;
+    }
+    // A held fire input cancels a round reload as soon as a shell or bullet
+    // has been chambered. Clip reloads remain atomic and cannot be cancelled.
+    if (reloadingSeconds > 0) {
+      beginRoundReloadReturn();
+    }
+    reloadingSeconds = 0;
     slot.ammoInMagazine -= 1;
     fireCooldownSeconds = definition.fireIntervalSeconds;
     muzzleFlashSeconds = 0.055;
     recoilAmount = Math.min(1, recoilAmount + resolveWeaponRecoilAmount(definition.damage));
-    onWeaponShot?.(definition.damage);
+    onWeaponShot?.(definition.damage, definition.pellets);
     shotsFired += 1;
+    scene.updateMatrixWorld(true);
     const baseDirection = latestAimRay.direction.clone().normalize();
     const viewModel = viewModels.get(activeWeapon);
     if (viewModel !== undefined) {
+      updateWeaponSmokeWorldFrame(viewModel);
       viewModel.muzzleFlash.visible = true;
       viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
+      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
+      const puffCount = Math.min(8, Math.max(3, Math.ceil(definition.totalDamagePerShot / 24)));
+      for (let puff = 0; puff < puffCount; puff += 1) {
+        spawnWeaponSmoke(viewModel, false, smokePower);
+      }
     }
     const spreadRadians = resolveWeaponSpreadRadians(definition);
-    scene.updateMatrixWorld(true);
     if (spreadRadians > 0) {
       rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
       if (rightVector.lengthSq() < 0.0001) {
@@ -4650,11 +5214,14 @@ const createWeaponRuntime = (
           .addScaledVector(upVector, Math.sin(angle) * radius)
           .normalize();
       }
-      const hit = findWeaponHit(latestAimRay.origin, pelletDirection, definition.range);
-      const distance = hit?.distance ?? definition.range;
+      const hit = findWeaponHit(latestAimRay.origin, pelletDirection);
+      // A miss has no surface to terminate the tracer. Use the camera's far
+      // plane only for finite effect geometry; it is not a gameplay range.
+      const distance = hit?.distance ?? camera.far;
       addTracer(latestAimRay.origin, pelletDirection, distance, definition.color);
       if (hit !== undefined) {
         shotsHit += 1;
+        addWeaponHitHeat(definition.id, definition.damage);
         addImpact(hit.point, definition.color);
         addBulletHole(hit, pelletDirection, definition.color);
         hitColor.set(definition.color);
@@ -4675,31 +5242,76 @@ const createWeaponRuntime = (
     visibleInView: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
-    nextOxygenRatio: number,
-    nextAimingDownSights: boolean,
-    nextHoldingBreath: boolean,
-    nextStabilizedByWall: boolean,
   ): void => {
     controlsActive = active;
     viewActive = visibleInView;
-    oxygenRatio = Number.isFinite(nextOxygenRatio) ? Math.min(1, Math.max(0, nextOxygenRatio)) : 0;
-    aimingDownSights = nextAimingDownSights;
-    holdingBreath = nextHoldingBreath;
     latestAimRay = aimRay;
-    weaponSwayPhase += deltaSeconds * 1.35;
+    // Traversal state arrives from the shared camera damper before firing or
+    // reload input is processed for this frame.
+    viewmodelTransitionActive = viewmodelTransition.phase !== "idle";
+    coolWeaponBarrels(deltaSeconds);
     fireCooldownSeconds = Math.max(0, fireCooldownSeconds - deltaSeconds);
+    const reloadDeltaSeconds = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    if (Number.isFinite(reloadInsertionImpulseElapsedSeconds)) {
+      reloadInsertionImpulseElapsedSeconds += reloadDeltaSeconds;
+      if (reloadInsertionImpulseElapsedSeconds >= WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS) {
+        reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
+      }
+    }
+    const activeReloadDefinition = activeWeapon === null ? null : WEAPON_DEFINITIONS[activeWeapon];
+    const reloadInsertionLeadSeconds =
+      activeReloadDefinition === null
+        ? 0
+        : Math.min(
+            WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
+            activeReloadDefinition.reloadSeconds,
+          );
+    if (
+      activeReloadDefinition !== null &&
+      reloadingSeconds > 0 &&
+      !reloadInsertionPending &&
+      reloadingSeconds <= reloadInsertionLeadSeconds
+    ) {
+      triggerReloadInsertionImpulse();
+    }
+    const roundReloadWasReturning =
+      activeReloadDefinition?.reloadMode === "round" && roundReloadReturnElapsedSeconds !== null;
+    if (
+      activeReloadDefinition?.reloadMode === "round" &&
+      reloadingSeconds > 0 &&
+      roundReloadReturnElapsedSeconds === null
+    ) {
+      const liftDurationSeconds =
+        activeReloadDefinition.reloadSeconds * WEAPON_RELOAD_LIFT_FRACTION;
+      roundReloadLiftElapsedSeconds = Math.min(
+        liftDurationSeconds,
+        roundReloadLiftElapsedSeconds + reloadDeltaSeconds,
+      );
+    }
+    let remainingReloadDeltaSeconds = reloadDeltaSeconds;
     if (reloadingSeconds > 0) {
-      reloadingSeconds = Math.max(0, reloadingSeconds - deltaSeconds);
-      if (reloadingSeconds === 0 && activeWeapon !== null) {
-        const definition = WEAPON_DEFINITIONS[activeWeapon];
-        const slot = inventory.get(activeWeapon);
-        if (slot !== undefined) {
-          const needed = definition.magazineSize - slot.ammoInMagazine;
-          const loaded = Math.min(needed, slot.reserveAmmo);
-          slot.ammoInMagazine += loaded;
-          slot.reserveAmmo -= loaded;
-        }
-        emitState(true);
+      while (reloadingSeconds > 0 && remainingReloadDeltaSeconds >= reloadingSeconds) {
+        remainingReloadDeltaSeconds -= reloadingSeconds;
+        reloadingSeconds = 0;
+        completeReloadOperation();
+      }
+      if (reloadingSeconds > 0) {
+        reloadingSeconds = Math.max(0, reloadingSeconds - remainingReloadDeltaSeconds);
+        remainingReloadDeltaSeconds = 0;
+      }
+    }
+    if (
+      activeReloadDefinition?.reloadMode === "round" &&
+      roundReloadReturnElapsedSeconds !== null
+    ) {
+      const returnDeltaSeconds = roundReloadWasReturning
+        ? reloadDeltaSeconds
+        : remainingReloadDeltaSeconds;
+      roundReloadReturnElapsedSeconds += returnDeltaSeconds;
+      const returnDurationSeconds =
+        activeReloadDefinition.reloadSeconds * WEAPON_RELOAD_RETURN_FRACTION;
+      if (roundReloadReturnElapsedSeconds >= returnDurationSeconds) {
+        resetRoundReloadPresentation();
       }
     }
     if (fireHeld) {
@@ -4738,18 +5350,13 @@ const createWeaponRuntime = (
       .copy(aimRay.origin)
       .addScaledVector(aimRay.direction, WEAPON_VIEWMODEL_AIM_DISTANCE);
     weaponAimTargetLocal.copy(weaponAimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
-    const stability = resolveO2Stability({
-      oxygenRatio,
-      aimingDownSights,
-      holdingBreath,
-      stabilizedByWall: nextStabilizedByWall,
-    });
     const effectiveViewmodelTransition =
       viewmodelTransition.phase === "idle" &&
       switchStartedSinceLastUpdate &&
       switchAnimation !== null
         ? resolveCameraViewmodelTransition(0, switchAnimation.fromWeapon !== null)
         : viewmodelTransition;
+    viewmodelTransitionActive = effectiveViewmodelTransition.phase !== "idle";
     switchStartedSinceLastUpdate = false;
     let visibleWeapon = activeWeapon;
     if (switchAnimation !== null) {
@@ -4761,29 +5368,58 @@ const createWeaponRuntime = (
         switchAnimation = null;
       }
     }
-    const switchPose = switchAnimation !== null ? effectiveViewmodelTransition : null;
+    // Weapon switches and traversal both use the same camera-damper pose. A
+    // traversal has no switchAnimation, but its lower/raise output still must
+    // reach the camera-child model.
+    const viewmodelPose =
+      effectiveViewmodelTransition.phase === "idle" ? null : effectiveViewmodelTransition;
+    if (smokeAccumulatorWeapon !== visibleWeapon) {
+      smokeAccumulatorWeapon = visibleWeapon;
+      smokeSpawnAccumulator = 0;
+    }
     for (const [weapon, model] of viewModels) {
       const visible = viewActive && weapon === visibleWeapon;
       model.root.visible = visible;
       if (!visible) {
         model.muzzleFlash.visible = false;
+        // Existing world smoke continues diffusing after a switch, holster,
+        // or camera move. Do not emit new thermal wisps from a hidden barrel.
+        updateWeaponSmoke(model, weapon, deltaSeconds, false);
         continue;
       }
       const definition = WEAPON_DEFINITIONS[weapon];
-      const reloadPose =
-        weapon === activeWeapon && reloadingSeconds > 0
+      const insertionImpulseElapsedSeconds = Number.isFinite(reloadInsertionImpulseElapsedSeconds)
+        ? reloadInsertionImpulseElapsedSeconds
+        : undefined;
+      const isActiveRoundReload =
+        weapon === activeWeapon &&
+        definition.reloadMode === "round" &&
+        (reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null);
+      const reloadPose = isActiveRoundReload
+        ? resolveWeaponRoundReloadPose(
+            roundReloadLiftElapsedSeconds,
+            definition.reloadSeconds,
+            roundReloadReturnElapsedSeconds,
+            insertionImpulseElapsedSeconds,
+          )
+        : weapon === activeWeapon && reloadingSeconds > 0
           ? resolveWeaponReloadPose(
               definition.reloadSeconds - reloadingSeconds,
               definition.reloadSeconds,
+              { insertionImpulseElapsedSeconds },
             )
-          : null;
+          : weapon === activeWeapon && insertionImpulseElapsedSeconds !== undefined
+            ? resolveWeaponReloadPose(definition.reloadSeconds, definition.reloadSeconds, {
+                insertionImpulseElapsedSeconds,
+              })
+            : null;
       model.root.position.x =
-        viewmodelOffset.x + (switchPose?.offset.x ?? 0) + (reloadPose?.lateralOffset ?? 0);
+        viewmodelOffset.x + (viewmodelPose?.offset.x ?? 0) + (reloadPose?.lateralOffset ?? 0);
       model.root.position.y =
-        viewmodelOffset.y + (switchPose?.offset.y ?? 0) + (reloadPose?.verticalOffset ?? 0);
+        viewmodelOffset.y + (viewmodelPose?.offset.y ?? 0) + (reloadPose?.verticalOffset ?? 0);
       model.root.position.z =
         viewmodelOffset.z +
-        (switchPose?.offset.z ?? 0) +
+        (viewmodelPose?.offset.z ?? 0) +
         recoilAmount * 0.07 +
         (reloadPose?.depthOffset ?? 0);
       weaponAimDirectionLocal.copy(weaponAimTargetLocal).sub(model.root.position);
@@ -4791,11 +5427,11 @@ const createWeaponRuntime = (
         weaponAimDirectionLocal.normalize();
         weaponAimQuaternion.setFromUnitVectors(weaponForward, weaponAimDirectionLocal);
         model.root.quaternion.copy(weaponAimQuaternion);
-        if (switchPose !== null) {
+        if (viewmodelPose !== null) {
           weaponReloadEuler.set(
-            switchPose.pitchRadians,
-            switchPose.yawRadians,
-            switchPose.rollRadians,
+            viewmodelPose.pitchRadians,
+            viewmodelPose.yawRadians,
+            viewmodelPose.rollRadians,
           );
           weaponReloadQuaternion.setFromEuler(weaponReloadEuler);
           model.root.quaternion.multiply(weaponReloadQuaternion);
@@ -4804,14 +5440,12 @@ const createWeaponRuntime = (
           weaponReloadQuaternion.setFromEuler(weaponReloadEuler);
           model.root.quaternion.multiply(weaponReloadQuaternion);
         }
-        const swayX = Math.sin(weaponSwayPhase) * stability.weaponSwayRadians;
-        const swayY = Math.cos(weaponSwayPhase * 0.79) * stability.weaponSwayRadians * 0.72;
-        const swayZ = Math.sin(weaponSwayPhase * 0.57) * stability.weaponSwayRadians * 0.28;
-        weaponReloadEuler.set(swayY, swayX, swayZ);
-        weaponReloadQuaternion.setFromEuler(weaponReloadEuler);
-        model.root.quaternion.multiply(weaponReloadQuaternion);
+        // The camera child already inherits the shared damper, and this root
+        // is aimed at the live reticule ray. Do not add a second breathing
+        // oscillator here or the sights will drift away from that ray.
       }
       model.muzzleFlash.visible = muzzleFlashSeconds > 0;
+      updateWeaponSmoke(model, weapon, deltaSeconds);
     }
     const bulletHoleCountBeforeCleanup = bulletHoleEffects.length;
     for (let index = effects.length - 1; index >= 0; index -= 1) {
@@ -4843,12 +5477,14 @@ const createWeaponRuntime = (
     effectsRoot.removeFromParent();
     bulletHoleRoot.removeFromParent();
     for (const model of viewModels.values()) {
+      resetWeaponSmoke(model);
       camera.remove(model.root);
       disposeObject(model.root);
     }
     disposeObject(pickupRoot);
     disposeObject(effectsRoot);
     disposeObject(bulletHoleRoot);
+    weaponSmokeTexture.dispose();
     effects.length = 0;
     bulletHoleEffects.length = 0;
   };
@@ -4858,6 +5494,7 @@ const createWeaponRuntime = (
     setFireHeld,
     fire: tryFire,
     reload,
+    isReloading: isReloadPresentationActive,
     interact,
     holster: holsterWeapon,
     cycleWeapon,
@@ -5185,6 +5822,109 @@ const makeTeacherPanelTexture = (): THREE.CanvasTexture => {
   return createCanvasTexture(canvas);
 };
 
+const makeWeaponChartTexture = (): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1600;
+  canvas.height = 800;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create the weapon chart texture");
+  }
+
+  const background = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+  background.addColorStop(0, "#0b171b");
+  background.addColorStop(1, "#182a2e");
+  context.fillStyle = background;
+  roundedRect(context, 12, 12, canvas.width - 24, canvas.height - 24, 30);
+  context.fill();
+  context.strokeStyle = "#73dce8";
+  context.lineWidth = 5;
+  context.stroke();
+
+  context.fillStyle = "#73dce8";
+  context.font = "700 32px ui-sans-serif, sans-serif";
+  context.fillText("ARMORY / WEAPON CHART", 64, 74);
+  context.fillStyle = "#d8e4e1";
+  context.font = "500 19px ui-monospace, monospace";
+  context.fillText("PENTHOUSE LOADOUT  ·  DAMAGE + STARTING AMMO", 66, 110);
+  context.fillStyle = "#e94136";
+  context.fillRect(66, 132, 1468, 5);
+
+  const tableTop = 176;
+  const rowHeight = 104;
+  const columnX = {
+    weapon: 104,
+    damage: 720,
+    pellets: 930,
+    ammo: 1260,
+    total: 1496,
+  } as const;
+  context.fillStyle = "#8fa7aa";
+  context.font = "700 20px ui-monospace, monospace";
+  context.fillText("WEAPON", columnX.weapon, tableTop);
+  context.textAlign = "right";
+  context.fillText("DAMAGE / BULLET", columnX.damage, tableTop);
+  context.fillText("PELLETS", columnX.pellets, tableTop);
+  context.fillText("MAG / RESERVE", columnX.ammo, tableTop);
+  context.fillText("TOTAL", columnX.total, tableTop);
+  context.textAlign = "left";
+
+  WEAPON_CHART_ENTRIES.forEach((entry, index) => {
+    const rowY = tableTop + 24 + index * rowHeight;
+    const rowColor = new THREE.Color(WEAPON_DEFINITIONS[entry.id].color).getStyle();
+    context.fillStyle = index % 2 === 0 ? "rgba(255, 255, 255, 0.055)" : "rgba(0, 0, 0, 0.12)";
+    roundedRect(context, 64, rowY, 1470, rowHeight - 14, 14);
+    context.fill();
+    context.fillStyle = rowColor;
+    roundedRect(context, 82, rowY + 18, 10, rowHeight - 50, 5);
+    context.fill();
+
+    context.fillStyle = "#f3f4f0";
+    context.font = "700 28px ui-sans-serif, sans-serif";
+    context.fillText(entry.label.toUpperCase(), columnX.weapon, rowY + 43);
+    context.fillStyle = "#91a7aa";
+    context.font = "500 16px ui-monospace, monospace";
+    context.fillText(
+      entry.id === "machineGun" ? "AUTOMATIC" : entry.id.toUpperCase(),
+      columnX.weapon,
+      rowY + 70,
+    );
+
+    context.fillStyle = "#f3f4f0";
+    context.font = "700 29px ui-monospace, monospace";
+    context.textAlign = "right";
+    context.fillText(String(entry.damagePerBullet), columnX.damage, rowY + 48);
+    context.fillText(String(entry.pelletsPerShot), columnX.pellets, rowY + 48);
+    context.fillText(
+      `${String(entry.magazineSize)} / ${String(entry.reserveAmmo)}`,
+      columnX.ammo,
+      rowY + 48,
+    );
+    context.fillStyle = rowColor;
+    context.fillText(String(entry.totalAmmo), columnX.total, rowY + 48);
+    context.textAlign = "left";
+
+    context.fillStyle = "#8fa7aa";
+    context.font = "500 15px ui-monospace, monospace";
+    context.textAlign = "right";
+    context.fillText(
+      entry.id === "shotgun" ? "PER SHELL: 8 PROJECTILES" : "PER SHOT: 1 PROJECTILE",
+      columnX.total,
+      rowY + 72,
+    );
+    context.textAlign = "left";
+  });
+
+  context.fillStyle = "#b8c7c5";
+  context.font = "500 18px ui-monospace, monospace";
+  context.fillText("AMMO = LOADED MAGAZINE / RESERVE ROUNDS ON PICKUP", 66, 748);
+  context.fillStyle = "#73dce8";
+  context.textAlign = "right";
+  context.fillText("DAMAGE IS PER PROJECTILE", 1534, 748);
+  context.textAlign = "left";
+  return createCanvasTexture(canvas);
+};
+
 const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResources => {
   const environment = new THREE.Group();
   environment.name = "EnvironmentRoot";
@@ -5425,6 +6165,42 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   );
   accents.add(teacherPanelLine);
 
+  const weaponChartTexture = makeWeaponChartTexture();
+  const weaponChart = new THREE.Group();
+  weaponChart.name = "WeaponDamageAmmoChartSign";
+  weaponChart.position.set(-PENTHOUSE_SIDE_WALL_X + 0.24, 2.25, 5.7);
+  weaponChart.rotation.y = Math.PI / 2;
+  weaponChart.userData = { physicsIgnore: true, dofFocusTarget: true };
+  const weaponChartFrame = new THREE.Mesh(
+    new RoundedBoxGeometry(8.5, 4.3, 0.18, 6, 0.1),
+    createMaterial(COLORS.charcoal, 0.68, 0.18, undefined, surfaceTextures.detail),
+  );
+  weaponChartFrame.name = "WeaponDamageAmmoChartFrame";
+  weaponChartFrame.castShadow = true;
+  weaponChartFrame.receiveShadow = true;
+  weaponChart.add(weaponChartFrame);
+  const weaponChartPanel = new THREE.Mesh(
+    new THREE.PlaneGeometry(8.18, 4.02),
+    new THREE.MeshStandardMaterial({
+      map: weaponChartTexture,
+      color: 0xffffff,
+      emissive: 0x102a2e,
+      emissiveMap: weaponChartTexture,
+      emissiveIntensity: 0.2,
+      roughness: 0.44,
+      side: THREE.DoubleSide,
+    }),
+  );
+  weaponChartPanel.name = "WeaponDamageAmmoChartPanel";
+  weaponChartPanel.position.z = 0.101;
+  weaponChartPanel.userData = { dofFocusTarget: true };
+  weaponChart.add(weaponChartPanel);
+  const weaponChartRail = new THREE.Mesh(new THREE.BoxGeometry(7.65, 0.035, 0.035), cyan);
+  weaponChartRail.name = "WeaponChartAccent";
+  weaponChartRail.position.set(0, -1.72, 0.12);
+  weaponChart.add(weaponChartRail);
+  accents.add(weaponChart);
+
   const sofa = new THREE.Group();
   sofa.name = "SculpturalSofa";
   const sofaSeat = new THREE.Mesh(
@@ -5663,6 +6439,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
       redMaterials: [red],
     },
     teacherTexture,
+    weaponChartTexture,
     glassSurfaces: [northGlass, eastGlass],
     simpleGlassMaterial,
     physicalGlassMaterial,
@@ -7865,11 +8642,14 @@ export const createMahjongTableScene = (
   composer.addPass(bokehPass);
   // The sniper lens samples the already-rendered scene after Bokeh, so the
   // magnified image keeps the same lighting and depth-of-field treatment as
-  // the world the player is looking at. OutputPass remains last for tone map
-  // and colour-space conversion.
+  // the world the player is looking at.
   const sniperScopePass = createSniperScopePass();
   sniperScopePass.enabled = false;
   composer.addPass(sniperScopePass);
+  // O₂ fatigue is a shallow full-screen optical response, separate from the
+  // gaze-driven depth of field above and the scope's magnified source.
+  const o2BlurPass = createO2BlurPass();
+  o2BlurPass.enabled = false;
   const sniperScopeSceneTarget = new THREE.WebGLRenderTarget(1, 1, {
     depthBuffer: true,
     stencilBuffer: false,
@@ -7879,6 +8659,9 @@ export const createMahjongTableScene = (
   sniperScopeSceneTarget.texture.name = "SniperScopeWorldTexture";
   sniperScopeSceneTarget.texture.generateMipmaps = false;
   setSniperScopeSceneTexture(sniperScopePass, sniperScopeSceneTarget.texture);
+  // Keep the O₂ blur and dithered black radial vignette in scene-linear space
+  // before OutputPass. The display transform remains last in the chain.
+  composer.addPass(o2BlurPass);
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
   const sniperScopeCameraPosition = new THREE.Vector3();
@@ -8325,6 +9108,8 @@ export const createMahjongTableScene = (
   let lastSceneStateSerialized: string | null = null;
   let playerVitals = createPlayerVitals();
   let vitalsPublishElapsed = 0;
+  let speedPublishElapsed = 0;
+  let publishedPlayerSpeed: number | null = null;
   let exerciseIntensity = 0;
   let movementMagnitudeActivity = 0;
   let locomotionBlendActivity = 0;
@@ -8344,6 +9129,24 @@ export const createMahjongTableScene = (
     }
     publishedSprintingActivity = sprinting;
     options.onSprintingChange?.(sprinting);
+  };
+  const publishPlayerSpeed = (speed: number, force = false): void => {
+    const normalizedSpeed = Number.isFinite(speed) ? Math.max(0, speed) : 0;
+    if (!force && speedPublishElapsed < 0.1) {
+      return;
+    }
+    speedPublishElapsed = 0;
+    if (
+      !force &&
+      publishedPlayerSpeed !== null &&
+      Math.abs(normalizedSpeed - publishedPlayerSpeed) < 0.01
+    ) {
+      container.dataset.playerSpeed = normalizedSpeed.toFixed(2);
+      return;
+    }
+    publishedPlayerSpeed = normalizedSpeed;
+    container.dataset.playerSpeed = normalizedSpeed.toFixed(2);
+    options.onSpeedChange?.(normalizedSpeed);
   };
   const publishPlayerVitals = (force = false): void => {
     if (!force && vitalsPublishElapsed < 0.1) {
@@ -8389,20 +9192,33 @@ export const createMahjongTableScene = (
     }
     return true;
   };
+  const spendPlayerProjectileO2 = (damage: number, projectileCount: number): void => {
+    if (playerVitals.isDead || playerVitals.o2 <= 0) {
+      return;
+    }
+    const nextVitals = applyPlayerProjectileO2Cost(playerVitals, damage, projectileCount);
+    if (didPlayerVitalsChange(nextVitals)) {
+      playerVitals = nextVitals;
+      publishPlayerVitals(true);
+    }
+  };
   const setAiming = (aiming: boolean, holdingBreath: boolean): void => {
     const controlsActive =
       firstPersonControls.isLocked || (isTouchDevice && firstPersonControls.enabled);
-    const nextAiming = aiming && activeView === "seat" && controlsActive;
+    const requestedAiming = aiming && activeView === "seat" && controlsActive;
+    const nextAiming = resolveReloadAimingDownSights(
+      requestedAiming,
+      weaponRuntime?.isReloading() ?? false,
+    );
+    const aimingChanged = aimingDownSights !== nextAiming;
     aimingDownSights = nextAiming;
     const nextVitals = setPlayerHoldingBreath(
       playerVitals,
       holdingBreath && nextAiming,
       nextAiming,
     );
-    if (didPlayerVitalsChange(nextVitals)) {
+    if (didPlayerVitalsChange(nextVitals) || aimingChanged) {
       playerVitals = nextVitals;
-      publishPlayerVitals(true);
-    } else {
       publishPlayerVitals(true);
     }
   };
@@ -8417,6 +9233,7 @@ export const createMahjongTableScene = (
     return playerVitals;
   };
   publishPlayerVitals(true);
+  publishPlayerSpeed(0, true);
   const captureSceneState = (): VisualSceneState => {
     const cameraPosition: VisualSceneState["cameraPosition"] = [
       camera.position.x,
@@ -8530,11 +9347,27 @@ export const createMahjongTableScene = (
     return false;
   };
   const crouchKeys = new Set(["ShiftLeft", "ShiftRight"]);
-  const setCrouched = (nextCrouched: boolean): void => {
+  const setCrouched = (nextCrouched: boolean): boolean => {
     if (isCrouched && !nextCrouched && !spendPlayerO2(O2_STAND_COST)) {
-      return;
+      return false;
     }
     isCrouched = nextCrouched;
+    return true;
+  };
+  const startSprint = (): void => {
+    const sprintAccepted = !isCrouched || setCrouched(false);
+    isCrouched = resolveCrouchedStateAfterSprint(isCrouched, sprintAccepted);
+    if (isCrouched) {
+      isSprinting = false;
+      return;
+    }
+    isSprinting = true;
+    // Sprinting is a committed locomotion action: leave the persistent
+    // right-mouse zoom mode before the faster movement begins.
+    if (rightMouseAiming) {
+      rightMouseAiming = false;
+      syncAimingFromInput();
+    }
   };
   const onKeyDown = (event: KeyboardEvent): void => {
     const leftCommandKey = isLeftCommandKeyEvent(event);
@@ -8598,13 +9431,7 @@ export const createMahjongTableScene = (
         pressedKeys.add(event.code);
         const now = window.performance.now();
         if (isMovementDoubleTap(event.code, now, lastMovementTapAtByKey, event.repeat)) {
-          isSprinting = true;
-          // Sprinting is a committed locomotion action: leave the persistent
-          // right-mouse ADS mode before the faster movement begins.
-          if (rightMouseAiming) {
-            rightMouseAiming = false;
-            syncAimingFromInput();
-          }
+          startSprint();
         }
         if (!event.repeat) {
           lastMovementTapAtByKey.set(event.code, now);
@@ -8651,13 +9478,15 @@ export const createMahjongTableScene = (
       ledgeClimbTransition === null &&
       wallClimbTransition === null
     ) {
-      if (!spendPlayerO2(O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+      const fullJumpAccepted = spendPlayerO2(O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS);
+      if (!fullJumpAccepted && playerVitals.isDead) {
         return isCrouched;
       }
+      const launchSpeed = resolveJumpLaunchSpeed(fullJumpAccepted);
       isCrouched = resolveCrouchedStateAfterJump(isCrouched, true);
-      verticalVelocity = JUMP_SPEED;
+      verticalVelocity = launchSpeed;
       grounded = false;
-      cameraMotion.applyJumpImpulse(JUMP_SPEED);
+      cameraMotion.applyJumpImpulse(launchSpeed);
     }
     return isCrouched;
   };
@@ -9237,6 +10066,7 @@ export const createMahjongTableScene = (
     const width = Math.max(renderer.domElement.clientWidth, 1);
     const height = Math.max(renderer.domElement.clientHeight, 1);
     composer.setSize(width, height);
+    setO2BlurPassSize(o2BlurPass, width * pixelRatio, height * pixelRatio);
     gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
     persistDebugPreferences();
   };
@@ -9621,6 +10451,7 @@ export const createMahjongTableScene = (
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     composer.setSize(width, height);
+    setO2BlurPassSize(o2BlurPass, renderer.domElement.width, renderer.domElement.height);
     gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
   };
   let resizeFrame = 0;
@@ -9725,22 +10556,16 @@ export const createMahjongTableScene = (
     roomSeed,
     weaponPickups,
     options.onWeaponStateChange,
-    (damage) => {
+    (damage, projectileCount) => {
+      spendPlayerProjectileO2(damage, projectileCount);
       const motion = cameraMotion.getOffsets();
       cameraMotion.applyWeaponShotImpulse({
         damage,
-        reticleOffset: {
-          x:
-            (motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
-              motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
-              motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN) *
-            RETICLE_DOT_MOTION_MULTIPLIER,
-          y:
-            (motion.verticalOffset * RETICLE_HEAD_BOB_PIXELS_PER_METER +
-              motion.aimSwayY * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
-              motion.recoilPitch * RETICLE_RECOIL_PIXELS_PER_RADIAN) *
-            RETICLE_DOT_MOTION_MULTIPLIER,
-        },
+        reticleOffset: resolveWeaponShotReticleOffset(
+          motion,
+          true,
+          aimingDownSights ? ZOOM_RECOIL_FEEDBACK_MULTIPLIER : 1,
+        ),
       });
     },
     (hasOutgoingWeapon) => {
@@ -9883,7 +10708,12 @@ export const createMahjongTableScene = (
     // the damping math to infinity.
     timer.update();
     const delta = THREE.MathUtils.clamp(timer.getDelta(), 0, 0.05);
+    // A reload can start from an empty magazine during weapon update. Reapply
+    // the requested aim state before FOV, vitals, and camera motion are read so
+    // the full first-person presentation leaves zoom for the reload window.
+    syncAimingFromInput();
     vitalsPublishElapsed += delta;
+    speedPublishElapsed += delta;
     impactDamageCooldown = Math.max(0, impactDamageCooldown - delta);
     const nextVitals = tickPlayerVitals(playerVitals, delta, {
       exerciseIntensity,
@@ -9939,7 +10769,7 @@ export const createMahjongTableScene = (
       camera.fov = nextFov;
       camera.updateProjectionMatrix();
     }
-    // Rebuild the off-axis projection as the smooth ADS/hip-fire FOV changes.
+    // Rebuild the off-axis projection as the smooth zoom/hip-fire FOV changes.
     // This keeps the world point under the lower reticule fixed instead of
     // making the zoom pivot around the screen center.
     syncReticleZoomProjection();
@@ -9964,13 +10794,14 @@ export const createMahjongTableScene = (
       const targetEyeHeight = crouching ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       const isLedgeClimbing = ledgeClimbTransition !== null;
       const isWallClimbing = wallClimbTransition !== null;
+      const reloadingMovement = weaponRuntime?.isReloading() ?? false;
       eyeHeight = THREE.MathUtils.damp(eyeHeight, targetEyeHeight, 14, delta);
       let forward: number;
       let right: number;
       let currentMoveSpeed: number;
       let movementMagnitude: number;
       let sprintingMovement = false;
-      let joggingMovement = false;
+      let joggingMovement: boolean;
       let inputScale = 1;
       if (isLedgeClimbing || isWallClimbing) {
         forward = 0;
@@ -9990,6 +10821,7 @@ export const createMahjongTableScene = (
             (isSprinting || transition.preserveSprinting) && preservedSpeed > 0;
           sprintingMovement =
             fastMovementRequested &&
+            !reloadingMovement &&
             canAffordPlayerO2Cost(
               playerVitals,
               O2_SPRINT_DRAIN_PER_SECOND * delta * movementMagnitude,
@@ -9999,14 +10831,22 @@ export const createMahjongTableScene = (
             ? preservedSpeed
             : Math.min(
                 preservedSpeed,
-                moveSpeed * (joggingMovement ? NEUTRAL_JOG_SPEED_MULTIPLIER : 1),
+                moveSpeed *
+                  resolvePlayerMovementSpeedMultiplier({
+                    crouching,
+                    sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
+                    jogging: joggingMovement,
+                    reloading: reloadingMovement,
+                  }),
               );
           currentMoveSpeed = Math.max(
-            sprintingMovement
-              ? moveSpeed * SPRINT_MULTIPLIER
-              : joggingMovement
-                ? moveSpeed * NEUTRAL_JOG_SPEED_MULTIPLIER
-                : moveSpeed,
+            moveSpeed *
+              resolvePlayerMovementSpeedMultiplier({
+                crouching,
+                sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
+                jogging: joggingMovement,
+                reloading: reloadingMovement,
+              }),
             preservedSpeedCap,
           );
         } else {
@@ -10022,18 +10862,23 @@ export const createMahjongTableScene = (
         const fastMovementRequested = !crouching && touchMagnitude > 0.05;
         sprintingMovement =
           fastMovementRequested &&
+          !reloadingMovement &&
           canAffordPlayerO2Cost(playerVitals, O2_SPRINT_DRAIN_PER_SECOND * delta * touchMagnitude);
         joggingMovement = fastMovementRequested && !sprintingMovement;
-        currentMoveSpeed =
-          moveSpeed *
-          (crouching
-            ? 0.5
-            : sprintingMovement
-              ? SPRINT_MULTIPLIER * sprintCap
-              : joggingMovement
-                ? NEUTRAL_JOG_SPEED_MULTIPLIER
-                : 1) *
-          touchMagnitude;
+        const touchSpeedMultiplier = crouching
+          ? 0.5
+          : sprintingMovement
+            ? SPRINT_MULTIPLIER * sprintCap
+            : joggingMovement
+              ? NEUTRAL_JOG_SPEED_MULTIPLIER
+              : 1;
+        const reloadTouchSpeedMultiplier = reloadingMovement
+          ? Math.min(
+              (fastMovementRequested ? SPRINT_MULTIPLIER * sprintCap : 1) * touchMagnitude,
+              NEUTRAL_JOG_SPEED_MULTIPLIER,
+            )
+          : touchSpeedMultiplier * touchMagnitude;
+        currentMoveSpeed = moveSpeed * reloadTouchSpeedMultiplier;
       } else {
         forward =
           (pressedKeys.has("KeyW") || pressedKeys.has("ArrowUp") ? 1 : 0) -
@@ -10047,18 +10892,18 @@ export const createMahjongTableScene = (
         const fastMovementRequested = isSprinting && inputMagnitude > 0 && !crouching;
         sprintingMovement =
           fastMovementRequested &&
+          !reloadingMovement &&
           canAffordPlayerO2Cost(
             playerVitals,
             O2_SPRINT_DRAIN_PER_SECOND * delta * movementMagnitude,
           );
         joggingMovement = fastMovementRequested && !sprintingMovement;
-        const speedMultiplier = crouching
-          ? 0.5
-          : sprintingMovement
-            ? SPRINT_MULTIPLIER
-            : joggingMovement
-              ? NEUTRAL_JOG_SPEED_MULTIPLIER
-              : 1;
+        const speedMultiplier = resolvePlayerMovementSpeedMultiplier({
+          crouching,
+          sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
+          jogging: joggingMovement,
+          reloading: reloadingMovement,
+        });
         currentMoveSpeed = moveSpeed * speedMultiplier;
       }
       if (wallHangState !== null) {
@@ -10617,6 +11462,8 @@ export const createMahjongTableScene = (
         aimingDownSights,
         holdingBreath: playerVitals.holdingBreath,
         stabilizedByWall: wallBracedAim,
+        traversalActive:
+          ledgeClimbTransition !== null || wallHangState !== null || wallClimbTransition !== null,
       });
     } else {
       exerciseIntensity = 0;
@@ -10637,6 +11484,7 @@ export const createMahjongTableScene = (
       }
       resetCameraMotion();
     }
+    publishPlayerSpeed(Math.hypot(forwardVelocity, strafeVelocity));
     publishSprintingActivity(sprintingActivity);
     const cameraPosition: VisualSceneVector3 = [
       camera.position.x,
@@ -10665,15 +11513,27 @@ export const createMahjongTableScene = (
       activeView === "seat" && firstPersonControls.enabled,
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
-      playerVitals.o2 / PLAYER_MAX_O2,
-      aimingDownSights,
-      playerVitals.holdingBreath,
-      wallBracedAim,
     );
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
     // projecting the lens into the post-process buffer.
     camera.updateMatrixWorld(true);
+    const cameraMotionOffsets = cameraMotion.getOffsets();
+    const reticlePresentation = getReticlePresentation();
+    setO2BlurPassCenter(
+      o2BlurPass,
+      (reticlePresentation.aimNdc.x + 1) * 0.5,
+      (reticlePresentation.aimNdc.y + 1) * 0.5,
+    );
+    setO2BlurPassPixels(
+      o2BlurPass,
+      cameraMotionOffsets.screenBlurPixels * renderer.getPixelRatio(),
+    );
+    setO2BlurPassVignette(o2BlurPass, cameraMotionOffsets.screenVignetteStrength);
+    container.dataset.o2VisionBlur = cameraMotionOffsets.screenBlurPixels.toFixed(3);
+    container.dataset.o2VisionVignette = cameraMotionOffsets.screenVignetteStrength.toFixed(3);
+    container.dataset.o2VisionContrast = cameraMotionOffsets.screenContrastMultiplier.toFixed(3);
+    container.dataset.o2VisionPass = o2BlurPass.enabled ? "true" : "false";
     const sniperScopeLens = weaponRuntime?.getSniperScopeLens() ?? null;
     const sniperScopeEnabled = shouldEnableSniperScope({
       firstPersonActive,
@@ -10880,6 +11740,7 @@ export const createMahjongTableScene = (
     anchors,
     dispose: () => {
       saveSceneState(true);
+      publishPlayerSpeed(0, true);
       disposed = true;
       window.cancelAnimationFrame(animationFrame);
       if (warmupTimer !== 0) {
@@ -10936,9 +11797,11 @@ export const createMahjongTableScene = (
       gtaoPass.dispose();
       bokehPass.dispose();
       sniperScopePass.dispose();
+      o2BlurPass.dispose();
       sniperScopeSceneTarget.dispose();
       composer.dispose();
       architectureResources.teacherTexture.dispose();
+      architectureResources.weaponChartTexture.dispose();
       for (const texture of Object.values(architectureResources.surfaceTextures)) {
         texture.dispose();
       }

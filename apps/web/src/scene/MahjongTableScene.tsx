@@ -20,6 +20,7 @@ interface MahjongTableSceneProps {
   readonly onMount?: (mount: MahjongTableMount | null) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
   readonly onSprintingChange?: (sprinting: boolean) => void;
+  readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
 }
@@ -33,6 +34,7 @@ export const MahjongTableScene = ({
   onMount,
   onMotionLookStatusChange,
   onSprintingChange,
+  onSpeedChange,
   onVitalsChange,
   onWeaponStateChange,
 }: MahjongTableSceneProps): React.JSX.Element => {
@@ -43,6 +45,7 @@ export const MahjongTableScene = ({
   const onMountRef = useRef(onMount);
   const onMotionLookStatusChangeRef = useRef(onMotionLookStatusChange);
   const onSprintingChangeRef = useRef(onSprintingChange);
+  const onSpeedChangeRef = useRef(onSpeedChange);
   const onVitalsChangeRef = useRef(onVitalsChange);
   const onWeaponStateChangeRef = useRef(onWeaponStateChange);
   const onExplorationAreaChangeRef = useRef(onExplorationAreaChange);
@@ -53,6 +56,7 @@ export const MahjongTableScene = ({
   onMountRef.current = onMount;
   onMotionLookStatusChangeRef.current = onMotionLookStatusChange;
   onSprintingChangeRef.current = onSprintingChange;
+  onSpeedChangeRef.current = onSpeedChange;
   onVitalsChangeRef.current = onVitalsChange;
   onWeaponStateChangeRef.current = onWeaponStateChange;
   onExplorationAreaChangeRef.current = onExplorationAreaChange;
@@ -83,6 +87,7 @@ export const MahjongTableScene = ({
           onExplorationAreaChange: (area) => onExplorationAreaChangeRef.current?.(area),
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
           onSprintingChange: (sprinting) => onSprintingChangeRef.current?.(sprinting),
+          onSpeedChange: (speed) => onSpeedChangeRef.current?.(speed),
           onVitalsChange: (vitals) => onVitalsChangeRef.current?.(vitals),
           onWeaponStateChange: (state) => onWeaponStateChangeRef.current?.(state),
           onReady: () => setSceneReady(true),

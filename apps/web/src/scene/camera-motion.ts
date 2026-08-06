@@ -1,4 +1,4 @@
-import { resolveO2Stability } from "./o2-stability.js";
+import { O2_BRACED_STABILITY_FACTOR, resolveO2Stability } from "./o2-stability.js";
 
 export interface CameraMotionUpdateInput {
   readonly deltaSeconds: number;
@@ -11,12 +11,14 @@ export interface CameraMotionUpdateInput {
   readonly crouching: boolean;
   readonly shiftEnabled: boolean;
   readonly bobEnabled: boolean;
-  /** Whether the player is aiming down sights. */
+  /** Whether the player is zoomed. */
   readonly aimingDownSights?: boolean;
   /** Whether the player is holding breath. */
   readonly holdingBreath?: boolean;
   /** Whether wall contact is providing free aim and breathing support. */
   readonly stabilizedByWall?: boolean;
+  /** Whether a ledge/vault/wall traversal is currently moving the player. */
+  readonly traversalActive?: boolean;
 }
 
 export interface CameraWeaponShotInput {
@@ -57,6 +59,12 @@ export interface CameraMotionOffsets {
   readonly aimSwayX: number;
   /** Continuous vertical O₂-driven aim sway in radians. */
   readonly aimSwayY: number;
+  /** Continuous full-screen O₂ fatigue blur in CSS pixels. */
+  readonly screenBlurPixels: number;
+  /** Continuous radial O₂ fatigue vignette strength. */
+  readonly screenVignetteStrength: number;
+  /** Multiplicative full-screen O₂ fatigue contrast response; kept neutral. */
+  readonly screenContrastMultiplier: number;
 }
 
 export interface CameraViewmodelOffset {
@@ -117,7 +125,7 @@ export const CAMERA_VIEWMODEL_STANDING_OFFSET: CameraViewmodelOffset = {
   y: -0.42,
   z: -0.58,
 };
-/** Intermediate placement used while crouching without entering ADS. */
+/** Intermediate placement used while crouching without entering zoom. */
 export const CAMERA_VIEWMODEL_CROUCHING_OFFSET: CameraViewmodelOffset = {
   x: 0.16,
   y: -0.32,
@@ -172,7 +180,13 @@ export const CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE =
   (CAMERA_RECOIL_RETICLE_RING_RADIUS_PIXELS * CAMERA_RECOIL_RETICLE_RING_OVERSHOOT) /
   CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN;
 /** Global shot-jerk tuning applied consistently to every weapon profile. */
-export const CAMERA_RECOIL_SHOT_MULTIPLIER = 2;
+export const CAMERA_RECOIL_SHOT_MULTIPLIER = 10;
+/** Short shared outward phase before a shot's return impulse is released. */
+export const CAMERA_RECOIL_RECOVERY_DELAY_SECONDS = 0.06;
+/** Base return velocity per radian of the outward shot displacement. */
+export const CAMERA_RECOIL_RETURN_VELOCITY = 36;
+/** Shared multiplier that makes recovery cross the reticle rest point. */
+export const CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER = 1.5;
 /**
  * Shared recoil spring. It is intentionally fast enough for a single kick to
  * cross the reticle rest point in a few frames, including at automatic-fire
@@ -185,7 +199,6 @@ export const CAMERA_RECOIL_SPRING = 1200;
  * firing speed only determines how often new impulses enter this state.
  */
 export const CAMERA_RECOIL_DAMPING = 34;
-export const CAMERA_RECOIL_MAX_ANGLE = (8 * Math.PI) / 180;
 
 const CAMERA_DIRECTION_MEMORY_SECONDS = 0.24;
 const MIN_LATERAL_INPUT = 0.05;
@@ -245,13 +258,15 @@ const integrateRecoilAxis = (
 ): readonly [number, number] => {
   let nextVelocity = velocity - offset * CAMERA_RECOIL_SPRING * deltaSeconds;
   nextVelocity *= Math.exp(-CAMERA_RECOIL_DAMPING * deltaSeconds);
-  const nextOffset = clamp(
-    offset + nextVelocity * deltaSeconds,
-    -CAMERA_RECOIL_MAX_ANGLE,
-    CAMERA_RECOIL_MAX_ANGLE,
-  );
+  const nextOffset = offset + nextVelocity * deltaSeconds;
   return [nextOffset, nextVelocity];
 };
+
+interface PendingRecoilRecovery {
+  remainingSeconds: number;
+  yawVelocity: number;
+  pitchVelocity: number;
+}
 
 /**
  * Resolve the downward impulse produced by a support collision.
@@ -376,6 +391,9 @@ const createDefaultOffsets = (): CameraMotionOffsets => ({
   viewmodelTransition: createIdleViewmodelTransition(),
   aimSwayX: 0,
   aimSwayY: 0,
+  screenBlurPixels: 0,
+  screenVignetteStrength: 0,
+  screenContrastMultiplier: 1,
 });
 
 /** Create the one presentation damper shared by camera output and reticule aim. */
@@ -392,11 +410,15 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let recoilYawVelocity = 0;
   let recoilPitch = 0;
   let recoilPitchVelocity = 0;
+  const pendingRecoilRecoveries: PendingRecoilRecovery[] = [];
   let crouchAmount = 0;
   let aimAmount = 0;
   let viewmodelSwitchElapsed = 0;
   let viewmodelSwitchActive = false;
   let viewmodelSwitchHasOutgoingWeapon = true;
+  let traversalInputActive = false;
+  let traversalTransitionElapsed = 0;
+  let traversalTransitionActive = false;
   let lastLateralDirection = 0;
   let lateralIdleTime = Number.POSITIVE_INFINITY;
   let offsets = createDefaultOffsets();
@@ -439,11 +461,15 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     recoilYawVelocity = 0;
     recoilPitch = 0;
     recoilPitchVelocity = 0;
+    pendingRecoilRecoveries.length = 0;
     crouchAmount = 0;
     aimAmount = 0;
     viewmodelSwitchElapsed = 0;
     viewmodelSwitchActive = false;
     viewmodelSwitchHasOutgoingWeapon = true;
+    traversalInputActive = false;
+    traversalTransitionElapsed = 0;
+    traversalTransitionActive = false;
     lastLateralDirection = 0;
     lateralIdleTime = Number.POSITIVE_INFINITY;
     offsets = createDefaultOffsets();
@@ -463,12 +489,15 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     if (impulse.yaw === 0 && impulse.pitch === 0) {
       return;
     }
-    recoilYaw = clamp(recoilYaw + impulse.yaw, -CAMERA_RECOIL_MAX_ANGLE, CAMERA_RECOIL_MAX_ANGLE);
-    recoilPitch = clamp(
-      recoilPitch + impulse.pitch,
-      -CAMERA_RECOIL_MAX_ANGLE,
-      CAMERA_RECOIL_MAX_ANGLE,
-    );
+    recoilYaw += impulse.yaw;
+    recoilPitch += impulse.pitch;
+    const recoveryVelocity =
+      CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
+    pendingRecoilRecoveries.push({
+      remainingSeconds: CAMERA_RECOIL_RECOVERY_DELAY_SECONDS,
+      yawVelocity: -impulse.yaw * recoveryVelocity,
+      pitchVelocity: -impulse.pitch * recoveryVelocity,
+    });
   };
 
   const applyWeaponSwitchImpulse = (input: CameraWeaponSwitchInput): void => {
@@ -479,6 +508,20 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
 
   const update = (input: CameraMotionUpdateInput): CameraMotionOffsets => {
     const deltaSeconds = clamp(input.deltaSeconds, MIN_DELTA_SECONDS, MAX_DELTA_SECONDS);
+    const nextTraversalActive = input.traversalActive === true;
+    if (nextTraversalActive && !traversalInputActive) {
+      traversalTransitionElapsed = 0;
+      traversalTransitionActive = true;
+    }
+    if (!nextTraversalActive && traversalInputActive && traversalTransitionActive) {
+      // A hang can last longer than the switch animation. Release from the
+      // shared fully-lowered pose so the normal raise phase always plays.
+      traversalTransitionElapsed = CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS;
+    }
+    traversalInputActive = nextTraversalActive;
+    if (traversalTransitionActive) {
+      traversalTransitionElapsed += deltaSeconds;
+    }
     const lateralInput = clamp(input.lateralInput, -1, 1);
     const movementMagnitude = clamp(input.movementMagnitude, 0, 1);
     const movementSpeedRatio = clamp(input.movementSpeedRatio, 0, 1);
@@ -528,15 +571,21 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         (CAMERA_BOB_MAX_FREQUENCY - CAMERA_BOB_MIN_FREQUENCY) * movementSpeedRatio);
     const gaitBob = Math.sin(bobPhase) * CAMERA_BOB_AMPLITUDE * bobAmount;
     const breathlessness = 1 - oxygenRatio;
+    const holdingBreath = input.holdingBreath === true && oxygenRatio > 0;
+    const effectiveBreathlessness = holdingBreath ? 0 : breathlessness;
+    const bracedBreathingFactor =
+      (holdingBreath ? O2_BRACED_STABILITY_FACTOR : 1) *
+      (input.stabilizedByWall === true ? O2_BRACED_STABILITY_FACTOR : 1);
     const breathingAmplitude = input.bobEnabled
-      ? (input.holdingBreath === true && oxygenRatio > 0) || input.stabilizedByWall === true
-        ? 0
-        : CAMERA_BREATHING_BASE_AMPLITUDE + CAMERA_BREATHING_MAX_AMPLITUDE * breathlessness
+      ? (CAMERA_BREATHING_BASE_AMPLITUDE +
+          CAMERA_BREATHING_MAX_AMPLITUDE * effectiveBreathlessness) *
+        bracedBreathingFactor
       : 0;
     breathingPhase +=
       deltaSeconds *
       (CAMERA_BREATHING_MIN_FREQUENCY +
-        (CAMERA_BREATHING_MAX_FREQUENCY - CAMERA_BREATHING_MIN_FREQUENCY) * breathlessness);
+        (CAMERA_BREATHING_MAX_FREQUENCY - CAMERA_BREATHING_MIN_FREQUENCY) *
+          effectiveBreathlessness);
     const breathingBob = Math.sin(breathingPhase) * breathingAmplitude;
     const headBob = gaitBob + breathingBob;
 
@@ -557,6 +606,26 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     weightShift += weightVelocity * deltaSeconds;
     weightShift = clamp(weightShift, -0.45, 0.22);
 
+    let pendingRecoveryCount = 0;
+    let recoveryYawVelocity = 0;
+    let recoveryPitchVelocity = 0;
+    for (const pendingRecovery of pendingRecoilRecoveries) {
+      const remainingSeconds = pendingRecovery.remainingSeconds - deltaSeconds;
+      if (remainingSeconds <= 0) {
+        recoveryYawVelocity += pendingRecovery.yawVelocity;
+        recoveryPitchVelocity += pendingRecovery.pitchVelocity;
+        continue;
+      }
+      pendingRecoilRecoveries[pendingRecoveryCount] = {
+        ...pendingRecovery,
+        remainingSeconds,
+      };
+      pendingRecoveryCount += 1;
+    }
+    pendingRecoilRecoveries.length = pendingRecoveryCount;
+    recoilYawVelocity += recoveryYawVelocity;
+    recoilPitchVelocity += recoveryPitchVelocity;
+
     [recoilYaw, recoilYawVelocity] = integrateRecoilAxis(
       recoilYaw,
       recoilYawVelocity,
@@ -571,12 +640,42 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     if (viewmodelSwitchActive) {
       viewmodelSwitchElapsed += deltaSeconds;
     }
-    const viewmodelTransition = viewmodelSwitchActive
+    const switchTransition = viewmodelSwitchActive
       ? resolveCameraViewmodelTransition(viewmodelSwitchElapsed, viewmodelSwitchHasOutgoingWeapon)
       : createIdleViewmodelTransition();
-    if (viewmodelTransition.phase === "idle") {
+    let traversalTransition: CameraViewmodelTransition | null = null;
+    if (traversalTransitionActive) {
+      if (
+        traversalInputActive &&
+        traversalTransitionElapsed >= CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS
+      ) {
+        // Hold the exact muzzle-down/off-screen pose while the player is still
+        // traversing. Once traversal releases, the normal raise phase below
+        // starts from this same pose.
+        traversalTransition = {
+          phase: "lowering",
+          progress: 1,
+          offset: {
+            x: 0,
+            y: CAMERA_VIEWMODEL_SWITCH_DROP_Y,
+            z: CAMERA_VIEWMODEL_SWITCH_DROP_Z,
+          },
+          pitchRadians: CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS,
+          yawRadians: 0,
+          rollRadians: CAMERA_VIEWMODEL_SWITCH_ROLL_RADIANS,
+        };
+      } else {
+        traversalTransition = resolveCameraViewmodelTransition(traversalTransitionElapsed, true);
+      }
+      if (!traversalInputActive && traversalTransition.phase === "idle") {
+        traversalTransitionActive = false;
+        traversalTransition = null;
+      }
+    }
+    if (switchTransition.phase === "idle") {
       viewmodelSwitchActive = false;
     }
+    const viewmodelTransition = traversalTransition ?? switchTransition;
 
     offsets = {
       roll: shiftRoll,
@@ -589,6 +688,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       viewmodelTransition,
       aimSwayX,
       aimSwayY,
+      screenBlurPixels: stability.screenBlurPixels,
+      screenVignetteStrength: stability.screenVignetteStrength,
+      screenContrastMultiplier: stability.screenContrastMultiplier,
     };
     return offsets;
   };

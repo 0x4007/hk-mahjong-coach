@@ -38,6 +38,15 @@ export const O2_CROUCHED_RECOVERY_PER_SECOND = 10;
 /** Oxygen spent by one jump. */
 export const O2_JUMP_COST = PLAYER_MAX_O2 * 0.05;
 
+/**
+ * Zero-cost launch blend for a mini hop when a full jump is unaffordable.
+ *
+ * This uses the same neutral-balance interpolation as the oxygen-neutral jog:
+ * standing recovery offsets the full jump charge at the blend point.
+ */
+export const O2_MINI_HOP_SPEED_BLEND =
+  O2_IDLE_RECOVERY_PER_SECOND / (O2_IDLE_RECOVERY_PER_SECOND + O2_JUMP_COST);
+
 /** Oxygen spent by standing up from a crouch. */
 export const O2_STAND_COST = PLAYER_MAX_O2 * 0.05;
 
@@ -58,6 +67,9 @@ export const O2_JUMP_RECOVERY_DELAY_SECONDS = 0.25;
 
 /** Oxygen used per second while holding breath. */
 export const O2_HOLD_BREATH_DRAIN_PER_SECOND = 15;
+
+/** Fraction of projectile damage charged against the shared Breath / O₂ Reserve. */
+export const O2_PROJECTILE_DAMAGE_FACTOR = 0.25;
 
 /** Minimum continuous-action slice needed to begin holding breath. */
 export const O2_HOLD_BREATH_ACTION_SLICE_SECONDS = 1 / 60;
@@ -97,7 +109,7 @@ export interface PlayerVitalsActivity {
   readonly walking?: boolean;
   /** Whether the player is crouched, including when stationary. */
   readonly crouched?: boolean;
-  /** Whether the player is aiming down sights. */
+  /** Whether the player is zoomed. */
   readonly aimingDownSights?: boolean;
 }
 
@@ -115,6 +127,13 @@ const clampFinite = (value: number, min: number, max: number): number =>
 
 const normalizeDamage = (damage: number): number =>
   Number.isFinite(damage) ? Math.max(0, damage) : 0;
+
+const normalizeProjectileCount = (projectileCount: number): number =>
+  Number.isFinite(projectileCount) ? Math.max(0, Math.floor(projectileCount)) : 0;
+
+/** Resolve the O₂ charge for one weapon event's projectiles. */
+export const resolveProjectileO2Cost = (damage: number, projectileCount = 1): number =>
+  normalizeDamage(damage) * O2_PROJECTILE_DAMAGE_FACTOR * normalizeProjectileCount(projectileCount);
 
 /** Return whether a living player can pay an entire O₂ action cost. */
 export const canAffordPlayerO2Cost = (state: PlayerVitalsState, oxygenCost: number): boolean =>
@@ -208,6 +227,23 @@ export const applyPlayerO2Cost = (
     state.holdingBreath,
     state.holdBreathLocked,
   );
+};
+
+/**
+ * Apply a firing fatigue charge. A shot may consume the final partial reserve;
+ * firing itself is never rejected because the reserve cannot pay the full
+ * charge.
+ */
+export const applyPlayerProjectileO2Cost = (
+  state: PlayerVitalsState,
+  damage: number,
+  projectileCount = 1,
+): PlayerVitalsState => {
+  const cost = resolveProjectileO2Cost(damage, projectileCount);
+  if (cost <= 0) {
+    return state;
+  }
+  return applyPlayerO2Cost(state, Math.min(cost, state.o2));
 };
 
 /**

@@ -27,8 +27,14 @@ import {
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
   resolveCrouchedStateAfterJump,
+  resolveCrouchedStateAfterSprint,
+  resolveJumpLaunchSpeed,
   resolveReticleZoomViewOffset,
+  resolveWeaponShotReticleOffset,
+  ZOOM_RECOIL_FEEDBACK_MULTIPLIER,
   resolveDesktopAimInput,
+  resolveReloadAimingDownSights,
+  resolvePlayerMovementSpeedMultiplier,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
   isLeftCommandKeyEvent,
@@ -67,6 +73,63 @@ class MemoryStorage implements Storage {
     this.#values.set(key, value);
   }
 }
+
+describe("player movement speed", () => {
+  it("keeps walking speed during reload and caps sprint at the derived trot", () => {
+    const walk = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    const walkingReload = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: false,
+      reloading: true,
+    });
+    const trot = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: true,
+      reloading: false,
+    });
+    const sprint = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: true,
+      jogging: false,
+      reloading: false,
+    });
+    const sprintingReload = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: true,
+      jogging: false,
+      reloading: true,
+    });
+
+    expect(walkingReload).toBe(walk);
+    expect(trot).toBeLessThan(sprint);
+    expect(sprintingReload).toBe(trot);
+  });
+
+  it("keeps crouch speed ahead of the standing reload trot", () => {
+    const crouch = resolvePlayerMovementSpeedMultiplier({
+      crouching: true,
+      sprinting: false,
+      jogging: false,
+      reloading: true,
+    });
+    const standingReload = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: false,
+      reloading: true,
+    });
+
+    expect(crouch).toBe(0.5);
+    expect(crouch).toBeLessThan(standingReload);
+  });
+});
 
 const sceneState: VisualSceneState = {
   version: 1,
@@ -170,7 +233,7 @@ describe("left Command keyboard binding", () => {
     expect(shouldCaptureLeftCommandKeystroke(commandW, false)).toBe(false);
   });
 
-  it("keeps right mouse on ADS without making it a hold-breath input", () => {
+  it("keeps right mouse on zoom without making it a hold-breath input", () => {
     expect(resolveDesktopAimInput(false, true)).toEqual({
       aimingDownSights: true,
       holdingBreath: false,
@@ -179,6 +242,12 @@ describe("left Command keyboard binding", () => {
       aimingDownSights: true,
       holdingBreath: true,
     });
+  });
+
+  it("temporarily leaves zoom during reload and restores the requested zoom when ready", () => {
+    expect(resolveReloadAimingDownSights(true, true)).toBe(false);
+    expect(resolveReloadAimingDownSights(true, false)).toBe(true);
+    expect(resolveReloadAimingDownSights(false, true)).toBe(false);
   });
 });
 
@@ -222,6 +291,23 @@ describe("jump posture", () => {
     expect(resolveCrouchedStateAfterJump(true, false)).toBe(true);
     expect(resolveCrouchedStateAfterJump(false, true)).toBe(false);
   });
+
+  it("uses a reduced free launch when the full O₂ jump charge is unavailable", () => {
+    const fullJump = resolveJumpLaunchSpeed(true);
+    const miniHop = resolveJumpLaunchSpeed(false);
+
+    expect(miniHop).toBeGreaterThan(0);
+    expect(miniHop).toBeLessThan(fullJump);
+    expect(miniHop / fullJump).toBeCloseTo(12 / 17, 8);
+  });
+});
+
+describe("sprint posture", () => {
+  it("stands when a sprint request is accepted and preserves crouch when it is rejected", () => {
+    expect(resolveCrouchedStateAfterSprint(true, true)).toBe(false);
+    expect(resolveCrouchedStateAfterSprint(true, false)).toBe(true);
+    expect(resolveCrouchedStateAfterSprint(false, true)).toBe(false);
+  });
 });
 
 describe("reticule-anchored seat zoom", () => {
@@ -252,6 +338,27 @@ describe("reticule-anchored seat zoom", () => {
     camera.updateProjectionMatrix();
 
     expect(point.project(camera).y).toBeCloseTo(reticleNdc.y, 8);
+  });
+});
+
+describe("shot direction reticule", () => {
+  it("keeps full hip-fire recoil feedback and damps it for zoom direction selection", () => {
+    const motion = {
+      roll: 0.01,
+      verticalOffset: 0.02,
+      aimSwayX: 0.003,
+      aimSwayY: -0.002,
+      recoilYaw: 0.04,
+      recoilPitch: -0.03,
+    };
+    const base = resolveWeaponShotReticleOffset(motion, false);
+    const hip = resolveWeaponShotReticleOffset(motion, true);
+    const zoom = resolveWeaponShotReticleOffset(motion, true, ZOOM_RECOIL_FEEDBACK_MULTIPLIER);
+
+    expect(hip.x - base.x).toBeCloseTo(0.04 * 180 * 5, 8);
+    expect(hip.y - base.y).toBeCloseTo(-0.03 * 180 * 5, 8);
+    expect(zoom.x - base.x).toBeCloseTo(0.04 * 180 * 5 * ZOOM_RECOIL_FEEDBACK_MULTIPLIER, 8);
+    expect(zoom.y - base.y).toBeCloseTo(-0.03 * 180 * 5 * ZOOM_RECOIL_FEEDBACK_MULTIPLIER, 8);
   });
 });
 

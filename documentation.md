@@ -144,7 +144,7 @@
   while movement speed drives a small damped vertical viewport bob that settles when the player stops. The HUD
   reticule follows the same damped first-person roll and head-bob offsets as the camera, so rapid left/right weight
   shifts visibly lag in the aim marker while the focus ray remains anchored to the configured reticule position. The
-  The outer ring follows that motion inverted at -1x; the center dot is tuned to a 5x total displacement without changing
+  The outer ring follows that motion at 5x; the center dot is tuned to a 5x total displacement without changing
   the camera transform. The current experiment multiplies the underlying camera weight-shift targets by 2x; the
   reticule still reads the raw shared camera output.
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
@@ -194,7 +194,9 @@
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
   jump apex. Double-tapping any WASD or arrow movement key engages a 3× sprint that remains active while any
-  movement key is held, so W→A/D/S direction transfers preserve sprint speed.
+  movement key is held, so W→A/D/S direction transfers preserve sprint speed. If the player is crouched, that
+  same sprint request first performs the normal stand transition and then starts sprinting; the stand still costs
+  5 O₂, and an unaffordable transition leaves the player crouched.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
@@ -211,7 +213,7 @@
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
   warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
   intensity for visual tuning, with a 0–25× DoF-intensity slider; the defaults are 12.5× outside zoom and 25× during
-  explicit ADS, while the slider remains available for stronger cinematic bokeh experiments. The practical blur
+  explicit zoom, while the slider remains available for stronger cinematic bokeh experiments. The practical blur
   envelope uses a smooth eased focus envelope for the debug telemetry.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
   cyan system and skyline window materials modulate only with a subtle ambient pulse.
@@ -293,10 +295,10 @@
   duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
   objects.
 
-## Reticule-anchored ADS zoom
+## Reticule-anchored zoom
 
 The seat camera keeps a smooth FOV transition: 90° in hip fire (standing or crouched) and 45° while
-explicit ADS is active. Crouching still lowers the eye height, but it does not enter aim mode.
+explicit zoom is active. Crouching still lowers the eye height, but it does not enter zoom mode.
 Because the on-screen reticule is intentionally at 60% viewport height, the scene applies a matching
 off-axis `PerspectiveCamera` view offset as the FOV changes. The world point under the reticule remains
 in place during the zoom instead of shifting around the viewport center. The projection helper and its
@@ -350,16 +352,18 @@ Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
 `apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
 Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking drains 1.67
-(about 60 seconds). Each jump and each transition from crouch to standing costs 5 points, so roughly 20
-consecutive jumps empty the reserve.
+(about 60 seconds). A full jump and each transition from crouch to standing costs 5 points, so roughly 20
+consecutive full jumps empty the reserve.
 
 Sprint recovery waits 1.5 seconds, crouch-walk recovery waits 0.5 seconds, and jump recovery waits 0.25
 seconds. The delay is stored in the pure state and recovery is integrated for the exact portion of a frame
 after it expires. The browser publishes the rounded reserve as `data-player-o2` and renders it as a third
 HUD bar.
 
-O₂ is an action reserve. A jump and a stand-up transition each require the full 5-point cost; if the reserve
-cannot pay it, the action is rejected. Crouching has no entry cost. Sprinting is allowed only when the current
+O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. If the reserve
+cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
+balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
+The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. Sprinting is allowed only when the current
 frame's drain is affordable. When it is not (including at 0%), the controller falls back to a neutral jog rather
 than stopping movement. The neutral blend is derived from the configured walking recovery (+8/s) and sprint drain
 (-3.33/s): `8 / (8 + 3.33) = 70.6%` of the walk-to-sprint interval, or about `80.4%` of full sprint speed. At
@@ -367,27 +371,39 @@ that speed, movement keeps O₂ at a 0-point-per-second delta (subject to the ex
 Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
 stops when the reserve reaches zero.
 
+Every fired projectile also spends 25% of its configured damage from the same reserve. The current charges are
+7 O₂ for a 28-damage pistol round, 3 for a 12-damage machine-gun round, 4 for each 16-damage shotgun pellet
+(32 for the eight-pellet shell), and 25 for the 100-damage sniper round. A shot is still allowed when the
+remaining reserve is smaller than its full charge; the final partial amount is consumed and the reserve reaches
+zero. This is a fatigue cost, not an ammunition gate, so the shared low-O₂ sway makes sustained fire less stable.
+
 The physical left Command key (`MetaLeft`) is the temporary desktop hold-breath input. It also aims, drains
 15 points per second, stops automatically at zero, and locks until the reserve is above 25 points. Right
-mouse toggles ADS and does not hold breath. While left Command is held, the scene cancels
+mouse toggles zoom and does not hold breath. While left Command is held, the scene cancels
 page-level keyboard defaults for every key event that reaches the page, so ordinary Command-modified keys
 are treated as game input; browser-reserved shortcuts such as macOS Command+W may still close the tab before
 JavaScript receives an event. While the hold is active and O₂ remains above zero, the shared camera damper
-keeps the reticle and weapon aim centred and pauses the stationary breathing bob. Releasing the hold or
-reaching zero restores the normal reserve-driven response. The continuous response in
-`apps/web/src/scene/o2-stability.ts` maps the current reserve to reticle sway and weapon viewmodel sway
-without threshold states outside explicit hold-breath or wall-brace stabilisation. Camera breathing grows
-smoothly as the reserve falls, including while stationary.
+leaves half of the rested baseline reticle, weapon, and stationary-breathing instability and suppresses the
+reserve-driven breathing destabilisation. Releasing the hold or reaching zero restores the normal reserve-driven
+response. The continuous response in
+`apps/web/src/scene/o2-stability.ts` maps the current reserve to the shared reticle/camera sway response
+without threshold states outside explicit hold-breath or wall-brace stabilisation. Camera breathing grows smoothly
+as the reserve falls while not holding breath, including while stationary.
+Zoom uses the same base sway amplitude as hip fire; only holding breath or wall bracing reduces that shared response.
+The reserve-driven breathing destabilisation now uses one shared 2× fatigue emphasis for the reticle and camera-damper
+response; the held weapon consumes that same perspective output, while shot recoil recovery remains a separate central
+spring response.
 
-Pressing Jump while crouched automatically returns the player to standing when the jump is accepted. The
-automatic posture change is part of the jump action, so it keeps the existing single 5-point jump cost; an
-O₂-insufficient jump is rejected and leaves the crouch state unchanged. The returned jump posture also keeps
-the mobile Crouch button's pressed state aligned with the scene controller.
+Pressing Jump while crouched automatically returns the player to standing when either a full jump or the fallback
+mini hop is accepted. The automatic posture change is part of the jump action, so a full jump keeps the existing
+single 5-point cost while an O₂-insufficient mini hop remains free. The returned jump posture also keeps the mobile
+Crouch button's pressed state aligned with the scene controller.
 
 When the first-person capsule is touching the side of any active physics box,
-aiming down sights receives the same reticle, weapon, and stationary-breathing
-stabilisation as holding breath, but the wall brace does not change or drain the
-player's O₂ state. The contact probe uses the controller capsule gap, supports
+zoom receives reticle, weapon, and stationary-breathing
+stabilisation, but leaves one half of the normal
+reserve-driven instability so the pose is not perfectly static. The wall brace
+does not change or drain the player's O₂ state. The contact probe uses the controller capsule gap, supports
 yaw-rotated boxes, ignores floors and sloped surfaces, and publishes the
 data-player-wall-contact and data-player-wall-braced attributes for local diagnostics.
 Focused coverage is in
@@ -485,56 +501,85 @@ models use a shared near-black finish across their bodies, barrels, sights, and 
 distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
 projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
 recoil, ammo, reload state, and a four-slot HUD make the loop visible. Shot raycasts stay on authored
-scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss.
+scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss. Hitscan shots
+have no weapon-specific distance cap: they continue to the first render surface, while a miss tracer uses only the
+camera's finite far plane to keep its presentation geometry finite.
 The held model follows the seat-view state separately from the firing-control state, so it remains visible
 in the right hand before pointer lock is acquired.
 The camera is part of the rendered scene graph so its attached view-model meshes are included in the render.
 The live reticule presentation function feeds both the CSS sway and the weapon's aim NDC; the weapon is lowered
 on Y and continuously rotates toward the moving reticule dot. Reloading uses one generic snappy pose for every
 weapon: the muzzle pitches skyward, pauses for a small clip-change nudge, then returns to the reticule.
+Reload duration is not a per-weapon tuning constant. `weapons.ts` derives total trigger-pull damage as
+`damage × pellets`; a pull at or above 100 damage uses individual round reloads, while a lower-damage pull uses a
+full-clip reload. Clip timing is `0.01 × damage × magazine size`, so the pistol takes `28 × 12 × 0.01 = 3.36 s`
+and the machine gun takes `12 × 30 × 0.01 = 3.6 s` for a magazine. Round timing is `0.01 × total trigger-pull
+damage` per inserted bullet or shell: the sniper takes `1 s` per 100-damage bullet, and the shotgun's eight
+16-damage pellets total 128 damage, so it takes `1.28 s` per shell. Round reloads insert one reserve round at each
+interval until the magazine is full; new weapon definitions inherit this classification and formula by default.
+The pose lifts during the first 10% of that interval, keeps the gun raised for the middle 80% while the reload work
+plays, and recentres during the final 10%. For round reloads, the first lift is held across every shell/bullet interval;
+the final 10% recenter only starts after the last round or an interruption. Round reloads are interruptible between
+rounds: holding fire shoots as soon as the next bullet or shell is chambered and cancels the pending next insertion.
+The final 0.12 seconds of each reload interval gives the held gun a brief upward insertion impulse; the shell/bullet or
+full clip is committed when that impulse ends, so the UI and chamber timing finish together. Clip reloads remain atomic.
 The shared camera-motion damper also owns the held viewmodel posture: standing uses a right-hand hip-fire offset,
-crouching uses an intermediate raised offset, and explicit ADS smoothly centres and raises the weapon fully onto
+crouching uses an intermediate raised offset, and explicit zoom smoothly centres and raises the weapon fully onto
 the optical axis using the original crouched sight height, preserving existing ironsight and sniper-scope alignment.
 The weapon continues to aim and fire through the same reticule ray. A double-tap movement sprint clears the persistent
-right-mouse ADS toggle before acceleration begins.
+right-mouse zoom toggle before acceleration begins.
 Each procedural weapon now carries its own top-rail sight profile: an open two-ear rear notch, a forward post, and
 a small black bead make the sight picture readable when crouched and zoomed. Those meshes are camera children
 and inherit the same reticule aim quaternion, so the sights do not introduce a second or divergent firing direction.
 The receivers now stay low and the sight rails are split to leave a clear center channel. The pistol's rear detail and
 machine gun's former full-width top accent sit off-axis, so neither covers the centered reticule.
 The sniper now adds a real camera-child scope tube, rings, tinted glass disk, and lens anchor. While the sniper is
-equipped and explicit ADS is active, `SniperScopeLensShader` runs after Bokeh and samples a clean world-only render
+equipped and explicit zoom is active, `SniperScopeLensShader` runs after Bokeh and samples a clean world-only render
 texture inside the projected glass. A hidden secondary camera aims through the live reticule with a true 5× tighter
 FOV and renders only a square 2×-supersampled lens target, so bullet-hole decals receive fresh geometry pixels instead
 of a stretched viewport crop. Floating sprites and weapon/UI overlays are excluded while the bullet-hole root remains
 visible. Catmull–Rom bicubic reconstruction, a feathered circular mask, restrained glass colour split, and diagonal
 cyan X marks keep the optic legible, then `OutputPass` performs normal tone mapping.
-Right-mouse ADS remains independent from left-Command hold-breath. Because the mask is projected from the actual scope anchor after
+Right-mouse zoom remains independent from left-Command hold-breath. Because the mask is projected from the actual scope anchor after
 viewmodel transforms, it follows sway, recoil, reload, and reticule-relative aim while the weapon ray remains authoritative.
 The scope tube is open-ended at the rear and the glass sits just ahead of its rim; this avoids a capped-cylinder face
 covering the lens with a black panel.
 The optic assembly is authored at a 0.11979078 m local Y height over the rifle sight axis, so its projected glass centre stays
-on the reticle while the shared crouch and ADS viewmodel transforms remain centralized.
+on the reticle while the shared crouch and zoom viewmodel transforms remain centralized.
 Render hits attach a typed `lastWeaponHit` record to the struck object for local experimentation; this is
 not an authoritative enemy, damage, replay, or multiplayer system.
+
+## Penthouse armory chart
+
+The penthouse west wall now carries a readable `WeaponDamageAmmoChartSign`. Its chart is generated from
+`WEAPON_CHART_ENTRIES`, which is derived from the four playable weapon definitions, so it stays aligned with the
+pickup and loadout data. Each row shows the weapon name, damage per projectile, pellets per shot, loaded magazine,
+reserve ammunition, and total starting rounds. The footer defines the ammo order as `loaded / reserve` and calls out
+that shotgun damage is per pellet rather than per shell.
 
 Shot recoil is part of the centralized first-person damper. Each fire event passes the weapon's per-projectile
 damage and the current visible centre-dot displacement from its resting position into the damper. The damper draws
 that vector as a line from the resting dot to the live dot, normalizes it, and nudges the aim farther along the same
 direction; there is no fixed centered or upward kick. The outer reticule ring is the 100-point reference radius. The
-base 100-damage impulse carries the aim 25% beyond that radius; the current shared 2× shot-jerk tuning carries the
-sniper 250% beyond the centre. Pistol, shotgun, and machine-gun impulses use the same distance algorithm scaled by
+base 100-damage impulse carries the aim 25% beyond that radius; the current shared 10× shot-jerk tuning carries the
+sniper 1250% beyond the centre. Pistol, shotgun, and machine-gun impulses use the same distance algorithm scaled by
 their 28/16/12 damage values. That output is applied to the camera matrix, the
-reticule's CSS/NDC position, and the camera-child held weapon, so movement, breathing, posture, and prior recoil all
-participate in the next shot's live direction. The kick is an immediate displacement into a shared under-damped
-second-order response: the spring pulls it back through the rest point and produces the opposite-side overshoot. The
-response never reads weapon type, fire interval, or magazine state. A rapid weapon simply submits impulses before the
-previous response settles, while a slow weapon naturally gets a clean recovery; future weapons use the same path without
-new cadence branches. Only the existing per-projectile damage scale changes the kick size. The shotgun uses 16 damage
+reticule's CSS/NDC position, and the camera-child held weapon. Hip fire keeps movement, breathing, posture, and prior
+recoil in the next shot's live direction for its existing spread. Zoom keeps half of that prior-recoil feedback: the
+recovery pulse still changes the next sighted shot, but zoom remains steadier than hip fire without removing the
+deterministic spread source. Each kick holds its outward phase for 60 ms, then releases a shared 1.5×
+return-velocity impulse into the same under-damped spring; the spring carries the presentation back through the rest
+point and produces the opposite-side overshoot. The recovery queue never reads weapon type, fire interval, or magazine
+state. A rapid weapon simply submits more shared impulses before earlier responses settle, while a slow weapon naturally
+gets a clean recovery; future weapons use the same path without new cadence branches. There is no global camera-angle clamp,
+so the full impulse remains readable instead of being
+silently flattened; an exceptional heavy weapon can add its own limit later. Only the existing per-projectile damage
+scale changes the kick size. The shotgun uses 16 damage
 per pellet rather than multiplying the visual kick by its eight-pellet count. Ordinary guns do not add a second random
 projectile offset; the shotgun is the only weapon with an inherent fixed pellet cone. Every pellet cone is centered on
 the current live reticule ray; O₂ does not widen or tighten it. O₂-driven sway still moves the reticule and therefore
-moves the cone's center.
+moves the cone's center. Firing fatigue consumes 0.25 times each projectile's damage, including all shotgun pellets,
+so the resulting reserve-driven sway moves both the visible reticule and the live aim ray.
 During sprint movement, the reticle centre dot fades out and fades back in when sprinting stops. The outer circle is
 kept visible as the persistent movement/aim reference.
 During a reload, the browser shell fades only the centre reticle dot to zero opacity from the authoritative weapon
@@ -562,9 +607,14 @@ camera work. Browser pickup and firing interaction remains unverified; no new br
 
 ## HUD placement
 
-The visual-table overlay keeps the scene summary and shield/health/O₂ bars along the top of the viewport. The weapon
-loadout and ammunition readout stays in the lower-right corner, including on narrow touch layouts, so the lower-left
-and centre remain available for movement controls and the scene.
+The visual-table overlay uses one compact top status rail for live preview state, round/seat, area, room identity, and
+the current movement/combat state. The rail is intentionally segmented so the high-value state is readable without
+turning the scene into a dashboard. Shield, health, and O₂ remain in a matching `Player systems` card below it; low
+O₂ and critical/down health use a stronger value accent, while the bars retain their existing semantic colours.
+
+The `Loadout` card keeps the active weapon and ammunition readout in the lower-right corner, including on narrow touch
+layouts. Its heading and slot treatment now match the vitals card, and reload state uses the same warm warning accent
+as the top status chip. The lower-left and centre remain available for movement controls and the scene.
 
 When pointer lock is released, the instruction footer occupies the bottom stack above the weapon panel. The gun status
 therefore remains visible in the lower-right without covering the paused movement instructions; mobile layouts keep the
@@ -582,6 +632,26 @@ while this short presentation transition is active; the authoritative weapon sta
 The number-row `0` key explicitly holsters the current weapon. It clears the active weapon and HUD ammunition while
 leaving collected weapons in the inventory, and uses the same lower transition as a weapon switch without raising a
 replacement model.
+
+## Traversal weapon presentation
+
+The first-person controller sends active ledge vault, wall-hang, and wall-climb state through the same centralized
+camera-motion damper that drives weapon put-away. While traversal is active, the held gun rotates muzzle-down and
+drops below the frame. The damper holds that exact lowered pose for the traversal, then runs the normal raise phase
+when the player returns to ordinary movement. This does not alter physics, weapon inventory, firing, reload, or aim-ray
+authority; it only keeps the viewmodel out of the way during parkour movement. Coverage is in
+`apps/web/src/scene/camera-motion.test.ts`.
+
+## Reload movement
+
+Reloading caps the speed the player was requesting at the existing oxygen-neutral “trot” rather than forcing every
+movement input to that speed. Walking therefore stays at walk speed; a sprint request is reduced to trot for the
+reload sequence and then resumes full sprint only when the next O₂ drain slice is affordable. If the reserve cannot
+pay that slice, movement falls back to the neutral jog. Crouch speed remains the higher-priority posture limit.
+
+When development debug mode is enabled (`?debug=1`), the browser shows a small bottom-left `SPD` readout in metres
+per second. It consumes the scene's damped horizontal velocity and is throttled to about 10 updates per second; on
+coarse-pointer layouts it sits above the movement joystick. Normal mode does not render this temporary diagnostic.
 
 ## Shot tracers and bullet holes
 
@@ -647,10 +717,86 @@ explicit commands and are not silently run by the scheduler.
 The physical eye-CoC path is preserved in checkpoint commit `534f04b` for later calibration, but it is disabled in the
 current runtime because the first visual pass made the whole scene too soft during zoom. The active renderer uses the
 previous stock normalized Bokeh response while we reassess the blur scale and depth-buffer mapping. The physical
-experiment itself does not add a separate ADS-specific shader state.
+experiment itself does not add a separate zoom-specific shader state.
 
 ## DoF intensity defaults
 
 The active stock Bokeh pass uses a 12.5× multiplier in normal first-person view. Standing and crouching share this
-default. The multiplier becomes 25× only while the shared explicit ADS state is active, covering both iron-sight zoom
+default. The multiplier becomes 25× only while the shared explicit zoom state is active, covering both iron-sight zoom
 and the sniper scope; crouching by itself does not increase blur.
+
+## O₂ fatigue vision response
+
+The visual table applies a continuous screen-space blur from the same centralized camera-motion O₂ output that drives
+breathing sway. It uses the existing fatigue curve (`(1 - oxygenRatio) ^ 1.25`), so full reserve is sharp and zero
+reserve reaches a bounded 1 CSS-pixel radius in normal view or 2 CSS pixels while zoomed. The shader scales that radius
+by device pixel ratio and sits after the gaze-driven Bokeh and sniper-scope composite, so it reads as low-O₂ vision
+fatigue without changing focus distance or weapon/reticle alignment. The existing auto/manual exposure target remains
+unchanged and contrast stays at 1×. The pass applies a black radial vignette that eases continuously from the live
+reticule point (50% across and 60% down by default) to the corners, with deterministic transition dithering to avoid
+a hard colour band. It reaches 1.0 strength at zero reserve in scene-linear space, before `OutputPass`. The live values are exposed as
+`data-o2-vision-blur`, `data-o2-vision-vignette`,
+`data-o2-vision-contrast`, and `data-o2-vision-pass` on the scene container for diagnostics. The mapping lives in
+`apps/web/src/scene/o2-stability.ts`; the pass is in `apps/web/src/scene/o2-blur.ts`.
+
+## Held-breath and wall-brace stability
+
+Holding breath keeps the O₂ reserve drain and zero-reserve release rules, but it does not let the falling reserve feed
+back into breathing sway. While the hold is active above zero O₂, reticle and weapon sway use only their baseline
+breathing response, and the camera uses the rested breathing amplitude and frequency before applying the 50% hold
+factor. This prevents holding breath from causing the heavy breathing and shaking it is intended to control.
+
+Wall bracing still applies its independent 50% factor to the existing reserve-driven response. If the player leans on a
+wall while holding breath, the factors compose to 25% for reticle, weapon, and stationary camera breathing motion.
+
+## Damage-driven barrel heat
+
+The visual weapon prototype tracks a separate heat load for each gun. Only projectiles that hit a render surface add
+heat, using the weapon's per-bullet damage; a shotgun therefore adds one pellet's damage for each pellet that hits.
+Misses do not heat the barrel. At 500 accumulated damage units the barrel reaches the full red-hot red/emissive blend,
+with the material emissive intensity capped at `1`.
+
+The barrel cools at a constant `10` damage units per second. The cooldown is therefore linear: 100 damage units take
+10 seconds, while 600 damage units take 60 seconds. The 500-damage red-hot threshold itself takes 50 seconds to cool.
+Cooling continues while the weapon is holstered or another weapon is equipped. Both the held view model and world
+pickup copies use the same weapon heat state.
+
+## Pooled barrel smoke
+
+Each held weapon now owns a fixed pool of 16 billboard smoke sprites and one shared 64×64 procedural alpha mask.
+Every trigger pull emits a bright white muzzle puff even when the shot misses. Puff size and count use the round's
+total damage (`damage × pellets`), so the shotgun and sniper produce much larger clouds than the machine gun. Each
+puff stays concentrated at its captured muzzle position, diffuses outward, and remains prominent for roughly ten
+seconds before it is returned to the pool. Thermal wisps use the same normalized barrel heat ratio as the red-hot
+material: they begin at 35% heat, reach their full four-sprites-per-second rate at 80% heat, rise with a small
+deterministic curl, expand, and fade without collision or shadow work. The pool is attached to the scene world effects
+root, so smoke remains in place when the player turns, walks, holsters, or switches weapons.
+
+Smoke is presentation-only and follows the camera-held weapon model, so it inherits the centralized camera motion and
+retains the existing near-view Bokeh exclusion. Smoke variation uses the room-seeded RNG stream
+`<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel heat but do not emit smoke.
+
+## Agent test note layout
+
+The development-only agent test note is rendered immediately after the player-vitals panel in the same right-side
+layout stack. It remains below the full vitals panel as its message changes, including on mobile and when the debug
+panel is open.
+
+## Reload and zoom handoff
+
+Reloading temporarily leaves the player's requested zoom state. The input request is preserved, but the shared camera
+presentation receives an unzoomed state while the clip or round reload is active. This keeps the camera FOV, reticule,
+held weapon, O₂ stability response, and breath state aligned instead of adding a reticule-only exception.
+
+When the reload operation and its final round-reload recenter phase finish, the preserved request is applied again. A
+player who releases zoom during the reload stays unzoomed, and a player who was not zoomed before reload does not gain
+zoom automatically. The weapon snapshot stays `reloading` through the final recenter phase so the HUD and movement cap
+use the same readiness boundary.
+
+## Held-weapon perspective alignment
+
+The held weapon does not add a second breathing oscillator after it aims at the live reticule ray. Camera breathing,
+aim sway, head bob, roll, recoil, recovery, and the camera-attached viewmodel therefore remain one unified presentation
+path. This prevents the weapon sights from drifting away from the reticule when O₂ is low. The machine gun and other
+ordinary weapons still use the deterministic live ray with no random projectile cone; only the shotgun has inherent
+seeded pellet spread.

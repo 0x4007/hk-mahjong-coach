@@ -3,6 +3,15 @@ import { createSeededRandom } from "@hk-mahjong/core/public";
 export const WEAPON_IDS = ["pistol", "shotgun", "machineGun", "sniper"] as const;
 export type WeaponId = (typeof WEAPON_IDS)[number];
 
+/** The two reload mechanisms used by the visual weapon prototype. */
+export type WeaponReloadMode = "clip" | "round";
+
+/** One second of reload time for every 100 damage represented by the reload. */
+export const WEAPON_RELOAD_SECONDS_PER_DAMAGE = 0.01;
+
+/** A high-damage trigger pull is reloaded one bullet or shell at a time. */
+export const WEAPON_ROUND_RELOAD_DAMAGE_THRESHOLD = 100;
+
 /** Resolve a number-row weapon key; `Digit0` is the explicit empty-hand slot. */
 export const resolveWeaponHotkey = (code: string): WeaponId | null | undefined => {
   if (code === "Digit0") {
@@ -21,6 +30,62 @@ export const WEAPON_BULLET_HOLE_LIFETIME_SECONDS = 5 * 60;
 export const WEAPON_BULLET_HOLE_FADE_SECONDS = 12;
 /** Keep sustained automatic fire from accumulating unbounded scene objects. */
 export const WEAPON_BULLET_HOLE_MAX_COUNT = 256;
+
+/** Damage payload that makes a barrel fully red hot. */
+export const WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD = 500;
+/** Linear cooling rate shared by every weapon barrel. */
+export const WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND = 10;
+/** Cooling time for the full red-hot threshold at the shared linear rate. */
+export const WEAPON_BARREL_HEAT_COOLDOWN_SECONDS =
+  WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD / WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND;
+
+/** Heat band in which a barrel begins to produce a visible thermal wisp. */
+export const WEAPON_BARREL_SMOKE_START_HEAT_RATIO = 0.35;
+/** Heat band at which the thermal wisp emitter reaches its full rate. */
+export const WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO = 0.8;
+/** Maximum number of pooled thermal wisps emitted per second by one held gun. */
+export const WEAPON_BARREL_SMOKE_MAX_RATE = 4;
+/** Fixed sprite budget for a held weapon's shot and thermal smoke. */
+export const WEAPON_BARREL_SMOKE_POOL_SIZE = 16;
+
+/**
+ * Resolve a barrel's remaining heat load after one hit and one elapsed-time
+ * slice. Hit damage is deliberately separate from shots fired: a miss adds no
+ * heat, and every shotgun pellet that hits contributes its own damage.
+ */
+export const resolveWeaponBarrelHeatDamage = (
+  currentDamage: number,
+  hitDamage = 0,
+  elapsedSeconds = 0,
+): number => {
+  const current = Number.isFinite(currentDamage) ? Math.max(0, currentDamage) : 0;
+  const added = Number.isFinite(hitDamage) ? Math.max(0, hitDamage) : 0;
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  return Math.max(0, current + added - elapsed * WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND);
+};
+
+/** Resolve the clamped red-hot presentation ratio for a heat load. */
+export const resolveWeaponBarrelHeatRatio = (damage: number): number => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : 0;
+  return Math.min(1, safeDamage / WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD);
+};
+
+/** Resolve a smoothed thermal-smoke ratio from the normalized barrel heat. */
+export const resolveWeaponBarrelSmokeRatio = (heatRatio: number): number => {
+  const safeRatio = Number.isFinite(heatRatio) ? Math.max(0, Math.min(1, heatRatio)) : 0;
+  const span = WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO - WEAPON_BARREL_SMOKE_START_HEAT_RATIO;
+  const normalized = Math.max(
+    0,
+    Math.min(1, (safeRatio - WEAPON_BARREL_SMOKE_START_HEAT_RATIO) / span),
+  );
+  return normalized * normalized * (3 - 2 * normalized);
+};
+
+/** Resolve the linear cooldown time for a barrel's current heat load. */
+export const resolveWeaponBarrelCooldownSeconds = (damage: number): number => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : 0;
+  return safeDamage / WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND;
+};
 
 export type WeaponEffectKind = "tracer" | "impact" | "bulletHole";
 
@@ -66,7 +131,7 @@ export interface WeaponIronSightProfile {
   readonly railWidth: number;
 }
 
-export interface WeaponDefinition {
+interface WeaponDefinitionInput {
   readonly id: WeaponId;
   readonly label: string;
   readonly shortLabel: string;
@@ -75,16 +140,75 @@ export interface WeaponDefinition {
   readonly magazineSize: number;
   readonly reserveAmmo: number;
   readonly fireIntervalSeconds: number;
-  readonly reloadSeconds: number;
-  readonly range: number;
+  /** Explicit override for unusual weapons; ordinary new guns use the damage threshold. */
+  readonly reloadMode?: WeaponReloadMode;
   /** Inherent projectile cone. Non-shotguns keep this at zero and rely on the shared aim stack. */
   readonly spreadRadians: number;
   readonly color: number;
   readonly ironSight: WeaponIronSightProfile;
 }
 
+export interface WeaponDefinition extends Omit<WeaponDefinitionInput, "reloadMode"> {
+  /** Clip reloads finish once; round reloads insert one round per interval. */
+  readonly reloadMode: WeaponReloadMode;
+  /** Damage represented by one reload operation, derived from the weapon profile. */
+  readonly totalDamagePerShot: number;
+  /** Full-clip duration for clip weapons, or one round/shell duration for round weapons. */
+  readonly reloadSeconds: number;
+}
+
+/** Resolve whether a weapon reloads as a full clip or as individual rounds. */
+export const resolveWeaponReloadMode = (
+  definition: Pick<WeaponDefinitionInput, "damage" | "pellets">,
+): WeaponReloadMode =>
+  definition.damage * definition.pellets >= WEAPON_ROUND_RELOAD_DAMAGE_THRESHOLD ? "round" : "clip";
+
+/** Resolve the reload interval from damage, pellet payload, and magazine capacity. */
+export const resolveWeaponReloadSeconds = (
+  definition: Pick<WeaponDefinition, "damage" | "pellets" | "magazineSize" | "reloadMode">,
+): number => {
+  const damageUnits =
+    definition.reloadMode === "round"
+      ? definition.damage * definition.pellets
+      : definition.damage * definition.magazineSize;
+  return damageUnits * WEAPON_RELOAD_SECONDS_PER_DAMAGE;
+};
+
+/** Resolve the total time to load a requested number of rounds. */
+export const resolveWeaponReloadDuration = (
+  definition: Pick<WeaponDefinition, "damage" | "pellets" | "magazineSize" | "reloadMode">,
+  roundsToLoad = definition.magazineSize,
+): number => {
+  const rounds = Number.isFinite(roundsToLoad) ? Math.max(0, Math.ceil(roundsToLoad)) : 0;
+  if (rounds === 0) {
+    return 0;
+  }
+  if (definition.reloadMode === "clip") {
+    return resolveWeaponReloadSeconds(definition);
+  }
+  return resolveWeaponReloadSeconds(definition) * rounds;
+};
+
+/** Round-based reloads may be cancelled by firing a round already in the gun. */
+export const canInterruptWeaponReload = (
+  definition: Pick<WeaponDefinition, "reloadMode">,
+  ammoInMagazine: number,
+): boolean =>
+  definition.reloadMode === "round" && Number.isFinite(ammoInMagazine) && ammoInMagazine > 0;
+
+/** Build a definition so all future guns inherit the damage-based reload rule. */
+const defineWeapon = (input: WeaponDefinitionInput): WeaponDefinition => {
+  const reloadMode = input.reloadMode ?? resolveWeaponReloadMode(input);
+  const definition = { ...input, reloadMode } as const;
+  return {
+    ...definition,
+    totalDamagePerShot: input.damage * input.pellets,
+    reloadSeconds: resolveWeaponReloadSeconds(definition),
+  };
+};
+
 export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = {
-  pistol: {
+  pistol: defineWeapon({
     id: "pistol",
     label: "Pistol",
     shortLabel: "SIDEARM",
@@ -93,8 +217,6 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     magazineSize: 12,
     reserveAmmo: 72,
     fireIntervalSeconds: 0.28,
-    reloadSeconds: 0.95,
-    range: 85,
     spreadRadians: 0,
     color: 0xe95b4d,
     ironSight: {
@@ -113,8 +235,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
       railHeight: 0.014,
       railWidth: 0.068,
     },
-  },
-  shotgun: {
+  }),
+  shotgun: defineWeapon({
     id: "shotgun",
     label: "Shotgun",
     shortLabel: "BREACH",
@@ -123,8 +245,6 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     magazineSize: 6,
     reserveAmmo: 36,
     fireIntervalSeconds: 0.92,
-    reloadSeconds: 1.35,
-    range: 32,
     spreadRadians: 0.12,
     color: 0xd6a15a,
     ironSight: {
@@ -143,8 +263,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
       railHeight: 0.016,
       railWidth: 0.075,
     },
-  },
-  machineGun: {
+  }),
+  machineGun: defineWeapon({
     id: "machineGun",
     label: "Machine gun",
     shortLabel: "SUPPRESS",
@@ -153,8 +273,6 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     magazineSize: 30,
     reserveAmmo: 150,
     fireIntervalSeconds: 0.085,
-    reloadSeconds: 1.55,
-    range: 105,
     spreadRadians: 0,
     color: 0x75c9d1,
     ironSight: {
@@ -173,8 +291,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
       railHeight: 0.016,
       railWidth: 0.08,
     },
-  },
-  sniper: {
+  }),
+  sniper: defineWeapon({
     id: "sniper",
     label: "Sniper",
     shortLabel: "LONGSHOT",
@@ -183,8 +301,6 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     magazineSize: 5,
     reserveAmmo: 25,
     fireIntervalSeconds: 1.1,
-    reloadSeconds: 1.8,
-    range: 220,
     spreadRadians: 0,
     color: 0xb98ee8,
     ironSight: {
@@ -203,8 +319,41 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
       railHeight: 0.016,
       railWidth: 0.08,
     },
-  },
+  }),
 };
+
+/**
+ * Stable rows for the penthouse armory sign. Keep this derived from the
+ * playable definitions so the room chart and the loadout HUD cannot drift.
+ */
+export interface WeaponChartEntry {
+  readonly id: WeaponId;
+  readonly label: string;
+  readonly damagePerBullet: number;
+  readonly pelletsPerShot: number;
+  readonly totalDamagePerShot: number;
+  readonly magazineSize: number;
+  readonly reserveAmmo: number;
+  readonly totalAmmo: number;
+  readonly reloadMode: WeaponReloadMode;
+  readonly reloadSeconds: number;
+}
+
+export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map((weapon) => {
+  const definition = WEAPON_DEFINITIONS[weapon];
+  return {
+    id: weapon,
+    label: definition.label,
+    damagePerBullet: definition.damage,
+    pelletsPerShot: definition.pellets,
+    totalDamagePerShot: definition.totalDamagePerShot,
+    magazineSize: definition.magazineSize,
+    reserveAmmo: definition.reserveAmmo,
+    totalAmmo: definition.magazineSize + definition.reserveAmmo,
+    reloadMode: definition.reloadMode,
+    reloadSeconds: definition.reloadSeconds,
+  };
+});
 
 /**
  * Resolve the only inherent projectile cone used by the firing runtime.
@@ -245,13 +394,36 @@ export interface WeaponReloadPose {
   readonly rollRadians: number;
 }
 
+export interface WeaponReloadPoseOptions {
+  /** Keep a round-reload weapon raised after the initial lift. */
+  readonly holdRaised?: boolean;
+  /** Elapsed time since the most recent inserted-round/clip impulse. */
+  readonly insertionImpulseElapsedSeconds?: number | undefined;
+}
+
 /** Peak local pitch for the generic snappy reload presentation. */
 export const WEAPON_RELOAD_SKY_PITCH_RADIANS = (78 * Math.PI) / 180;
-const WEAPON_RELOAD_LIFT_END = 0.2;
-const WEAPON_RELOAD_CLIP_END = 0.48;
+/** Keep the lift and return short so the reload work happens while raised. */
+export const WEAPON_RELOAD_LIFT_FRACTION = 0.1;
+export const WEAPON_RELOAD_RETURN_FRACTION = 0.1;
+/** Brief upward presentation impulse used to acknowledge each inserted round or clip. */
+export const WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS = 0.12;
+export const WEAPON_RELOAD_INSERT_IMPULSE_PITCH_RADIANS = (7 * Math.PI) / 180;
+export const WEAPON_RELOAD_INSERT_IMPULSE_VERTICAL_OFFSET = 0.07;
+const WEAPON_RELOAD_LIFT_END = WEAPON_RELOAD_LIFT_FRACTION;
+const WEAPON_RELOAD_CLIP_END = 1 - WEAPON_RELOAD_RETURN_FRACTION;
 
 const clampUnit = (value: number): number => Math.min(1, Math.max(0, value));
 const easeOutCubic = (value: number): number => 1 - (1 - value) ** 3;
+
+/** Resolve a short, decaying upward kick after a round or clip is inserted. */
+export const resolveWeaponReloadInsertionImpulse = (elapsedSeconds: number): number => {
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  if (elapsed >= WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS) {
+    return 0;
+  }
+  return (1 - elapsed / WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS) ** 3;
+};
 
 /**
  * Resolve the shared reload pose for every held weapon.
@@ -264,14 +436,21 @@ const easeOutCubic = (value: number): number => 1 - (1 - value) ** 3;
 export const resolveWeaponReloadPose = (
   elapsedSeconds: number,
   durationSeconds: number,
+  options: WeaponReloadPoseOptions = {},
 ): WeaponReloadPose => {
   const duration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 1;
   const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
   const progress = clampUnit(elapsed / duration);
+  const insertionImpulse =
+    options.insertionImpulseElapsedSeconds === undefined
+      ? 0
+      : resolveWeaponReloadInsertionImpulse(options.insertionImpulseElapsedSeconds);
   let skyAmount: number;
   let clipAmount = 0;
   if (progress < WEAPON_RELOAD_LIFT_END) {
     skyAmount = easeOutCubic(progress / WEAPON_RELOAD_LIFT_END);
+  } else if (options.holdRaised === true) {
+    skyAmount = 1;
   } else if (progress < WEAPON_RELOAD_CLIP_END) {
     skyAmount = 1;
     clipAmount = Math.sin(
@@ -284,12 +463,46 @@ export const resolveWeaponReloadPose = (
   }
   return {
     skyAmount,
-    pitchRadians: WEAPON_RELOAD_SKY_PITCH_RADIANS * skyAmount,
-    verticalOffset: 0.16 * skyAmount,
+    pitchRadians:
+      WEAPON_RELOAD_SKY_PITCH_RADIANS * skyAmount +
+      WEAPON_RELOAD_INSERT_IMPULSE_PITCH_RADIANS * insertionImpulse,
+    verticalOffset:
+      0.16 * skyAmount + WEAPON_RELOAD_INSERT_IMPULSE_VERTICAL_OFFSET * insertionImpulse,
     depthOffset: 0.035 * skyAmount + 0.028 * clipAmount,
     lateralOffset: -0.055 * clipAmount,
     rollRadians: -0.16 * clipAmount,
   };
+};
+
+/**
+ * Resolve the presentation for a shell-or-bullet reload. The first lift uses
+ * the shared 10% phase, then the weapon stays raised for every chambering
+ * interval. Supplying a return elapsed value starts the shared final 10%
+ * recenter phase after an interruption or the final chamber.
+ */
+export const resolveWeaponRoundReloadPose = (
+  liftElapsedSeconds: number,
+  durationSeconds: number,
+  returnElapsedSeconds: number | null = null,
+  insertionImpulseElapsedSeconds?: number,
+): WeaponReloadPose => {
+  const duration = Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : 1;
+  if (returnElapsedSeconds !== null) {
+    const safeReturnElapsed = Number.isFinite(returnElapsedSeconds)
+      ? Math.max(0, returnElapsedSeconds)
+      : 0;
+    return resolveWeaponReloadPose(
+      duration * WEAPON_RELOAD_CLIP_END + safeReturnElapsed,
+      duration,
+      {
+        insertionImpulseElapsedSeconds,
+      },
+    );
+  }
+  return resolveWeaponReloadPose(liftElapsedSeconds, duration, {
+    holdRaised: true,
+    insertionImpulseElapsedSeconds,
+  });
 };
 
 export interface WeaponSpawnRect {
