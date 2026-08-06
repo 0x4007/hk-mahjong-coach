@@ -1,6 +1,6 @@
 {
-  "name": "wall-hang-test",
-  "description": "Jump into the upper face of a tall wall, hang briefly, then climb over it.",
+  "name": "wall-hang-five-meter-reject-test",
+  "description": "A normal jump cannot catch the top of a five-metre wall.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -16,18 +16,17 @@
   },
   "staticBoxes": [
     {
-      "center": [0, 1.9, -4],
-      "halfExtents": [0.5, 1.9, 0.5]
+      "center": [0, 2.5, -4],
+      "halfExtents": [0.5, 2.5, 0.5]
     }
   ],
   "frames": [
     {
-      "duration": 0.3,
+      "duration": 1.0,
       "forward": 1,
       "sprint": true,
       "jump": true,
-      "label": "jump-to-wall-top"
-    },
-    { "duration": 1.2, "forward": 1, "label": "climb-while-hanging" }
+      "label": "jump-at-five-metre-wall"
+    }
   ]
 }

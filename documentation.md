@@ -150,10 +150,10 @@
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
   controller. The first collision slice supplies simplified static colliders for the world floor and table body;
   render meshes remain visual-only, and tile/furniture dynamics are intentionally not inferred from every mesh.
-  Rapier loads asynchronously from its inlined WASM; if initialization fails, the previous bounded movement path
-  remains available and the scene marks `data-physics-ready="fallback"`. The fallback now uses the same coarse
-  collision runtime as the traversal state machine, so ledge/vault assistance and wall hanging do not silently
-  disappear in a restricted browser.
+  Rapier loads asynchronously from its inlined WASM; the same coarse fallback controller is active from the first
+  frame and remains available if initialization fails, while Rapier replaces it when ready. The scene marks
+  `data-physics-ready="fallback"` during that window, so ledge/vault assistance and wall hanging do not silently
+  disappear in a restricted or slow browser.
 - Collision coverage now expands beyond the table: the environment, generated room fixtures, glass, walls,
   furniture, and gateway are converted from meaningful render meshes into coarse world-space AABB colliders.
   Streamed city buildings, props, and skybridges contribute explicit rotated boxes as chunks enter the 3×3
@@ -162,17 +162,21 @@
   decorative strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle
   a physics body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does
   not change its collision layout.
-- When airborne and moving into a nearby top edge, first-person movement can perform a short edge-grab: if the
-  player is within a small height and approach window, the controller eases the camera and capsule to the top of that
-  surface over a brief climb arc rather than snapping dead-center. This produces the requested parkour edge climb
-  feel while keeping collision authoritative through the Rapier capsule.
-- Tall walls use a separate traversal state. On a real horizontal collision, a wall must extend above the capsule head
-  relative to the player's current feet, overlap the player's lateral reach, and be within 0.5 m of the capsule front.
+- When airborne and moving into a nearby top edge, first-person movement checks ledge grab first, then low vault. A
+  valid target is kept on the supported surface, biased a short distance forward, and the controller eases the camera
+  and capsule over a brief climb arc rather than snapping dead-center. Ledge grabs retain their collision gate; low
+  vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier does not have to
+  report a separate contact first.
+- Tall walls use a separate traversal state. When horizontal movement is blocked by a real contact, a wall must be
+  above the refined ledge-height window relative to the player's current feet, overlap the player's lateral reach,
+  and be within 0.5 m of the capsule front.
+  Wall-hang detection runs only after both ledge and low-vault checks have rejected the contact.
   The capsule is placed 0.27 m outside the approached face (radius plus separation), remains attached with gravity
   suppressed, and climbs when forward or Space is pressed. The wall target scan includes streamed static boxes but
-  excludes knocked dynamic props, and the original airborne-only ledge-grab gate remains in force so low vault/ledge
-  movement is not reclassified as a wall hang. The `?debug=1` climbing-gym preset places the player near its tall wall;
-  walk into it, release movement to hang, then hold W or press Space to climb.
+  excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal so low
+  vault/ledge movement is not reclassified as a wall hang. The `?debug=1` climbing-gym preset places the player near
+  its tall wall; hold W and press Space while approaching to catch the upper face, release movement to hang, then
+  hold W or press Space to climb.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -189,8 +193,8 @@
   and bounded so a stalled tunnel still falls back to the normal scene.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
-  jump apex. Double-tapping W engages a 3× sprint that remains active while any movement key is held, so
-  W→A/D/S direction transfers preserve sprint speed.
+  jump apex. Double-tapping any WASD or arrow movement key engages a 3× sprint that remains active while any
+  movement key is held, so W→A/D/S direction transfers preserve sprint speed.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
@@ -200,14 +204,16 @@
   with a stable far fallback and a tight tile-neighborhood assist. The pass uses a restrained 17 mm eye
   approximation with a 1 arcminute central acuity threshold: bright rooms settle near a 2.5 mm pupil,
   ordinary indoor light near 4 mm, and dark rooms expand toward 6.5 mm. That pupil drives the aperture and
-  hyperfocal distance, so close tiles can soften while the room and skyline stay legible. Shader readiness
+  hyperfocal distance, so close tiles and near camera-child geometry can soften while the room and skyline stay
+  legible. The Bokeh shader now uses a thin-lens circle-of-confusion response, so near blur grows rapidly as depth
+  approaches the eye while surfaces near the gaze distance remain sharp. Shader readiness
   uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
   warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
   intensity for visual tuning, with a 0–25× DoF-intensity slider; the posture defaults are 12.5× standing and
   25× crouching, while the slider remains available for stronger cinematic bokeh experiments. The practical blur envelope uses a smooth
-  eased falloff: with the reference pupil, near-zero focus is full strength, 2.5 m is roughly one quarter,
-  and 6 m is effectively sharp; pupil dilation scales that cutoff in low light.
+  eased focus envelope for the debug telemetry, while the physical depth response is evaluated per depth-buffer
+  sample; pupil dilation scales the circle of confusion in low light.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
   cyan system and skyline window materials modulate only with a subtle ambient pulse.
 - The skyline adds a local PMREM room environment, six depth-compressed near-rooftop masses, and a visible
@@ -250,6 +256,10 @@
   regenerates a prior coordinate. Base geometry/materials remain shared and repeated forms use `InstancedMesh`,
   keeping the append-only world bounded by the explicit play-space limits. The streamed areas are South courtyard,
   West tea garden, East practice court, and North skybridge; the debug HUD reports the active area and loaded count.
+- The FPS play space uses five 100 m chunks from the origin in each direction, for a 1,000 m × 1,000 m navigable
+  world. The procedural backdrop doubles the per-chunk feature density for buildings, props, signs, and utility
+  posts, and weapon pickups use the same full-world bounds. Existing authored-area, world-bound, and focus-ramp
+  exclusion checks still guard every generated placement.
 - For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
   directory, then run:
 
@@ -284,9 +294,10 @@
   duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
   objects.
 
-## Reticule-anchored crouch zoom
+## Reticule-anchored ADS zoom
 
-The seat camera keeps the existing smooth FOV transition: 90° while standing and 45° while crouched.
+The seat camera keeps a smooth FOV transition: 90° in hip fire (standing or crouched) and 45° while
+explicit ADS is active. Crouching still lowers the eye height, but it does not enter aim mode.
 Because the on-screen reticule is intentionally at 60% viewport height, the scene applies a matching
 off-axis `PerspectiveCamera` view offset as the FOV changes. The world point under the reticule remains
 in place during the zoom instead of shifting around the viewport center. The projection helper and its
@@ -295,11 +306,14 @@ Three.js ray-preservation regression are covered by `apps/web/src/scene/mahjong-
 ## Wall hang and climb
 
 The movement CLI (`pnpm test:movement:sim`) models wall traversal after ledge and vault checks. A wall is
-eligible only when its approached axis-aligned face is in front of the capsule, within 0.5 m of the capsule
-front surface, laterally overlapped, vertically reachable, and above the player's current centre height by the
-small wall-hang threshold. The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01 m
-separation, so the hang does not embed the player in the collider. The helper scans all boxes and chooses the
-closest valid candidate.
+eligible only when the player is airborne, its approached axis-aligned face is in front of the capsule, within
+0.5 m of the capsule front surface, laterally overlapped, above the ordinary ledge threshold, and no more than
+0.6 m above the capsule top. A thin platform underside may be just inside that same hand window; swept contact is
+snapped back to the near face instead of letting a jump pass through the edge. Wall entry is also gated by an
+airborne jump traversal state, so a ground-level run into any wall remains a normal collision; a five-metre wall is
+rejected when its top is outside hand reach.
+The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01 m separation, so the hang does
+not embed the player in the collider. The helper scans all boxes and chooses the closest valid candidate.
 
 The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
 are suppressed. Forward or jump starts a climb that first raises the capsule until its bottom clears the wall top,
@@ -309,13 +323,65 @@ mode writes only the summary to stdout; the current Rapier package warning is em
 
 The same traversal state is active in the live first-person browser controller. Open the `Climbing gym`
 debug preset from `?debug=1`; it starts on clear ground facing a dedicated tall training wall. Click the scene to
-capture pointer lock, and run into the wall with `W` or
-the touch joystick. The capsule attaches to the near face without gravity, remains hanging while forward is
-released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump action is used. A
-brief settle beat prevents the approach input from making the hang invisible; holding forward continues into the
-climb after that beat.
+capture pointer lock, hold `W`, and press `Space` while approaching so the jump reaches the wall's upper face (or
+use the touch joystick and Jump action). The capsule attaches to the near face without gravity, remains hanging
+while forward is released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump
+action is used. A ground-level collision with the base of a wall does not attach, even when its top is within the
+height window; the player must be airborne and near the top. A brief
+settle beat prevents the approach input from making the hang invisible; holding forward continues into the climb
+after that beat.
 Backward input releases the hang. The climb lifts above the obstacle before crossing onto its top and asks Rapier
 for the final supported position instead of marking the player grounded in midair.
+
+## Centralized camera motion and landing weight
+
+First-person presentation motion lives in `apps/web/src/scene/camera-motion.ts`. The scene sends one
+input frame to that damper after physics resolves the base camera position. Lateral weight shift, gait
+bob, jump lift, and landing response are combined into one vertical/roll output, and the reticule uses
+the same output for aim feedback.
+
+Jump lift is driven by the launch velocity. Landing dip is driven by the instantaneous downward velocity
+and the support-stop acceleration (`velocity / frame delta`), so a building fall produces a deeper response
+than a normal jump and a harder stop at the same velocity dips further. The spring is capped to keep the
+camera readable; Rapier or the deterministic fallback remains authoritative for the player position.
+Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
+
+## Oxygen vital and breathing response
+
+The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
+`apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
+Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking drains 1.67
+(about 60 seconds). Each jump and each transition from crouch to standing costs 5 points, so roughly 20
+consecutive jumps empty the reserve.
+
+Sprint recovery waits 1.5 seconds, crouch-walk recovery waits 0.5 seconds, and jump recovery waits 0.25
+seconds. The delay is stored in the pure state and recovery is integrated for the exact portion of a frame
+after it expires. The browser publishes the rounded reserve as `data-player-o2` and renders it as a third
+HUD bar.
+
+O₂ is an action reserve. A jump and a stand-up transition each require the full 5-point cost; if the reserve
+cannot pay it, the action is rejected. Crouching has no entry cost. Sprinting is allowed only when the current
+frame's drain is affordable. When it is not (including at 0%), the controller falls back to a neutral jog rather
+than stopping movement. The neutral blend is derived from the configured walking recovery (+8/s) and sprint drain
+(-3.33/s): `8 / (8 + 3.33) = 70.6%` of the walk-to-sprint interval, or about `80.4%` of full sprint speed. At
+that speed, movement keeps O₂ at a 0-point-per-second delta (subject to the existing recovery delay after sprinting).
+Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
+stops when the reserve reaches zero.
+
+The physical left Command key (`MetaLeft`) is the temporary desktop hold-breath input. It also aims, drains
+15 points per second, stops automatically at zero, and locks until the reserve is above 25 points. Right
+mouse toggles ADS and does not hold breath. While left Command is held, the scene cancels
+page-level keyboard defaults for every key event that reaches the page, so ordinary Command-modified keys
+are treated as game input; browser-reserved shortcuts such as macOS Command+W may still close the tab before
+JavaScript receives an event. While the hold is active and O₂ remains above zero, the shared camera damper
+keeps the reticle and weapon aim centred and pauses the stationary breathing bob. Releasing the hold or
+reaching zero restores the normal reserve-driven response. The continuous response in
+`apps/web/src/scene/o2-stability.ts` maps the current reserve to reticle sway, weapon viewmodel sway, and
+spread without threshold states outside this explicit hold-breath stabilisation. Camera breathing grows
+smoothly as the reserve falls, including while stationary.
+Focused coverage is in
+`apps/web/src/scene/player-vitals.test.ts`, `apps/web/src/scene/o2-stability.test.ts`,
+`apps/web/src/scene/camera-motion.test.ts`, and `apps/web/src/scene/weapons.test.ts`.
 
 ## Commands
 
@@ -333,9 +399,16 @@ workspace package build first; Vite resolves the browser package sources for dev
 `pnpm build` retains the complete package build for production artifacts.
 
 After a visual-table coding agent finishes a feature or a batch of scene edits, run `pnpm hmr` from
-the repository root with `pnpm dev` still running. The command touches the scene HMR boundary so Vite
-remounts the scene in the connected browser; the development session snapshot restores the current
-presentation position. This is a development convenience, not browser acceptance proof.
+the repository root with `pnpm dev` still running. Ordinary file changes do not reload the connected
+browser. The command writes an ignored, worktree-local request marker and touches the scene HMR boundary
+for one explicit scene remount. If the batch also changed another source module, the explicit trigger sends
+a full browser reload so all edited modules are fetched. The marker keeps the workflow independent of Vite's
+port and is consumed only by the watching Vite server with an active HMR client, so a second disconnected preview
+cannot steal the request; the development session snapshot restores the current presentation position. Pass a quoted test note,
+for example `pnpm hmr "Check the new wall-hang exit"`, to show the instruction in the development UI after
+the remount or reload. The note is a CLI argument carried by the one-shot HMR event, not a user-edited file.
+Running `pnpm hmr` without a note clears the previous note. This is a development convenience, not browser
+acceptance proof.
 
 ## Material deviations
 
@@ -363,8 +436,190 @@ The visual penthouse occupies the complete 50 m x 50 m development play space. I
 
 ## Known limitations
 
+## Player health and shields
+
+The visual-table prototype now has a deterministic two-layer player vitals loop. A 100-point energy
+shield absorbs incoming damage first. Any overflow reduces the 100-point health pool; health stays lost
+until the scene is reset. After 3.5 seconds without a non-zero hit, the shield refills at 35 points per
+second. The pure model lives in `apps/web/src/scene/player-vitals.ts` and is covered by focused Vitest
+regressions.
+
+The scene applies damage from collision delta-v rather than raw travel speed. A wall impact compares the
+requested horizontal velocity with the velocity Rapier resolves after contact; penetration correction cannot
+create more delta-v than the player carried into the wall. Sprint speed (10.2 m/s, about 36.7 km/h) and below
+is always harmless. Above that limit, a kinetic-energy-shaped km/h curve scales damage, reaching 200 damage
+at an approximate 200 km/h human terminal velocity. Landing damage uses the same curve on the downward
+velocity lost at impact, so a ledge fall whose downward speed stays at sprint speed or below does no damage.
+In development (`?debug=1`),
+the Visual debug panel has `Simulate 25 damage` and `Reset vitals` controls so the recharge
+loop can be checked without arranging a traversal impact. The HUD exposes shield and health bars,
+recharge status, and the scene renderer carries rounded `data-player-health` and `data-player-shield`
+values for local smoke inspection. This is a visual-table prototype surface, not yet authoritative
+match combat or persistence state.
+
+## Procedural weapons prototype
+
+The visual-table scene now includes a seeded pickup and shooting loop in `apps/web/src/scene/weapons.ts`.
+Each normalized room seed produces one starter pistol in the penthouse and a deterministic outdoor spread
+of pistol, shotgun, machine gun, and sniper pickups. The penthouse also stages one visible pickup of each type
+around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
+physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
+
+The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
+gun, and E equips the nearest pickup while stopped; number keys or Q switch
+owned weapons, 0 holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
+Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. Each weapon
+has a distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
+projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
+recoil, ammo, reload state, and a four-slot HUD make the loop visible. Shot raycasts stay on authored
+scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss.
+The held model follows the seat-view state separately from the firing-control state, so it remains visible
+in the right hand before pointer lock is acquired.
+The camera is part of the rendered scene graph so its attached view-model meshes are included in the render.
+The live reticule presentation function feeds both the CSS sway and the weapon's aim NDC; the weapon is lowered
+on Y and continuously rotates toward the moving reticule dot. Reloading uses one generic snappy pose for every
+weapon: the muzzle pitches skyward, pauses for a small clip-change nudge, then returns to the reticule.
+The shared camera-motion damper also owns the held viewmodel posture: standing uses a right-hand hip-fire offset,
+crouching uses an intermediate raised offset, and explicit ADS smoothly centres and raises the weapon fully onto
+the optical axis. The weapon continues to aim and fire through the same reticule ray. A double-tap movement sprint
+clears the persistent right-mouse ADS toggle before acceleration begins.
+Each procedural weapon now carries its own top-rail sight profile: an open two-ear rear notch, a forward post, and
+a small weapon-color bead make the sight picture readable when crouched and zoomed. Those meshes are camera children
+and inherit the same reticule aim quaternion, so the sights do not introduce a second or divergent firing direction.
+The receivers now stay low and the sight rails are split to leave a clear center channel. The pistol's rear orange
+detail and machine gun's former full-width top accent sit off-axis, so neither covers the centered reticule.
+The sniper now adds a real camera-child scope tube, rings, tinted glass disk, and lens anchor. While the sniper is
+equipped and explicit ADS is active, `SniperScopeLensShader` runs after Bokeh and samples a clean world-only render
+texture inside the projected glass. Floating sprites and weapon/UI overlays are excluded, so the 4.6× inverse-UV
+magnification follows the underlying scene geometry rather than only enlarging labels. It uses a feathered circular
+mask, restrained glass colour split, and fine cyan scope marks, then leaves `OutputPass` to perform normal tone mapping.
+Right-mouse ADS remains independent from left-Command hold-breath. Because the mask is projected from the actual scope anchor after
+viewmodel transforms, it follows sway, recoil, reload, and reticule-relative aim while the weapon ray remains authoritative.
+The scope tube is open-ended at the rear and the glass sits just ahead of its rim; this avoids a capped-cylinder face
+covering the lens with a black panel.
+The optic assembly is authored at a 0.11979078 m local Y height over the rifle sight axis, so its projected glass centre stays
+on the reticle while the shared crouch and ADS viewmodel transforms remain centralized.
+Render hits attach a typed `lastWeaponHit` record to the struck object for local experimentation; this is
+not an authoritative enemy, damage, replay, or multiplayer system.
+
+Shot recoil is part of the centralized first-person damper. Each fire event passes the weapon's per-projectile
+damage and the current visible centre-dot displacement into the damper. It adds a short upward impulse plus
+same-direction yaw/pitch follow-through, scaled from the damage value. That output is applied to the camera matrix,
+the reticule's CSS/NDC position, and the camera-child held weapon, so an already off-centre reticle is visibly pushed
+further in that direction while the whole character view moves together. The four profiles therefore produce ordered
+recoil from their 12/16/28/100 damage values; the shotgun uses 16 damage per pellet rather than multiplying the visual
+kick by its pellet count. Ordinary guns do not add a second random projectile offset: movement, breathing, posture,
+and the previous shot's recoil naturally move the shared reticule aim before the next round. The shotgun is the only
+weapon with an inherent pellet cone, and its O₂ response widens or tightens that cone.
+
+During sprint movement, the reticle centre dot fades out and fades back in when sprinting stops. The outer circle is
+kept visible as the persistent movement/aim reference.
+During a reload, the browser shell fades only the centre reticle dot to zero opacity from the authoritative weapon
+snapshot; the outer circle remains visible and the dot returns when the reload finishes without changing the shared
+aim ray or camera motion.
+
+Focused coverage lives in `apps/web/src/scene/weapons.test.ts`, `apps/web/src/scene/reticle-aim.test.ts`, and
+`apps/web/src/scene/sniper-scope.test.ts`.
+The tests cover the four profiles, separated front/rear iron-sight anchors, same-seed placement stability, seed
+variation, reserved-area exclusion, rotated-obstacle clearance, normalized reload pose timing, damage-scaled recoil,
+the signed reticle-following camera impulse, the shared moving-dot NDC projection, and the centralized crouch
+viewmodel posture. The current local evidence is the focused recoil/weapon/reticle Vitest set (34 tests), strict
+typecheck, Prettier, production web build, `git diff --check`, and one explicit `pnpm hmr` request. The broader
+scene suite reached 100/101 tests; its remaining swept wall-hang failure is in the pre-existing dirty traversal
+lane. Full-repository ESLint remains blocked by shared dirty-lane violations, mostly from concurrent scene/vitals/
+camera work. Browser pickup and firing interaction remains unverified; no new browser session was opened for this run.
+
 - Milestones 0–4 are complete. Milestone 5 is in progress; Milestones 6–10 remain pending.
 - Persistence, protocol, coach, and tile UI package slices exist but have not yet been accepted as
   complete milestones or wired through the placeholder CLI, server, and browser clients.
 - The persistence slice still needs deletion/privacy, recovery/export, migration, restart/resume,
   and coverage repairs before Milestone 5 can close.
+
+## HUD placement
+
+The visual-table overlay keeps the scene summary and shield/health/O₂ bars along the top of the viewport. The weapon
+loadout and ammunition readout stays in the lower-right corner, including on narrow touch layouts, so the lower-left
+and centre remain available for movement controls and the scene.
+
+When pointer lock is released, the instruction footer occupies the bottom stack above the weapon panel. The gun status
+therefore remains visible in the lower-right without covering the paused movement instructions; mobile layouts keep the
+panel above the touch controls instead.
+
+## Weapon switch presentation
+
+Selecting a different owned weapon, collecting a pickup, or walking over a pickup uses one first-person transition.
+The camera-motion damper first rotates the outgoing weapon muzzle-down and lowers it below the viewport. It then starts
+the incoming weapon at that same bottom-of-screen pose and rotates it up into the shared reticle aim. If the player has
+no weapon yet, the new weapon starts directly in the raise phase. The outgoing model remains visible until the lower
+phase finishes, and the incoming model remains visible until the raise phase settles. Fire and reload inputs are ignored
+while this short presentation transition is active; the authoritative weapon state and reticle ray do not change.
+
+The number-row `0` key explicitly holsters the current weapon. It clears the active weapon and HUD ammunition while
+leaving collected weapons in the inventory, and uses the same lower transition as a weapon switch without raising a
+replacement model.
+
+## Shot tracers and bullet holes
+
+Every seeded shot now renders a visible tracer streak with a small tracer head for 140 ms. A hit also renders the
+existing short impact spark and adds a dark, surface-oriented bullet-hole decal. The decal follows the struck triangle's
+world normal, is offset from the surface to avoid flicker, uses a depth-disabled presentation layer for readability,
+and remains part of the normal Bokeh pass.
+
+Bullet holes have a five-minute lifetime. They stay opaque until the final 12 seconds, fade to zero, and then remove
+themselves with their geometry and materials. The runtime retains at most 256 holes; the oldest mark is removed first
+if sustained automatic fire reaches that bound. The effect timing and fade curve are pure helpers in
+`apps/web/src/scene/weapons.ts`, with focused regressions in `apps/web/src/scene/weapons.test.ts`.
+
+The decal normal path also handles rotated `THREE.InstancedMesh` surfaces, including the visible tile walls. Label
+sprites are excluded from shot raycasts so a hit attaches to the room surface behind the label rather than an invisible
+text plane. The decal is deliberately large enough to read at normal room distances, with a dark centre and contrasting
+rim. The raycaster is camera-aware and resolves the current scene roots per shot, so labels do not emit Three.js sprite
+warnings and newly streamed surfaces remain hittable. The weapon snapshot exposes `shotsHit` and `bulletHoleCount`; the
+React HUD mirrors those counts as data attributes for local visual diagnostics.
+
+## Centralized unit-test bus
+
+Starting the Fastify server starts `apps/server/src/test-bus.ts`. The bus owns one advisory lock per worktree and
+runs `vitest run --reporter=json` immediately. Every five minutes it checks `git rev-parse HEAD`, porcelain dirty
+state, a streamed `git diff HEAD` hash, and the contents of untracked files. If the commit hash and content-aware
+dirty fingerprint match the last completed pass, the scheduler skips Vitest for that tick, so an unchanged checkout
+does not retain another full suite or its per-test snapshots. A changed commit, staged/unstaged content, or untracked
+file content triggers the next pass. If Git inspection fails, the bus runs Vitest and records the inspection error.
+If another server process starts in the same worktree, it observes the lock and does not launch a second runner.
+The scheduler also skips a tick while a previous run is still active, so a slow suite cannot overlap itself.
+
+The ignored `.data/test-bus/` directory contains a root `manifest.json` and immutable run directories:
+
+```text
+.data/test-bus/
+  manifest.json
+  latest-run.txt
+  runs/<run-id>/
+    manifest.json
+    vitest.json
+    stdout.log
+    stderr.log
+    tests/<test-file-and-full-name>-<hash>.json
+```
+
+The root manifest is written last. Agents should read it first, then use each `results[].path` entry to open the
+exact per-assertion file. A result includes the full test name, source file, status, duration, location, tags, and
+failure messages. The manifest also records the run status (`passed`, `failed`, `error`, or `aborted`), timestamps,
+exit signal/code, the repository state checked before the run, any Git inspection error, and the aggregate Vitest
+summary. A snapshot is evidence for the checked source state; it does not replace a focused test for a change made
+afterward.
+
+Agents must wait for a completed bus snapshot for all test validation. A missing manifest, a `finishedAt` older than
+the relevant source change, or a `running` status means the agent should wait for the server-owned bus rather than
+launching `pnpm test`, `vitest`, or a focused test command. Typecheck, lint, build, and browser checks remain separate
+commands and are not included in the bus.
+
+The server bus runs unit tests only. Coverage, simulation, build, lint, typecheck, browser, and HMR checks remain
+explicit commands and are not silently run by the scheduler.
+
+## Physical near-field eye depth of field
+
+The experimental DoF path uses a thin-lens circle-of-confusion calculation for every depth-buffer sample. It keeps
+the existing reticule gaze distance and adaptive pupil, then applies the reciprocal object-distance term so a gun or
+iron sight held close to the eye becomes increasingly soft as it approaches the camera. Geometry near the focus plane
+remains sharp, and the held weapon is not made a focus target or given an ADS-specific branch.

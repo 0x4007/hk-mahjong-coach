@@ -1,6 +1,6 @@
 {
-  "name": "wall-hang-test",
-  "description": "Jump into the upper face of a tall wall, hang briefly, then climb over it.",
+  "name": "wall-hang-airborne-platform-test",
+  "description": "Catch the upper face of a high platform during a jump, then climb onto it.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -16,8 +16,8 @@
   },
   "staticBoxes": [
     {
-      "center": [0, 1.9, -4],
-      "halfExtents": [0.5, 1.9, 0.5]
+      "center": [0, 3.12, -4],
+      "halfExtents": [0.75, 0.08, 0.5]
     }
   ],
   "frames": [
@@ -26,8 +26,12 @@
       "forward": 1,
       "sprint": true,
       "jump": true,
-      "label": "jump-to-wall-top"
+      "label": "jump-to-platform"
     },
-    { "duration": 1.2, "forward": 1, "label": "climb-while-hanging" }
+    {
+      "duration": 1.0,
+      "forward": 1,
+      "label": "climb-onto-platform"
+    }
   ]
 }

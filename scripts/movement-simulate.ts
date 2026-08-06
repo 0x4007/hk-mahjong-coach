@@ -111,6 +111,7 @@ type WallHangingState = {
   readonly wallFacePoint: PhysicsVector;
   readonly wallTopY: number;
   readonly box: PhysicsBox;
+  elapsed: number;
 };
 
 type WallClimbingState = {
@@ -145,6 +146,8 @@ const PLAYER_COLLIDER_CENTER_HEIGHT = 0.86;
 const PLAYER_COLLIDER_RADIUS = 0.26;
 const LEDGE_GRAB_MIN_FALL_OFFSET = 0.05;
 const FRAME_GROUND_EPSILON = 0.0005;
+const WALL_HANG_EPSILON = 0.0001;
+const WALL_HANG_SETTLE_DURATION = 0.14;
 const WALL_CLIMB_CLEARANCE = 0.01;
 const WALL_CLIMB_INWARD_OFFSET = 0.2;
 
@@ -518,11 +521,18 @@ const runScenario = async (
           state.grounded = false;
           state.verticalVelocity = 0;
           movement = { position: { ...state.position }, grounded: false, collisions: 0 };
+          traversalAtFrameStart.elapsed = Math.min(
+            traversalAtFrameStart.elapsed + delta,
+            WALL_HANG_SETTLE_DURATION,
+          );
           if (step.forward < 0) {
             // Backward input releases the wall; the ordinary movement path
             // below handles the resulting fall or retreat.
             state.traversal = { kind: "none" };
-          } else if (step.forward > 0 || step.jump) {
+          } else if (
+            traversalAtFrameStart.elapsed >= WALL_HANG_SETTLE_DURATION &&
+            (step.forward > 0 || step.jump)
+          ) {
             const targetPosition = resolveWallClimbTarget(
               traversalAtFrameStart,
               scenario.staticBoxes,
@@ -567,6 +577,7 @@ const runScenario = async (
             movement = landingMovement;
           }
         } else {
+          const jumpStarted = step.jump && state.lastGrounded;
           if (step.jump && state.grounded) {
             state.verticalVelocity = scenario.physics.jumpSpeed;
             state.grounded = false;
@@ -587,7 +598,7 @@ const runScenario = async (
 
           movement = runtime.move(state.position, desiredDelta);
           state.position = movement.position;
-          state.grounded = movement.grounded;
+          state.grounded = movement.grounded && state.verticalVelocity <= 0;
           if (!state.grounded) {
             state.verticalVelocity -= scenario.physics.gravity * delta;
           } else if (state.verticalVelocity < 0) {
@@ -601,10 +612,16 @@ const runScenario = async (
             y: 0,
             z: desiredHorizontalDelta.z / Math.max(delta, FRAME_GROUND_EPSILON),
           };
-          const ledgeGrabTarget =
+          const canUseAirborneTraversal =
+            (jumpStarted || !state.lastGrounded) &&
             !state.grounded &&
-            movement.collisions > 0 &&
-            (justLeftGround || jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET)
+            (!movement.grounded || state.verticalVelocity > 0) &&
+            jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET &&
+            desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002;
+          const canUseLedgeGrab =
+            canUseAirborneTraversal && state.verticalVelocity <= 0 && movement.collisions > 0;
+          const ledgeGrabTarget =
+            canUseLedgeGrab && (justLeftGround || jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET)
               ? resolveLedgeGrabTarget(
                   fromPosition,
                   horizontalVelocity,
@@ -641,12 +658,35 @@ const runScenario = async (
               preserveSprinting: momentum.preserveSprinting,
             };
           } else {
-            const vaultTarget = resolveVaultTarget(
-              fromPosition,
-              horizontalVelocity,
-              fromPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
-              scenario.staticBoxes,
+            const vaultTarget = canUseAirborneTraversal
+              ? resolveVaultTarget(
+                  fromPosition,
+                  horizontalVelocity,
+                  fromPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
+                  scenario.staticBoxes,
+                )
+              : null;
+            const horizontalApproachDistance = Math.hypot(
+              desiredHorizontalDelta.x,
+              desiredHorizontalDelta.z,
             );
+            const approachDistance =
+              horizontalApproachDistance > WALL_HANG_EPSILON
+                ? (movement.position.x - fromPosition.x) *
+                    (desiredHorizontalDelta.x / horizontalApproachDistance) +
+                  (movement.position.z - fromPosition.z) *
+                    (desiredHorizontalDelta.z / horizontalApproachDistance)
+                : 0;
+            const horizontalMotionBlocked =
+              horizontalApproachDistance > 0.015 &&
+              approachDistance + WALL_HANG_EPSILON < horizontalApproachDistance;
+            // Wall hanging is an approach traversal, not a generic collision
+            // recovery. A floor, ceiling, or unrelated prop can also produce
+            // a Rapier collision while a wall happens to be nearby. Only a
+            // blocked horizontal approach may enter the wall resolver; the
+            // resolver then applies the near-top, reach, face, and overlap
+            // checks.
+            const wallContact = horizontalMotionBlocked;
             if (vaultTarget !== null) {
               state.position = { ...vaultTarget };
               state.grounded = true;
@@ -660,28 +700,35 @@ const runScenario = async (
                 preservedStrafeVelocity: requestedRightSpeed,
                 preserveSprinting: sprinting,
               };
-            } else if (movement.collisions > 0) {
+            } else if (canUseAirborneTraversal && wallContact) {
+              const wallPhysicsPosition = movement.position;
               const wallHang = resolveWallHangTargetDetails(
-                fromPosition,
+                wallPhysicsPosition,
                 forward,
                 scenario.staticBoxes,
               );
-              if (wallHang !== null) {
-                state.position = { ...wallHang.target };
+              const resolvedWallHang =
+                wallHang ??
+                (horizontalMotionBlocked
+                  ? resolveWallHangTargetDetails(fromPosition, forward, scenario.staticBoxes)
+                  : null);
+              if (resolvedWallHang !== null) {
+                state.position = { ...resolvedWallHang.target };
                 state.verticalVelocity = 0;
                 state.grounded = false;
                 state.traversal = {
                   kind: "wall-hanging",
-                  target: wallHang.target,
-                  wallNormal: wallHang.wallNormal,
-                  wallFacePoint: wallHang.wallFacePoint,
-                  wallTopY: wallHang.wallTopY,
-                  box: wallHang.box,
+                  target: resolvedWallHang.target,
+                  wallNormal: resolvedWallHang.wallNormal,
+                  wallFacePoint: resolvedWallHang.wallFacePoint,
+                  wallTopY: resolvedWallHang.wallTopY,
+                  box: resolvedWallHang.box,
+                  elapsed: 0,
                 };
                 wallHangEvent = {
-                  targetX: wallHang.target.x,
-                  targetY: wallHang.target.y,
-                  targetZ: wallHang.target.z,
+                  targetX: resolvedWallHang.target.x,
+                  targetY: resolvedWallHang.target.y,
+                  targetZ: resolvedWallHang.target.z,
                   preservedForwardVelocity: requestedForwardSpeed,
                   preservedStrafeVelocity: requestedRightSpeed,
                   preserveSprinting: sprinting,

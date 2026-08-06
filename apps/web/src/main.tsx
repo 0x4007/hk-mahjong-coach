@@ -13,10 +13,21 @@ import {
   DEFAULT_RETICLE_POSITION,
   MAHJONG_TABLE_HMR_EVENT,
   normalizeVisualRoomSeed,
+  RETICLE_DOT_MOTION_MULTIPLIER,
+  RETICLE_RING_MOTION_MULTIPLIER,
 } from "./scene/mahjong-table.js";
+import {
+  PLAYER_MAX_HEALTH,
+  PLAYER_MAX_O2,
+  PLAYER_MAX_SHIELD,
+  SHIELD_RECHARGE_DELAY_SECONDS,
+  createPlayerVitals,
+} from "./scene/player-vitals.js";
+import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
+  PlayerVitalsState,
   SceneDebugSnapshot,
   SceneView,
   VisualCameraPreset,
@@ -24,6 +35,7 @@ import type {
   VisualQualityMode,
   VisualShadowQuality,
   VisualToneMapper,
+  WeaponStateSnapshot,
 } from "./scene/mahjong-table.js";
 
 const DEBUG_PANEL_ENABLED =
@@ -65,12 +77,12 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
     { value: "low", label: "Low" },
   ];
 const RETICLE_POSITION = DEFAULT_RETICLE_POSITION;
-const RETICLE_RING_MOTION_MULTIPLIER = -1;
-const RETICLE_DOT_MOTION_MULTIPLIER = 5;
 
 const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
 const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
 const VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS = 5000;
+const HMR_TEST_NOTE_EVENT = "codex:hmr-test-note";
+const HMR_TEST_MESSAGE_STORAGE_KEY = "hk-mahjong-coach:hmr-test-message:v1";
 
 interface PersistedVisualDebugScene {
   readonly roomSeed: string;
@@ -106,6 +118,10 @@ interface PersistedVisualDebugScene {
 interface PersistedVisualDebugState {
   readonly savedAt: string;
   readonly scene: PersistedVisualDebugScene;
+}
+
+interface HmrTestMessagePayload {
+  readonly message: string | null;
 }
 
 const INITIAL_ROOM_QUERY_VALUE = new URLSearchParams(window.location.search).get("room");
@@ -252,6 +268,40 @@ const loadPersistedVisualDebugState = async (): Promise<PersistedVisualDebugScen
   }
 };
 
+const isHmrTestMessagePayload = (value: unknown): value is HmrTestMessagePayload => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return value.message === null || typeof value.message === "string";
+};
+
+const readStoredHmrTestMessage = (): string | null => {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+  try {
+    const message = window.sessionStorage.getItem(HMR_TEST_MESSAGE_STORAGE_KEY);
+    return message === null || message.length === 0 ? null : message;
+  } catch {
+    return null;
+  }
+};
+
+const storeHmrTestMessage = (message: string | null): void => {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+  try {
+    if (message === null || message.length === 0) {
+      window.sessionStorage.removeItem(HMR_TEST_MESSAGE_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(HMR_TEST_MESSAGE_STORAGE_KEY, message);
+  } catch {
+    // Session storage is best-effort for this development-only hint.
+  }
+};
+
 const buildPersistedVisualDebugScene = (
   snapshot: SceneDebugSnapshot,
 ): PersistedVisualDebugScene => ({
@@ -345,7 +395,7 @@ const VisualDebugPanel = ({
     readonly scene: PersistedVisualDebugScene;
     readonly scenePayload: string;
   } | null>(null);
-  const debugStatePersistTimerRef = React.useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const debugStatePersistTimerRef = React.useRef<number | null>(null);
   const queuePersistPendingDebugStateRef = React.useRef<(() => void) | null>(null);
   const [isExpanded, setIsExpanded] = React.useState(() =>
     readVisualDebugPanelExpanded(getVisualDebugPanelStateStorage(), !isMobile),
@@ -611,6 +661,16 @@ const VisualDebugPanel = ({
           <button onClick={resetDefaults} type="button">
             Reset debug defaults
           </button>
+        </fieldset>
+        <fieldset className="scene-debug-vitals">
+          <legend>Player vitals</legend>
+          <button onClick={() => mount.applyDamage(25)} type="button">
+            Simulate 25 damage
+          </button>
+          <button onClick={() => mount.resetVitals()} type="button">
+            Reset vitals
+          </button>
+          <small>High-speed wall impacts and hard landings also deal damage.</small>
         </fieldset>
         <label>
           Quality mode
@@ -950,6 +1010,7 @@ const App = (): React.JSX.Element => {
   const [roomVariant, setRoomVariant] = React.useState("Northlight");
   const [explorationArea, setExplorationArea] = React.useState("Penthouse");
   const [hmrSceneEpoch, setHmrSceneEpoch] = React.useState(0);
+  const [hmrTestMessage, setHmrTestMessage] = React.useState(readStoredHmrTestMessage);
   const [isMobile, setIsMobile] = React.useState(isMobileDevice);
   const [visualQualityMode, setVisualQualityMode] = React.useState<VisualQualityMode>(
     getInitialVisualQualityMode,
@@ -962,6 +1023,13 @@ const App = (): React.JSX.Element => {
   );
   const hasAttemptedMotionReenable = React.useRef(false);
   const [isCrouched, setIsCrouched] = React.useState(false);
+  const [isSprinting, setIsSprinting] = React.useState(false);
+  const [playerVitals, setPlayerVitals] = React.useState<PlayerVitalsState>(() =>
+    createPlayerVitals(),
+  );
+  const [weaponState, setWeaponState] = React.useState<WeaponStateSnapshot>(() =>
+    createEmptyWeaponStateSnapshot(),
+  );
   const mountRef = React.useRef<MahjongTableMount | null>(null);
   const [debugMount, setDebugMount] = React.useState<MahjongTableMount | null>(null);
   const joystickKnobRef = React.useRef<HTMLSpanElement>(null);
@@ -1056,6 +1124,8 @@ const App = (): React.JSX.Element => {
       if (mount === null) {
         // When the scene unmounts we reset motion‑look related UI state.
         setIsCrouched(false);
+        setIsSprinting(false);
+        setWeaponState(createEmptyWeaponStateSnapshot());
         setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
         hasAppliedPersistedVisualStateRef.current = false;
@@ -1315,6 +1385,15 @@ const App = (): React.JSX.Element => {
   const jump = (): void => {
     mountRef.current?.jump();
   };
+  const fire = (): void => {
+    mountRef.current?.fire();
+  };
+  const interact = (): void => {
+    mountRef.current?.interact();
+  };
+  const reload = (): void => {
+    mountRef.current?.reload();
+  };
   const nextRoom = (): void => {
     hasUserRoomOverrideRef.current = true;
     roomSequenceRef.current += 1;
@@ -1350,7 +1429,17 @@ const App = (): React.JSX.Element => {
     const onSceneHotReload = (): void => {
       setHmrSceneEpoch((epoch) => epoch + 1);
     };
+    const onHmrTestNote = (payload: unknown): void => {
+      if (!isHmrTestMessagePayload(payload)) {
+        return;
+      }
+      const message =
+        payload.message !== null && payload.message.length > 0 ? payload.message : null;
+      setHmrTestMessage(message);
+      storeHmrTestMessage(message);
+    };
     window.addEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
+    import.meta.hot?.on(HMR_TEST_NOTE_EVENT, onHmrTestNote);
 
     const disposeAfterUpdate =
       import.meta.hot?.on(
@@ -1383,6 +1472,7 @@ const App = (): React.JSX.Element => {
 
     return () => {
       window.removeEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
+      import.meta.hot?.off(HMR_TEST_NOTE_EVENT, onHmrTestNote);
       disposeAfterUpdate();
     };
   }, []);
@@ -1397,6 +1487,31 @@ const App = (): React.JSX.Element => {
         : motionStatus === "unsupported"
           ? "Motion look needs a secure HTTPS page on iPhone. Open the secure preview URL."
           : "Tap Enable motion look, allow motion access, then tilt your iPhone or swipe the table.";
+  const shieldPercent = Math.round((playerVitals.shield / PLAYER_MAX_SHIELD) * 100);
+  const healthPercent = Math.round((playerVitals.health / PLAYER_MAX_HEALTH) * 100);
+  const o2Percent = Math.round((playerVitals.o2 / PLAYER_MAX_O2) * 100);
+  const shieldStatus =
+    playerVitals.shield >= PLAYER_MAX_SHIELD
+      ? "Full charge"
+      : playerVitals.timeSinceDamage >= SHIELD_RECHARGE_DELAY_SECONDS
+        ? "Recharging"
+        : `Recharge in ${(SHIELD_RECHARGE_DELAY_SECONDS - playerVitals.timeSinceDamage).toFixed(1)}s`;
+  const o2Status = playerVitals.holdingBreath
+    ? "Holding breath"
+    : playerVitals.holdBreathLocked
+      ? "Recover above 25% to hold"
+      : playerVitals.o2 >= PLAYER_MAX_O2
+        ? "Ready"
+        : "Recovering";
+  const activeWeaponDefinition =
+    weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
+  const activeWeaponSlot =
+    weaponState.activeWeapon === null
+      ? null
+      : (weaponState.inventory.find((slot) => slot.weapon === weaponState.activeWeapon) ?? null);
+  const nearbyWeaponDefinition =
+    weaponState.nearbyPickup === null ? null : WEAPON_DEFINITIONS[weaponState.nearbyPickup];
+  const hasOwnedWeapon = weaponState.inventory.some((slot) => slot.owned);
 
   return (
     <main id="main" className="immersive-shell">
@@ -1419,6 +1534,9 @@ const App = (): React.JSX.Element => {
               view={view}
               onMount={handleMount}
               onMotionLookStatusChange={handleMotionLookStatusChange}
+              onSprintingChange={setIsSprinting}
+              onVitalsChange={setPlayerVitals}
+              onWeaponStateChange={setWeaponState}
             />
           ) : (
             <div className="scene-canvas">
@@ -1440,7 +1558,9 @@ const App = (): React.JSX.Element => {
           ) : null}
           <div
             ref={reticleRef}
-            className="scene-reticule"
+            className={`scene-reticule${isSprinting ? " is-sprinting" : ""}${
+              weaponState.reloading ? " is-reloading" : ""
+            }`}
             aria-hidden="true"
             style={{ left: `${RETICLE_POSITION.x * 100}%`, top: `${RETICLE_POSITION.y * 100}%` }}
           >
@@ -1474,8 +1594,10 @@ const App = (): React.JSX.Element => {
               </>
             ) : (
               <p>
-                Click to look around. WASD moves through the room; double-tap W sprints. Walk
-                through the cyan arch to leave the room and explore streamed play areas.
+                Click to look around. WASD moves through the room; double-tap any movement key to
+                sprint. Walk through the cyan arch to leave the room and explore streamed play
+                areas. Hold left Command to aim and hold your breath; right-click toggles aim
+                without holding your breath. Double-tap a movement key to sprint and leave aim.
               </p>
             )}
           </header>
@@ -1512,7 +1634,9 @@ const App = (): React.JSX.Element => {
                 Video quality
                 <select
                   id="visual-quality-mode"
-                  onChange={(event) => applyVisualQualityMode(event.currentTarget.value as VisualQualityMode)}
+                  onChange={(event) =>
+                    applyVisualQualityMode(event.currentTarget.value as VisualQualityMode)
+                  }
                   value={visualQualityMode}
                 >
                   {debugQualityModes.map((mode) => (
@@ -1524,6 +1648,18 @@ const App = (): React.JSX.Element => {
               </label>
             ) : null}
           </div>
+          {hmrTestMessage !== null ? (
+            <aside
+              aria-label="Agent test note"
+              aria-live="polite"
+              className="scene-test-note"
+              data-hmr-test-note="true"
+              role="status"
+            >
+              <span>Agent test note</span>
+              <p>{hmrTestMessage}</p>
+            </aside>
+          ) : null}
           <div className="scene-hud" aria-label="Scene details">
             <span>
               <i aria-hidden="true" /> Live 3D preview
@@ -1532,6 +1668,108 @@ const App = (): React.JSX.Element => {
             <span>
               {explorationArea} · {roomVariant} · {roomSeed}
             </span>
+          </div>
+          <div className="scene-vitals" aria-label="Player vitals">
+            <div className="scene-vitals-row scene-vitals-shield">
+              <div className="scene-vitals-heading">
+                <span>Shield</span>
+                <strong>{shieldPercent}%</strong>
+              </div>
+              <div
+                aria-label={`Shield ${shieldPercent}%`}
+                aria-valuemax={PLAYER_MAX_SHIELD}
+                aria-valuemin={0}
+                aria-valuenow={playerVitals.shield}
+                className="scene-vitals-track"
+                role="progressbar"
+              >
+                <span style={{ width: `${shieldPercent}%` }} />
+              </div>
+              <small>{shieldStatus}</small>
+            </div>
+            <div className="scene-vitals-row scene-vitals-health">
+              <div className="scene-vitals-heading">
+                <span>Health</span>
+                <strong>{healthPercent}%</strong>
+              </div>
+              <div
+                aria-label={`Health ${healthPercent}%`}
+                aria-valuemax={PLAYER_MAX_HEALTH}
+                aria-valuemin={0}
+                aria-valuenow={playerVitals.health}
+                className="scene-vitals-track"
+                role="progressbar"
+              >
+                <span style={{ width: `${healthPercent}%` }} />
+              </div>
+              <small>
+                {playerVitals.isDead ? "Down" : healthPercent <= 25 ? "Critical" : "Stable"}
+              </small>
+            </div>
+            <div className="scene-vitals-row scene-vitals-o2">
+              <div className="scene-vitals-heading">
+                <span>O2</span>
+                <strong>{o2Percent}%</strong>
+              </div>
+              <div
+                aria-label={`O2 ${o2Percent}%`}
+                aria-valuemax={PLAYER_MAX_O2}
+                aria-valuemin={0}
+                aria-valuenow={playerVitals.o2}
+                className="scene-vitals-track"
+                role="progressbar"
+              >
+                <span style={{ width: `${o2Percent}%` }} />
+              </div>
+              <small>{o2Status}</small>
+            </div>
+          </div>
+          <div
+            aria-label="Weapon loadout"
+            className="scene-weapons"
+            data-bullet-hole-count={weaponState.bulletHoleCount}
+            data-shots-fired={weaponState.shotsFired}
+            data-shots-hit={weaponState.shotsHit}
+          >
+            <div className="scene-weapons-heading">
+              <span>{activeWeaponDefinition?.label ?? "No weapon"}</span>
+              <strong>
+                {activeWeaponSlot === null
+                  ? "—"
+                  : `${activeWeaponSlot.ammoInMagazine} / ${activeWeaponSlot.reserveAmmo}`}
+              </strong>
+            </div>
+            {nearbyWeaponDefinition !== null ? (
+              <p className="scene-weapons-pickup">
+                Walk into or press <kbd>E</kbd> to equip {nearbyWeaponDefinition.label}
+              </p>
+            ) : null}
+            <div className="scene-weapon-slots">
+              {weaponState.inventory.map((slot, index) => {
+                const definition = WEAPON_DEFINITIONS[slot.weapon];
+                return (
+                  <span
+                    aria-label={`${definition.label}${slot.owned ? `, ${slot.ammoInMagazine} rounds` : ", not collected"}`}
+                    className="scene-weapon-slot"
+                    data-active={slot.weapon === weaponState.activeWeapon ? "true" : "false"}
+                    data-owned={slot.owned ? "true" : "false"}
+                    key={slot.weapon}
+                  >
+                    <b>{index + 1}</b>
+                    <i>{definition.shortLabel}</i>
+                  </span>
+                );
+              })}
+            </div>
+            <small>
+              {weaponState.reloading
+                ? "Reloading…"
+                : activeWeaponDefinition === null
+                  ? hasOwnedWeapon
+                    ? "Q / 1–4 equip"
+                    : "Find a glowing pickup"
+                  : "Click fire · R reload · 0 holster · Q / 1–4 switch"}
+            </small>
           </div>
           {isMobile && (
             <div className="mobile-touch-controls" aria-label="Mobile movement controls">
@@ -1565,14 +1803,38 @@ const App = (): React.JSX.Element => {
                 >
                   Jump
                 </button>
+                <button
+                  className="mobile-action-button mobile-action-fire"
+                  onClick={() => handleMobileActionClick(fire)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(fire, event)}
+                  type="button"
+                >
+                  Fire
+                </button>
+                <button
+                  className="mobile-action-button"
+                  onClick={() => handleMobileActionClick(interact)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(interact, event)}
+                  type="button"
+                >
+                  Equip
+                </button>
+                <button
+                  className="mobile-action-button"
+                  onClick={() => handleMobileActionClick(reload)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(reload, event)}
+                  type="button"
+                >
+                  Reload
+                </button>
               </div>
             </div>
           )}
           <footer className="scene-card-footer scene-overlay scene-overlay-footer">
             <p>
               {isMobile
-                ? "Drag joystick: center slow · edge sprint · Swipe to look · Crouch · Jump · run into tall walls to hang · press Jump to climb"
-                : "Mouse look · WASD move · double-tap W sprint · Shift crouch · Space jump · run into tall walls, release W to hang, press W/Space to climb · Esc releases pointer"}
+                ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
+                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk into / E equip · click fire · right-click toggle aim · R reload · Q / 1–4 switch · Shift crouch · Space jump · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

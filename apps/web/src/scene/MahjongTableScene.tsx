@@ -6,7 +6,9 @@ import {
   type ReticlePosition,
   type MahjongTableMount,
   type MotionLookStatus,
+  type PlayerVitalsState,
   type SceneView,
+  type WeaponStateSnapshot,
 } from "./mahjong-table.js";
 
 interface MahjongTableSceneProps {
@@ -17,6 +19,9 @@ interface MahjongTableSceneProps {
   readonly reticlePosition?: ReticlePosition;
   readonly onMount?: (mount: MahjongTableMount | null) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
+  readonly onSprintingChange?: (sprinting: boolean) => void;
+  readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
+  readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
 }
 
 export const MahjongTableScene = ({
@@ -27,6 +32,9 @@ export const MahjongTableScene = ({
   reticlePosition,
   onMount,
   onMotionLookStatusChange,
+  onSprintingChange,
+  onVitalsChange,
+  onWeaponStateChange,
 }: MahjongTableSceneProps): React.JSX.Element => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mountRef = useRef<MahjongTableMount | null>(null);
@@ -34,6 +42,9 @@ export const MahjongTableScene = ({
   const [sceneReady, setSceneReady] = useState(false);
   const onMountRef = useRef(onMount);
   const onMotionLookStatusChangeRef = useRef(onMotionLookStatusChange);
+  const onSprintingChangeRef = useRef(onSprintingChange);
+  const onVitalsChangeRef = useRef(onVitalsChange);
+  const onWeaponStateChangeRef = useRef(onWeaponStateChange);
   const onExplorationAreaChangeRef = useRef(onExplorationAreaChange);
   const debugRef = useRef(debug);
   const viewRef = useRef(view);
@@ -41,6 +52,9 @@ export const MahjongTableScene = ({
   const appliedViewRef = useRef<SceneView | null>(null);
   onMountRef.current = onMount;
   onMotionLookStatusChangeRef.current = onMotionLookStatusChange;
+  onSprintingChangeRef.current = onSprintingChange;
+  onVitalsChangeRef.current = onVitalsChange;
+  onWeaponStateChangeRef.current = onWeaponStateChange;
   onExplorationAreaChangeRef.current = onExplorationAreaChange;
   debugRef.current = debug;
   viewRef.current = view;
@@ -68,9 +82,12 @@ export const MahjongTableScene = ({
           debug: debugRef.current,
           onExplorationAreaChange: (area) => onExplorationAreaChangeRef.current?.(area),
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
+          onSprintingChange: (sprinting) => onSprintingChangeRef.current?.(sprinting),
+          onVitalsChange: (vitals) => onVitalsChangeRef.current?.(vitals),
+          onWeaponStateChange: (state) => onWeaponStateChangeRef.current?.(state),
           onReady: () => setSceneReady(true),
           roomSeed: roomSeedRef.current,
-          reticlePosition,
+          ...(reticlePosition === undefined ? {} : { reticlePosition }),
         });
         appliedViewRef.current = viewRef.current;
         mountRef.current = mount;
