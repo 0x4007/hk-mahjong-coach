@@ -949,15 +949,22 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 ## 2026-08-06 — Pooled barrel smoke
 
 - Added a deterministic, fixed-budget smoke presentation to each held weapon. A shared procedural 64×64 alpha mask
-  drives 16 pooled billboards; trigger pulls emit bright white muzzle puffs whose size and count scale from total
-  damage per round (`damage × pellets`), while a separate thermal emitter follows the existing barrel heat ratio and
-  produces upward-curling wisps only above 35% heat. Puffs remain prominent for roughly ten seconds, with shotgun and
-  sniper rounds intentionally producing much larger clouds. The particle root lives in the scene world-effects root;
-  each spawn captures the muzzle's world position and diffuses upward/outward for roughly ten seconds, independent of
-  later camera movement or weapon switching.
-- Thermal smoke eases to a maximum rate of four particles per second at 80% heat. Particles use no shadows, collision,
-  or per-frame allocation, and their RNG stream is isolated from projectile spread. Pickup copies keep the red-hot
-  material response but do not create smoke emitters.
+  drives 192 pooled billboards; trigger pulls emit dense gray muzzle puffs whose size and count scale from total damage
+  per round (`damage × pellets`), while a separate pale-white thermal steam emitter follows the existing barrel heat
+  ratio and produces upward-curling wisps only above 35% heat. Thermal steam uses a restrained longest-barrel scale
+  ramp from 1× on the handgun to 1.6× on the sniper, while damage still makes high-power rounds larger. Puffs start at
+  zero opacity, use a normalized sigmoid fade-in, then rapidly expand with an ease-out logarithmic curve over the first
+  45% of the shared five-second lifetime, lingering at maximum size while transparent. Opacity follows the expansion from
+  bright source scale to transparent max scale. The plume inherits the muzzle's world velocity, then drags to a stop
+  while rising; shotgun and sniper rounds intentionally produce much larger clouds. The particle root lives in the scene
+  world-effects root; each spawn captures the muzzle's world position and diffuses upward/outward independent of later
+  camera movement or weapon switching.
+- Thermal smoke uses the same logarithmic expansion and inverse-opacity lifecycle as muzzle smoke, plus an inverse
+  barrel-size rate: about 6.4 wisps per second on the handgun down to the base four on the sniper. Its square-root
+  damage response keeps shotgun/sniper steam bounded, while heat still eases the rate in from 35% to full at 80%.
+  Particles use no shadows, collision, or per-frame allocation, and their RNG stream is isolated from projectile spread.
+  Pickup copies keep the red-hot
+  material response but do not create smoke emitters. Full red-hot barrel saturation cools completely within 30 seconds.
 - Validation: the server-owned test bus passed all 20 weapon-file assertions, including the new thermal-smoke curve
   regression; one unrelated dirty-lane `packages/test-fixtures/src/core-engine.test.ts` property failed with
   `STACK_TRACE_ERROR`. Web strict typecheck and production build passed. The explicit HMR request was sent while the
@@ -988,3 +995,12 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - The HMR agent test note now sits in the same layout stack as Player systems and follows the vitals panel in normal
   child flow. Its position therefore tracks the panel height instead of using an independent top-right overlay, with
   matching responsive and debug-panel placement.
+
+## 2026-08-06 — Crouch walking holds O₂ reserve
+
+- Crouch walking no longer drains or recovers O₂. Its movement contribution is zero, so the reserve stays unchanged
+  while the player moves; holding breath and other discrete O₂ costs remain independent.
+- The existing 0.5-second recovery delay after crouch walking stops remains in place. Updated the pure vitals
+  regression coverage and the visual-table oxygen documentation.
+- Validation: the server-owned test bus passed all 427 assertions, strict typecheck, targeted ESLint, Prettier,
+  production build, `git diff --check`, and the explicit Vite HMR request. Browser interaction was not opened.

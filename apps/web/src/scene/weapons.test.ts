@@ -21,6 +21,7 @@ import {
   WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND,
   WEAPON_BARREL_HEAT_COOLDOWN_SECONDS,
   WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD,
+  WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS,
   WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO,
   WEAPON_BARREL_SMOKE_START_HEAT_RATIO,
   WEAPON_PICKUP_RANGE_METERS,
@@ -313,16 +314,17 @@ describe("shot effect lifetimes", () => {
 describe("damage-driven barrel heat", () => {
   it("uses hit damage, reaches red-hot at 500, and cools linearly", () => {
     expect(WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD).toBe(500);
-    expect(WEAPON_BARREL_HEAT_COOLDOWN_SECONDS).toBe(50);
-    expect(WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND).toBe(10);
+    expect(WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS).toBe(30);
+    expect(WEAPON_BARREL_HEAT_COOLDOWN_SECONDS).toBe(30);
+    expect(WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND).toBeCloseTo(500 / 30, 8);
 
     expect(resolveWeaponBarrelHeatDamage(0, 500)).toBe(500);
     expect(resolveWeaponBarrelHeatRatio(500)).toBe(1);
     expect(resolveWeaponBarrelHeatRatio(250)).toBeCloseTo(0.5, 8);
-    expect(resolveWeaponBarrelCooldownSeconds(100)).toBeCloseTo(10, 8);
-    expect(resolveWeaponBarrelCooldownSeconds(600)).toBeCloseTo(60, 8);
+    expect(resolveWeaponBarrelCooldownSeconds(100)).toBeCloseTo(6, 8);
+    expect(resolveWeaponBarrelCooldownSeconds(600)).toBeCloseTo(36, 8);
     expect(resolveWeaponBarrelHeatDamage(250, 0, 25)).toBeCloseTo(0, 8);
-    expect(resolveWeaponBarrelHeatDamage(500, 0, 30)).toBeCloseTo(200, 8);
+    expect(resolveWeaponBarrelHeatDamage(500, 0, 30)).toBeCloseTo(0, 8);
   });
 
   it("adds each hit pellet's damage while misses add nothing", () => {

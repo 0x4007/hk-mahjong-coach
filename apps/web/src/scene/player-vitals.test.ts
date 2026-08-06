@@ -5,7 +5,6 @@ import {
   PLAYER_MAX_O2,
   PLAYER_MAX_SHIELD,
   O2_CROUCHED_RECOVERY_PER_SECOND,
-  O2_CROUCH_WALK_DRAIN_PER_SECOND,
   O2_CROUCH_WALK_RECOVERY_DELAY_SECONDS,
   O2_HOLD_BREATH_ACTION_COST,
   O2_HOLD_BREATH_DRAIN_PER_SECOND,
@@ -95,7 +94,7 @@ describe("player vitals model", () => {
     expect(crouched.o2).toBeCloseTo(50 + O2_CROUCHED_RECOVERY_PER_SECOND, 8);
   });
 
-  it("taxes sprinting and crouch walking at their thirty- and sixty-second rates", () => {
+  it("taxes sprinting but keeps crouch-walking oxygen flat", () => {
     const sprinted = tickPlayerVitals(createPlayerVitals(), 1, {
       exerciseIntensity: 1,
       sprinting: true,
@@ -107,16 +106,19 @@ describe("player vitals model", () => {
     });
 
     expect(sprinted.o2).toBeCloseTo(PLAYER_MAX_O2 - O2_SPRINT_DRAIN_PER_SECOND, 8);
-    expect(crouchWalking.o2).toBeCloseTo(PLAYER_MAX_O2 - O2_CROUCH_WALK_DRAIN_PER_SECOND, 8);
+    expect(crouchWalking.o2).toBe(PLAYER_MAX_O2);
   });
 
-  it("taxes crouch walking at its slower sixty-second rate", () => {
-    const crouchWalking = tickPlayerVitals(createPlayerVitals(), 1, {
+  it("does not recharge while crouch walking", () => {
+    const depleted = applyPlayerO2Cost(createPlayerVitals(), 50);
+    const crouchWalking = tickPlayerVitals(depleted, 5, {
       exerciseIntensity: 1,
       crouchWalking: true,
+      crouched: true,
     });
 
-    expect(crouchWalking.o2).toBeCloseTo(PLAYER_MAX_O2 - O2_CROUCH_WALK_DRAIN_PER_SECOND, 8);
+    expect(crouchWalking.o2).toBe(depleted.o2);
+    expect(crouchWalking.oxygenRecoveryDelaySeconds).toBe(O2_CROUCH_WALK_RECOVERY_DELAY_SECONDS);
   });
 
   it("keeps oxygen flat at the derived neutral jog speed", () => {

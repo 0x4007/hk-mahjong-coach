@@ -3932,6 +3932,7 @@ const addLabel = (
 
 interface WeaponBarrelResources {
   readonly mesh: THREE.Mesh;
+  readonly length: number;
   readonly material: THREE.MeshStandardMaterial;
   readonly baseColor: THREE.Color;
   readonly baseEmissive: THREE.Color;
@@ -3949,6 +3950,7 @@ interface WeaponSmokeParticle {
   endScale: number;
   startOpacity: number;
   riseAcceleration: number;
+  velocityDrag: number;
   spin: number;
   active: boolean;
 }
@@ -3957,8 +3959,13 @@ interface WeaponModelResources {
   readonly root: THREE.Group;
   readonly muzzleFlash: THREE.Mesh;
   readonly barrels: readonly WeaponBarrelResources[];
+  readonly hotBarrelLength: number;
   readonly muzzleSmokeRoot: THREE.Group | null;
   readonly smokeParticles: readonly WeaponSmokeParticle[];
+  readonly muzzleWorldPosition: THREE.Vector3;
+  readonly muzzleWorldVelocity: THREE.Vector3;
+  readonly muzzleWorldForward: THREE.Vector3;
+  muzzleWorldFrameInitialized: boolean;
   readonly scopeLensAnchor: THREE.Object3D | null;
   readonly scopeLensRadius: number;
 }
@@ -4018,6 +4025,34 @@ const WEAPON_BLACK = 0x050607;
 const WEAPON_BARREL_HEAT_COLOR = new THREE.Color(0xff3518);
 const WEAPON_BARREL_HEAT_EMISSIVE = new THREE.Color(0xff1600);
 const WEAPON_BARREL_HEAT_EMISSIVE_INTENSITY = 1;
+/** Muzzle and thermal smoke fade in quickly, then expand into a transparent linger. */
+const WEAPON_SMOKE_FADE_IN_SECONDS = 0.24;
+const WEAPON_SMOKE_LIFETIME_SECONDS = 5;
+const WEAPON_SMOKE_SIGMOID_STEEPNESS = 10;
+const WEAPON_SMOKE_SIGMOID_START = 1 / (1 + Math.exp(WEAPON_SMOKE_SIGMOID_STEEPNESS / 2));
+const WEAPON_SMOKE_SIGMOID_END = 1 / (1 + Math.exp(-WEAPON_SMOKE_SIGMOID_STEEPNESS / 2));
+const WEAPON_SMOKE_SIGMOID_RANGE = WEAPON_SMOKE_SIGMOID_END - WEAPON_SMOKE_SIGMOID_START;
+const WEAPON_SMOKE_REFERENCE_BARREL_LENGTH = 0.34;
+const WEAPON_SMOKE_LONGEST_BARREL_LENGTH = 1.35;
+const WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE = 0.6;
+const WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION = 0.45;
+const WEAPON_MUZZLE_SMOKE_LOG_STRENGTH = 24;
+
+/** Normalize a logistic curve so its exact endpoints remain transparent/opaque. */
+const resolveNormalizedSigmoid = (progress: number): number => {
+  const clamped = THREE.MathUtils.clamp(Number.isFinite(progress) ? progress : 0, 0, 1);
+  const logistic = 1 / (1 + Math.exp(-WEAPON_SMOKE_SIGMOID_STEEPNESS * (clamped - 0.5)));
+  return (logistic - WEAPON_SMOKE_SIGMOID_START) / WEAPON_SMOKE_SIGMOID_RANGE;
+};
+
+/** Normalize an ease-out logarithmic expansion for rapid growth then a plateau. */
+const resolveNormalizedLogExpansion = (progress: number): number => {
+  const clamped = THREE.MathUtils.clamp(Number.isFinite(progress) ? progress : 0, 0, 1);
+  return (
+    Math.log1p(WEAPON_MUZZLE_SMOKE_LOG_STRENGTH * clamped) /
+    Math.log1p(WEAPON_MUZZLE_SMOKE_LOG_STRENGTH)
+  );
+};
 
 const addWeaponBox = (
   root: THREE.Group,
@@ -4056,6 +4091,7 @@ const addWeaponBarrel = (
   root.add(barrel);
   return {
     mesh: barrel,
+    length,
     material: barrelMaterial,
     baseColor: barrelMaterial.color.clone(),
     baseEmissive: barrelMaterial.emissive.clone(),
@@ -4141,12 +4177,12 @@ const createWeaponSmokeParticles = (
     const sprite = new THREE.Sprite(material);
     sprite.name = "WeaponBarrelSmokeParticle";
     sprite.visible = false;
-    // The pool is tiny, and world particles can move outside the camera
-    // frustum before their ten-second fade completes. Keep them eligible for
-    // the explicit lifetime path instead of letting frustum culling pop them.
+    // World particles can move outside the camera frustum before their
+    // ten-second fade completes. Keep them eligible for the explicit lifetime
+    // path instead of letting frustum culling pop them.
     sprite.frustumCulled = false;
     sprite.scale.setScalar(0.01);
-    sprite.userData = { weaponVisual: true, dofIgnore: true, weaponSmoke: true };
+    sprite.userData = { weaponVisual: true, weaponSmoke: true };
     root.add(sprite);
     particles.push({
       sprite,
@@ -4159,6 +4195,7 @@ const createWeaponSmokeParticles = (
       endScale: 0,
       startOpacity: 0,
       riseAcceleration: 0,
+      velocityDrag: 0,
       spin: 0,
       active: false,
     });
@@ -4325,7 +4362,7 @@ const createWeaponModel = (
     // runtime detaches this pool to the scene world before the first spawn;
     // every particle then receives an exact muzzle world position.
     muzzleSmokeRoot.position.set(0, 0.2, muzzleZ + 0.24);
-    muzzleSmokeRoot.userData = { weaponVisual: true, dofIgnore: true, weaponSmoke: true };
+    muzzleSmokeRoot.userData = { weaponVisual: true, weaponSmoke: true };
     root.add(muzzleSmokeRoot);
     smokeParticles = createWeaponSmokeParticles(muzzleSmokeRoot, smokeTexture);
   }
@@ -4333,8 +4370,13 @@ const createWeaponModel = (
     root,
     muzzleFlash,
     barrels,
+    hotBarrelLength: Math.max(...barrels.map((barrel) => barrel.length), 0),
     muzzleSmokeRoot,
     smokeParticles,
+    muzzleWorldPosition: new THREE.Vector3(),
+    muzzleWorldVelocity: new THREE.Vector3(),
+    muzzleWorldForward: new THREE.Vector3(0, 0, -1),
+    muzzleWorldFrameInitialized: false,
     scopeLensAnchor,
     scopeLensRadius,
   };
@@ -4390,6 +4432,16 @@ const createWeaponRuntime = (
   effectsRoot.name = "WeaponEffectsRoot";
   effectsRoot.userData = { dofIgnore: true, weaponVisual: true };
   scene.add(effectsRoot);
+  const worldSmokeRoot = new THREE.Group();
+  worldSmokeRoot.name = "WeaponWorldSmokeRoot";
+  // Ignore smoke for the local focus-ray target only. It remains a real
+  // depth-tested world occluder for every camera that renders the scene.
+  worldSmokeRoot.userData = {
+    weaponVisual: true,
+    weaponSmokeRoot: true,
+    dofIgnore: true,
+  };
+  scene.add(worldSmokeRoot);
   const weaponSmokeTexture = makeWeaponSmokeTexture();
   const bulletHoleRoot = new THREE.Group();
   bulletHoleRoot.name = "WeaponBulletHoleRoot";
@@ -4460,7 +4512,7 @@ const createWeaponRuntime = (
       model.muzzleSmokeRoot.position.set(0, 0, 0);
       model.muzzleSmokeRoot.rotation.set(0, 0, 0);
       model.muzzleSmokeRoot.scale.setScalar(1);
-      effectsRoot.add(model.muzzleSmokeRoot);
+      worldSmokeRoot.add(model.muzzleSmokeRoot);
     }
     model.root.position.set(
       CAMERA_VIEWMODEL_STANDING_OFFSET.x,
@@ -4536,7 +4588,6 @@ const createWeaponRuntime = (
   const lastPickupCheckPosition = new THREE.Vector3();
   const smokeWorldUp = new THREE.Vector3(0, 1, 0);
   const smokeMuzzleWorld = new THREE.Vector3();
-  const smokeForwardWorld = new THREE.Vector3();
   const smokeRightWorld = new THREE.Vector3();
   const smokeSpawnWorld = new THREE.Vector3();
   const smokeFallbackAxis = new THREE.Vector3(1, 0, 0);
@@ -4621,13 +4672,44 @@ const createWeaponRuntime = (
     const safeDamage = Number.isFinite(damagePerRound) ? Math.max(0, damagePerRound) : 0;
     return Math.max(0.45, safeDamage / 32);
   };
-  const updateWeaponSmokeWorldFrame = (model: WeaponModelResources): void => {
+  const resolveThermalSmokeBarrelLengthScale = (model: WeaponModelResources): number => {
+    const barrelLengthProgress = THREE.MathUtils.clamp(
+      (model.hotBarrelLength - WEAPON_SMOKE_REFERENCE_BARREL_LENGTH) /
+        (WEAPON_SMOKE_LONGEST_BARREL_LENGTH - WEAPON_SMOKE_REFERENCE_BARREL_LENGTH),
+      0,
+      1,
+    );
+    return 1 + barrelLengthProgress * WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE;
+  };
+  /** Keep short-barrel steam frequent while long-barrel steam stays large. */
+  const resolveThermalSmokeRate = (barrelLengthScale: number): number => {
+    const safeScale = THREE.MathUtils.clamp(
+      barrelLengthScale,
+      1,
+      1 + WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE,
+    );
+    const largestBarrelScale = 1 + WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE;
+    return (WEAPON_BARREL_SMOKE_MAX_RATE * largestBarrelScale) / safeScale;
+  };
+  const updateWeaponSmokeWorldFrame = (model: WeaponModelResources, deltaSeconds = 0): void => {
     model.root.updateMatrixWorld(true);
     model.muzzleFlash.getWorldPosition(smokeMuzzleWorld);
-    smokeForwardWorld.set(0, 0, -1).transformDirection(model.root.matrixWorld).normalize();
-    if (smokeForwardWorld.lengthSq() < 0.0001) {
-      smokeForwardWorld.set(0, 0, -1);
+    const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    if (model.muzzleWorldFrameInitialized && safeDelta > 0.0001) {
+      model.muzzleWorldVelocity
+        .copy(smokeMuzzleWorld)
+        .sub(model.muzzleWorldPosition)
+        .multiplyScalar(1 / safeDelta)
+        .clampLength(0, 30);
+    } else if (!model.muzzleWorldFrameInitialized) {
+      model.muzzleWorldVelocity.set(0, 0, 0);
     }
+    model.muzzleWorldPosition.copy(smokeMuzzleWorld);
+    model.muzzleWorldForward.set(0, 0, -1).transformDirection(model.root.matrixWorld).normalize();
+    if (model.muzzleWorldForward.lengthSq() < 0.0001) {
+      model.muzzleWorldForward.set(0, 0, -1);
+    }
+    model.muzzleWorldFrameInitialized = true;
   };
   const spawnWeaponSmoke = (
     model: WeaponModelResources,
@@ -4648,42 +4730,54 @@ const createWeaponRuntime = (
     }
     const random = (): number => smokeRandom.nextFloat();
     const safePower = Number.isFinite(smokePower) ? Math.max(0.45, smokePower) : 0.45;
-    const powerSpread = Math.min(3, safePower);
+    // Thermal size still follows round power, but its square-root response
+    // stops shotgun/sniper steam from dominating the room.
+    const powerForSmoke = thermal ? Math.sqrt(safePower) : safePower;
+    const thermalBarrelLengthScale = resolveThermalSmokeBarrelLengthScale(model);
+    const powerSpread = Math.min(3, powerForSmoke);
     const lateralSpread = (thermal ? 0.06 : 0.09) * (0.8 + powerSpread * 0.2);
     const concentratedSpread = lateralSpread * 0.24;
-    smokeRightWorld.crossVectors(smokeForwardWorld, smokeWorldUp);
+    smokeRightWorld.crossVectors(model.muzzleWorldForward, smokeWorldUp);
     if (smokeRightWorld.lengthSq() < 0.0001) {
-      smokeRightWorld.crossVectors(smokeForwardWorld, smokeFallbackAxis);
+      smokeRightWorld.crossVectors(model.muzzleWorldForward, smokeFallbackAxis);
     }
     smokeRightWorld.normalize();
     particle.active = true;
     particle.age = 0;
     // Keep the first frame dense at the captured muzzle point, then expand
-    // the billboard and push it outward for a ten-second diffusion fade.
-    particle.lifetime = thermal ? 9.6 + random() * 1.2 : 9.2 + random() * 1.6;
-    particle.startScale = (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) * safePower;
+    // the billboard and push it outward for a five-second diffusion fade.
+    particle.lifetime = WEAPON_SMOKE_LIFETIME_SECONDS;
+    const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 5;
+    particle.startScale =
+      (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) *
+      powerForSmoke *
+      smokeScaleMultiplier;
     particle.endScale =
       particle.startScale * (thermal ? 5.2 + random() * 1.6 : 4.8 + random() * 1.5);
-    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.86 + random() * 0.14;
+    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.94 + random() * 0.06;
     particle.riseAcceleration = thermal ? 0.1 + random() * 0.06 : 0.08 + random() * 0.06;
+    particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0.38 + random() * 0.12;
     particle.spin = (random() - 0.5) * (thermal ? 2.2 : 3.6);
     smokeSpawnWorld
-      .copy(smokeMuzzleWorld)
+      .copy(model.muzzleWorldPosition)
       .addScaledVector(smokeRightWorld, (random() - 0.5) * concentratedSpread)
       .addScaledVector(smokeWorldUp, (random() - 0.5) * concentratedSpread * 0.45)
-      .addScaledVector(smokeForwardWorld, random() * (thermal ? 0.025 : 0.045));
+      .addScaledVector(model.muzzleWorldForward, random() * (thermal ? 0.025 : 0.045));
     particle.sprite.position.copy(smokeSpawnWorld);
-    const outwardSpeed = (thermal ? 0.045 : 0.12) * (0.85 + powerSpread * 0.25);
+    const outwardSpeed = thermal ? 0.045 * (0.85 + powerSpread * 0.25) : 0.42 + powerSpread * 0.3;
     const upwardSpeed = (thermal ? 0.08 : 0.1) + random() * (thermal ? 0.08 : 0.12);
     particle.velocity
-      .copy(smokeForwardWorld)
-      .multiplyScalar(outwardSpeed)
+      .copy(model.muzzleWorldVelocity)
+      .addScaledVector(model.muzzleWorldForward, outwardSpeed)
       .addScaledVector(smokeRightWorld, (random() - 0.5) * lateralSpread)
       .addScaledVector(smokeWorldUp, upwardSpeed);
-    // White smoke is the muzzle-flash companion; the alpha mask supplies the
-    // soft edge so even the large shotgun and sniper plumes stay billowy.
-    particle.material.color.setHex(thermal ? 0xf1f4ef : 0xffffff);
-    particle.material.opacity = particle.startOpacity;
+    // The muzzle plume is dense gray; hot-barrel steam keeps its pale white
+    // material. The alpha mask supplies a soft edge while forward velocity
+    // makes the muzzle cloud expand along the firing direction.
+    particle.material.color.setHex(thermal ? 0xf1f4ef : 0x7f8985);
+    // Begin fully transparent so overlapping shot puffs build into a cloud
+    // without a visible sprite pop on the spawn frame.
+    particle.material.opacity = 0;
     particle.sprite.rotation.set(0, 0, random() * Math.PI * 2);
     particle.sprite.scale.set(
       particle.startScale,
@@ -4703,14 +4797,16 @@ const createWeaponRuntime = (
     }
     const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
     if (emitThermal) {
-      updateWeaponSmokeWorldFrame(model);
+      updateWeaponSmokeWorldFrame(model, safeDelta);
       const heatDamage = barrelHeatDamage.get(weapon) ?? 0;
       const heatRatio = resolveWeaponBarrelHeatRatio(heatDamage);
       const thermalRatio = resolveWeaponBarrelSmokeRatio(heatRatio);
       const smokePower = resolveWeaponSmokePower(WEAPON_DEFINITIONS[weapon].totalDamagePerShot);
-      smokeSpawnAccumulator += safeDelta * WEAPON_BARREL_SMOKE_MAX_RATE * thermalRatio;
+      const thermalBarrelLengthScale = resolveThermalSmokeBarrelLengthScale(model);
+      const thermalSmokeRate = resolveThermalSmokeRate(thermalBarrelLengthScale);
+      smokeSpawnAccumulator += safeDelta * thermalSmokeRate * thermalRatio;
       let thermalSpawns = 0;
-      while (smokeSpawnAccumulator >= 1 && thermalSpawns < 2) {
+      while (smokeSpawnAccumulator >= 1 && thermalSpawns < 4) {
         smokeSpawnAccumulator -= 1;
         spawnWeaponSmoke(model, true, smokePower);
         thermalSpawns += 1;
@@ -4725,6 +4821,9 @@ const createWeaponRuntime = (
       }
       particle.age += safeDelta;
       const progress = Math.min(1, particle.age / Math.max(0.001, particle.lifetime));
+      // Inherit the moving muzzle's world velocity, then damp all motion so
+      // the plume gradually stops travelling forward while hot lift remains.
+      particle.velocity.multiplyScalar(Math.exp(-particle.velocityDrag * safeDelta));
       particle.velocity.y += particle.riseAcceleration * safeDelta;
       particle.sprite.position.addScaledVector(particle.velocity, safeDelta);
       particle.sprite.position.x +=
@@ -4732,10 +4831,24 @@ const createWeaponRuntime = (
       particle.sprite.position.z +=
         Math.cos(particle.phase + particle.age * 3.4) * 0.008 * safeDelta;
       particle.sprite.rotation.z += particle.spin * safeDelta;
-      const easedProgress = progress * progress * (3 - 2 * progress);
-      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, easedProgress);
-      particle.sprite.scale.set(scale, scale * (0.84 + easedProgress * 0.26), 1);
-      particle.material.opacity = particle.startOpacity * (1 - progress) ** 1.25;
+      const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
+      const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
+      const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
+      const muzzleExpansionProgress = Math.min(
+        1,
+        Math.max(
+          0,
+          (particle.age - fadeInDuration) /
+            (Math.max(0.001, particle.lifetime - fadeInDuration) *
+              WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
+        ),
+      );
+      const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
+      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
+      particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
+      // Both plumes follow their expansion: bright at source scale, then
+      // transparent while the max-size cloud lingers.
+      particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
       if (progress >= 1) {
         particle.active = false;
         particle.sprite.visible = false;
@@ -5186,11 +5299,16 @@ const createWeaponRuntime = (
     const baseDirection = latestAimRay.direction.clone().normalize();
     const viewModel = viewModels.get(activeWeapon);
     if (viewModel !== undefined) {
-      updateWeaponSmokeWorldFrame(viewModel);
+      updateWeaponSmokeWorldFrame(viewModel, 0);
       viewModel.muzzleFlash.visible = true;
       viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
       const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
-      const puffCount = Math.min(8, Math.max(3, Math.ceil(definition.totalDamagePerShot / 24)));
+      const puffCount = Math.min(
+        WEAPON_BARREL_SMOKE_POOL_SIZE,
+        // Each puff is now five times larger, so one machine-gun sprite per
+        // shot is enough while shotgun and sniper damage still add puffs.
+        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
+      );
       for (let puff = 0; puff < puffCount; puff += 1) {
         spawnWeaponSmoke(viewModel, false, smokePower);
       }
@@ -5475,6 +5593,7 @@ const createWeaponRuntime = (
   const dispose = (): void => {
     pickupRoot.removeFromParent();
     effectsRoot.removeFromParent();
+    worldSmokeRoot.removeFromParent();
     bulletHoleRoot.removeFromParent();
     for (const model of viewModels.values()) {
       resetWeaponSmoke(model);
@@ -5483,6 +5602,7 @@ const createWeaponRuntime = (
     }
     disposeObject(pickupRoot);
     disposeObject(effectsRoot);
+    disposeObject(worldSmokeRoot);
     disposeObject(bulletHoleRoot);
     weaponSmokeTexture.dispose();
     effects.length = 0;

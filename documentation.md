@@ -351,12 +351,11 @@ Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
 The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
 `apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
-Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking drains 1.67
-(about 60 seconds). A full jump and each transition from crouch to standing costs 5 points, so roughly 20
+Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking keeps the reserve flat and does not recharge it while movement is active. A full jump and each transition from crouch to standing costs 5 points, so roughly 20
 consecutive full jumps empty the reserve.
 
-Sprint recovery waits 1.5 seconds, crouch-walk recovery waits 0.5 seconds, and jump recovery waits 0.25
-seconds. The delay is stored in the pure state and recovery is integrated for the exact portion of a frame
+Sprint recovery waits 1.5 seconds, recovery after crouch walking waits 0.5 seconds, and jump recovery waits 0.25
+seconds. These delays are stored in the pure state and recovery is integrated for the exact portion of a frame
 after it expires. The browser publishes the rounded reserve as `data-player-o2` and renders it as a third
 HUD bar.
 
@@ -756,25 +755,32 @@ heat, using the weapon's per-bullet damage; a shotgun therefore adds one pellet'
 Misses do not heat the barrel. At 500 accumulated damage units the barrel reaches the full red-hot red/emissive blend,
 with the material emissive intensity capped at `1`.
 
-The barrel cools at a constant `10` damage units per second. The cooldown is therefore linear: 100 damage units take
-10 seconds, while 600 damage units take 60 seconds. The 500-damage red-hot threshold itself takes 50 seconds to cool.
-Cooling continues while the weapon is holstered or another weapon is equipped. Both the held view model and world
-pickup copies use the same weapon heat state.
+The barrel cools at a constant `16.67` damage units per second. The cooldown is therefore linear: 100 damage units take
+6 seconds, while 600 damage units take 36 seconds. The 500-damage red-hot threshold itself takes a maximum of 30
+seconds to cool. Cooling continues while the weapon is holstered or another weapon is equipped. Both the held view model
+and world pickup copies use the same weapon heat state.
 
 ## Pooled barrel smoke
 
-Each held weapon now owns a fixed pool of 16 billboard smoke sprites and one shared 64×64 procedural alpha mask.
-Every trigger pull emits a bright white muzzle puff even when the shot misses. Puff size and count use the round's
+Each held weapon now owns a fixed pool of 192 billboard smoke sprites and one shared 64×64 procedural alpha mask.
+Every trigger pull emits a dense gray muzzle puff even when the shot misses. Puff size and count use the round's
 total damage (`damage × pellets`), so the shotgun and sniper produce much larger clouds than the machine gun. Each
-puff stays concentrated at its captured muzzle position, diffuses outward, and remains prominent for roughly ten
-seconds before it is returned to the pool. Thermal wisps use the same normalized barrel heat ratio as the red-hot
-material: they begin at 35% heat, reach their full four-sprites-per-second rate at 80% heat, rise with a small
-deterministic curl, expand, and fade without collision or shadow work. The pool is attached to the scene world effects
-root, so smoke remains in place when the player turns, walks, holsters, or switches weapons.
+puff starts at zero opacity, follows a normalized sigmoid fade-in, then rapidly expands with an ease-out logarithmic curve
+over the first 45% of its five-second life and lingers at maximum size for the remainder. Thermal steam uses the same
+five-second lifetime. Opacity follows that expansion:
+source-sized smoke is bright, while the max-size linger is transparent. The plume inherits the nozzle's current world
+velocity, diffuses outward, then slows while rising before it is returned to the pool. Thermal wisps use the pale white
+steam color, scale with a restrained longest-barrel ramp (1× on the handgun to 1.6× on the sniper), and emit at an
+inverse rate (about 6.4 wisps/second on the handgun to 4 on the sniper). They use the same logarithmic expansion and
+inverse-opacity lifecycle as muzzle smoke, with a square-root damage response to avoid oversized shotgun/sniper steam.
+The heat ratio still eases in from 35%; wisps rise with a small deterministic curl, expand, and fade without collision or
+shadow work. The pool is attached to the scene world effects root, so smoke remains in place when the player turns,
+walks, holsters, or switches weapons.
 
-Smoke is presentation-only and follows the camera-held weapon model, so it inherits the centralized camera motion and
-retains the existing near-view Bokeh exclusion. Smoke variation uses the room-seeded RNG stream
-`<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel heat but do not emit smoke.
+Smoke is a rendered world effect. The held muzzle samples the centralized camera/viewmodel pose at spawn, then the
+particle continues in world space with depth testing and normal Bokeh participation. Smoke variation uses the
+room-seeded RNG stream `<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel heat but do not
+emit smoke.
 
 ## Agent test note layout
 

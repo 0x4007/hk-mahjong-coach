@@ -33,20 +33,22 @@ export const WEAPON_BULLET_HOLE_MAX_COUNT = 256;
 
 /** Damage payload that makes a barrel fully red hot. */
 export const WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD = 500;
+/** Full red-hot saturation cools back to ambient within thirty seconds. */
+export const WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS = 30;
 /** Linear cooling rate shared by every weapon barrel. */
-export const WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND = 10;
+export const WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND =
+  WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD / WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS;
 /** Cooling time for the full red-hot threshold at the shared linear rate. */
-export const WEAPON_BARREL_HEAT_COOLDOWN_SECONDS =
-  WEAPON_BARREL_HEAT_DAMAGE_THRESHOLD / WEAPON_BARREL_HEAT_COOLDOWN_DAMAGE_PER_SECOND;
+export const WEAPON_BARREL_HEAT_COOLDOWN_SECONDS = WEAPON_BARREL_HEAT_MAX_SATURATION_SECONDS;
 
 /** Heat band in which a barrel begins to produce a visible thermal wisp. */
 export const WEAPON_BARREL_SMOKE_START_HEAT_RATIO = 0.35;
 /** Heat band at which the thermal wisp emitter reaches its full rate. */
 export const WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO = 0.8;
-/** Maximum number of pooled thermal wisps emitted per second by one held gun. */
+/** Base thermal-wisp rate for the longest heated barrel; shorter barrels emit more often. */
 export const WEAPON_BARREL_SMOKE_MAX_RATE = 4;
 /** Fixed sprite budget for a held weapon's shot and thermal smoke. */
-export const WEAPON_BARREL_SMOKE_POOL_SIZE = 16;
+export const WEAPON_BARREL_SMOKE_POOL_SIZE = 192;
 
 /**
  * Resolve a barrel's remaining heat load after one hit and one elapsed-time

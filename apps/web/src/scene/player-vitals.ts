@@ -50,12 +50,6 @@ export const O2_MINI_HOP_SPEED_BLEND =
 /** Oxygen spent by standing up from a crouch. */
 export const O2_STAND_COST = PLAYER_MAX_O2 * 0.05;
 
-/** Target full-speed crouch-walk duration from a full oxygen pool. */
-export const O2_CROUCH_WALK_DURATION_SECONDS = 60;
-
-/** Oxygen used per second at full crouch-walk speed. */
-export const O2_CROUCH_WALK_DRAIN_PER_SECOND = PLAYER_MAX_O2 / O2_CROUCH_WALK_DURATION_SECONDS;
-
 /** Delay before recovery starts after sprinting stops. */
 export const O2_SPRINT_RECOVERY_DELAY_SECONDS = 1.5;
 
@@ -368,21 +362,20 @@ export const tickPlayerVitals = (
     ? standingLocomotionDrain
     : sprinting
       ? exerciseIntensity * O2_SPRINT_DRAIN_PER_SECOND * delta
-      : crouchWalking
-        ? exerciseIntensity * O2_CROUCH_WALK_DRAIN_PER_SECOND * delta
-        : 0;
+      : 0;
   const recoveryRate = crouched
     ? O2_CROUCHED_RECOVERY_PER_SECOND
     : walking
       ? O2_WALKING_RECOVERY_PER_SECOND
       : O2_IDLE_RECOVERY_PER_SECOND;
-  const oxygenRecovery = holdingBreath
-    ? 0
-    : hasLocomotionTelemetry
-      ? standingLocomotionRecovery
-      : movementDrain > 0
-        ? 0
-        : recoveryRate * recoverySeconds;
+  const oxygenRecovery =
+    holdingBreath || crouchWalking
+      ? 0
+      : hasLocomotionTelemetry
+        ? standingLocomotionRecovery
+        : movementDrain > 0
+          ? 0
+          : recoveryRate * recoverySeconds;
   const o2 = Math.min(
     PLAYER_MAX_O2,
     Math.max(0, state.o2 - holdBreathDrain - movementDrain + oxygenRecovery),
