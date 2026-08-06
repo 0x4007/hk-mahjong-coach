@@ -672,14 +672,8 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   near ironsights can blur while the distant world stays comparatively sharp without an ADS-specific state.
 - Added focused regressions for near-depth monotonicity, zero blur on the focus plane, and reduced far-depth defocus.
 - The experiment was checkpointed at `534f04b` and then disabled after the existing Vite lane showed excessive whole-world
-  blur during zoom on the source branch. The source branch keeps the stock renderer; this isolated rebased branch
-  re-enables the physical shader without adding a separate ADS-specific state.
-- The existing Vite lane received `pnpm hmr "Experiment: compare physical near-field blur at 0.25m, 0.5m, 2m, and distant focus; keep far world sharp"`.
-- Recalibrated the same global shader in the isolated experiment lane: physical CoC now maps through the eye focal
-  length, camera FOV, and the existing normalized posture-strength slider. Near viewmodel geometry can therefore blur
-  strongly while a distant gaze target stays sharp; no weapon-name or sniper/ADS condition was added.
-- Focused format, strict typecheck, and the web production build pass in this lane. Browser/HMR proof is pending because
-  the only running Vite/browser lane belongs to the separate dirty checkout.
+  blur during zoom. The active renderer is back on the prior stock Bokeh depth response; the physical experiment itself
+  does not add a separate ADS-specific shader state.
 
 ## 2026-08-06 — Presentation-driven projectile spread
 

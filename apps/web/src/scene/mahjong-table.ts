@@ -1248,7 +1248,6 @@ export const RETICLE_DOT_MOTION_MULTIPLIER = 5;
 // scene is authored in metre-like units, so photographic distances map
 // directly to the table and room scale below.
 const HUMAN_EYE_FOCAL_LENGTH_MM = 17;
-const HUMAN_EYE_FOCAL_LENGTH_METERS = HUMAN_EYE_FOCAL_LENGTH_MM / 1000;
 const HUMAN_EYE_CIRCLE_OF_CONFUSION_MM =
   HUMAN_EYE_FOCAL_LENGTH_MM * Math.tan((1 / 60) * (Math.PI / 180));
 const HUMAN_EYE_REFERENCE_PUPIL_MM = 4;
@@ -1262,12 +1261,11 @@ const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
       HUMAN_EYE_CIRCLE_OF_CONFUSION_MM) /
     1000 +
   HUMAN_EYE_FOCAL_LENGTH_MM / 1000;
-// The shader converts the physical circle of confusion (metres) into a
-// normalized screen radius by dividing by the eye focal length. The runtime
-// then applies camera-FOV and global posture-strength normalization; no weapon
-// or ADS branch changes this response.
-const BOKEH_COC_TO_BLUR_PER_STRENGTH = 1 / HUMAN_EYE_FOCAL_LENGTH_METERS;
-const BOKEH_BASE_MAX_BLUR = 0.05;
+// Keep ordinary table views legible while still allowing a close tile to
+// separate from the room. This is intentionally gentler than a cinematic
+// portrait treatment.
+const BOKEH_BASE_APERTURE = 0.00095;
+const BOKEH_BASE_MAX_BLUR = 0.003;
 const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
 /** Debug-only multiplier cap; zoom mode uses the full available range. */
 export const DEBUG_BOKEH_STRENGTH_MAX = 25;
@@ -1281,23 +1279,6 @@ export const ZOOMED_DOF_INTENSITY = 25;
  */
 export const resolveDofIntensityForPosture = (_isCrouched: boolean, isZoomed = false): number =>
   isZoomed ? ZOOMED_DOF_INTENSITY : STANDING_DOF_INTENSITY;
-const BOKEH_REFERENCE_STRENGTH = STANDING_DOF_INTENSITY;
-
-/** Resolve the default depth-of-field multiplier for the player's posture. */
-export const resolveDofIntensityForPosture = (isCrouched: boolean): number =>
-  isCrouched ? CROUCHING_DOF_INTENSITY : STANDING_DOF_INTENSITY;
-
-/** Normalize the existing global DoF slider around its standing calibration. */
-export const resolveHumanEyeBokehStrengthScale = (strength: number): number => {
-  const safeStrength = Number.isFinite(strength) ? Math.max(0, strength) : BOKEH_REFERENCE_STRENGTH;
-  return safeStrength / BOKEH_REFERENCE_STRENGTH;
-};
-
-/** Convert camera vertical FOV into a projection-normalized blur scale. */
-export const resolveHumanEyeBokehProjectionScale = (fovDegrees: number): number => {
-  const safeFov = Number.isFinite(fovDegrees) ? THREE.MathUtils.clamp(fovDegrees, 1, 179) : 90;
-  return 1 / Math.tan(THREE.MathUtils.degToRad(safeFov) * 0.5);
-};
 // Practical calibration points from the focus-lab pass: at the reference 4 mm
 // pupil, 6 m reads as effectively sharp and 2.5 m retains roughly one quarter
 // of the close-focus blur. Other pupil sizes scale this cutoff with dilation.
@@ -2785,35 +2766,6 @@ export const resolveFocusAccommodationDamping = (
     ? BOKEH_NEAR_ACCOMMODATION_DAMPING
     : BOKEH_FAR_ACCOMMODATION_DAMPING;
 
-/**
- * Resolve the physical circle of confusion for a scene-space depth.
- *
- * Distances are expressed in metres and the returned circle is in millimetres
- * so the helper can be inspected directly in the focus calibration tests. The
- * reciprocal object-distance term is intentional: blur grows rapidly as an
- * object approaches the eye instead of changing linearly with distance.
- */
-export const resolveHumanEyeCircleOfConfusion = (
-  objectDistance: number,
-  focusDistance: number,
-  pupilDiameterMm: number,
-): number => {
-  const safeObjectDistance = Number.isFinite(objectDistance) ? Math.max(0.05, objectDistance) : 12;
-  const safeFocusDistance = Number.isFinite(focusDistance) ? Math.max(0.05, focusDistance) : 12;
-  const safePupilDiameterMm = Number.isFinite(pupilDiameterMm)
-    ? THREE.MathUtils.clamp(pupilDiameterMm, HUMAN_EYE_BRIGHT_PUPIL_MM, HUMAN_EYE_DARK_PUPIL_MM)
-    : HUMAN_EYE_REFERENCE_PUPIL_MM;
-  const focalLengthMeters = HUMAN_EYE_FOCAL_LENGTH_METERS;
-  const pupilDiameterMeters = safePupilDiameterMm / 1000;
-  const denominator =
-    safeObjectDistance * Math.max(safeFocusDistance - focalLengthMeters, focalLengthMeters);
-  return (
-    ((pupilDiameterMeters * focalLengthMeters * Math.abs(safeObjectDistance - safeFocusDistance)) /
-      denominator) *
-    1000
-  );
-};
-
 /** Resolve restrained scene-space bokeh from eye focus and pupil size. */
 export const resolveHumanEyeBokeh = (
   focusDistance: number,
@@ -2836,8 +2788,8 @@ export const resolveHumanEyeBokeh = (
   return {
     hyperfocalDistance,
     intensity,
-    aperture: BOKEH_COC_TO_BLUR_PER_STRENGTH,
-    maxBlur: BOKEH_BASE_MAX_BLUR * pupilScale,
+    aperture: BOKEH_BASE_APERTURE * pupilScale * intensity,
+    maxBlur: BOKEH_BASE_MAX_BLUR * pupilScale * intensity,
   };
 };
 
@@ -7724,7 +7676,6 @@ const SKY_SUN_DISTANCE = 10;
 // inside the seat camera's sky band instead of clipping against the viewport edge.
 const SKY_SUN_REFERENCE_ELEVATION_OFFSET = 0.42;
 
-/** Exclude presentation overlays from choosing gaze focus; depth pass participation is unchanged. */
 const isDofIgnored = (object: THREE.Object3D): boolean => {
   let current: THREE.Object3D | null = object;
   while (current !== null) {
@@ -7745,39 +7696,6 @@ const isDofFocusTarget = (object: THREE.Object3D): boolean => {
     current = current.parent;
   }
   return false;
-};
-
-/** Replace the stock linear depth delta with a thin-lens eye CoC response. */
-const configureHumanEyeBokehShader = (bokehPass: BokehPass): void => {
-  const material = bokehPass.materialBokeh;
-  const apertureDeclaration =
-    "uniform float aperture; // aperture - bigger values for shallower depth of field";
-  const factorExpression =
-    "float factor = ( focus + viewZ ); // viewZ is <= 0, so this is a difference equation";
-  const blurExpression = "vec2 dofblur = vec2 ( clamp( factor * aperture, -maxblur, maxblur ) );";
-  if (
-    !material.fragmentShader.includes(apertureDeclaration) ||
-    !material.fragmentShader.includes(factorExpression) ||
-    !material.fragmentShader.includes(blurExpression)
-  ) {
-    throw new Error("Three.js BokehShader changed; eye CoC calibration cannot be installed");
-  }
-  material.uniforms.eyeFocalLength = {
-    value: HUMAN_EYE_FOCAL_LENGTH_MM / 1000,
-  };
-  material.uniforms.eyePupilDiameter = {
-    value: HUMAN_EYE_REFERENCE_PUPIL_MM / 1000,
-  };
-  material.fragmentShader = material.fragmentShader
-    .replace(
-      apertureDeclaration,
-      `${apertureDeclaration}\n\n\t\tuniform float eyeFocalLength;\n\t\tuniform float eyePupilDiameter;`,
-    )
-    .replace(
-      `${factorExpression}\n\n\t\tvec2 dofblur = vec2 ( clamp( factor * aperture, -maxblur, maxblur ) );`,
-      `${factorExpression}\n\n\t\tfloat objectDistance = max( -viewZ, nearClip );\n\t\tfloat focusDistance = max( focus, nearClip );\n\t\tfloat lensDenominator = max( focusDistance - eyeFocalLength, eyeFocalLength );\n\t\tfloat signedCircleOfConfusion =\n\t\t\t( factor * eyePupilDiameter * eyeFocalLength ) /\n\t\t\t( objectDistance * lensDenominator );\n\n\t\tvec2 dofblur = vec2( clamp( signedCircleOfConfusion * aperture, -maxblur, maxblur ) );`,
-    );
-  material.needsUpdate = true;
 };
 
 const setCameraPreset = (
@@ -7940,7 +7858,6 @@ export const createMahjongTableScene = (
     aperture: initialBokeh.aperture,
     maxblur: initialBokeh.maxBlur,
   });
-  configureHumanEyeBokehShader(bokehPass);
   // Keep adaptive/medium rendering inexpensive enough for software WebGL and
   // mobile GPUs. High quality retains the visual treatment, and debug can
   // enable it explicitly on a stronger device.
@@ -10849,23 +10766,17 @@ export const createMahjongTableScene = (
     );
     const bokeh = resolveHumanEyeBokeh(focusDistance, pupilDiameterMm);
     bokehIntensity = bokeh.intensity * debugBokehStrength;
-    const bokehStrengthScale = resolveHumanEyeBokehStrengthScale(debugBokehStrength);
-    const bokehProjectionScale = resolveHumanEyeBokehProjectionScale(camera.fov);
     const focusUniform = bokehPass.materialBokeh.uniforms.focus;
     if (focusUniform !== undefined) {
       focusUniform.value = focusDistance;
     }
-    const pupilUniform = bokehPass.materialBokeh.uniforms.eyePupilDiameter;
-    if (pupilUniform !== undefined) {
-      pupilUniform.value = pupilDiameterMm / 1000;
-    }
     const apertureUniform = bokehPass.materialBokeh.uniforms.aperture;
     const maxBlurUniform = bokehPass.materialBokeh.uniforms.maxblur;
     if (apertureUniform !== undefined) {
-      apertureUniform.value = bokeh.aperture * bokehProjectionScale * bokehStrengthScale;
+      apertureUniform.value = bokeh.aperture * debugBokehStrength;
     }
     if (maxBlurUniform !== undefined) {
-      maxBlurUniform.value = bokeh.maxBlur * bokehStrengthScale;
+      maxBlurUniform.value = bokeh.maxBlur * debugBokehStrength;
     }
     if (debugBoundsVisible) {
       const boundsRoot = getDebugBoundsRoot();
