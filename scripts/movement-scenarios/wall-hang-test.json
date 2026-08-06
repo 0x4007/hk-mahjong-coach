@@ -1,0 +1,27 @@
+{
+  "name": "wall-hang-test",
+  "description": "Test wall hang and climb up a tall wall.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 10,
+  "start": {
+    "position": [0, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 2, -4],
+      "halfExtents": [0.5, 2, 0.5]
+    }
+  ],
+  "frames": [
+    { "duration": 0.6, "forward": 1, "sprint": true, "label": "run-to-wall" },
+    { "duration": 0.6, "forward": 1, "label": "climb-while-hanging" }
+  ]
+}

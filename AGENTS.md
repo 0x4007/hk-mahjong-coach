@@ -34,3 +34,11 @@
 - Prioritize engine, scoring, persistence, protocol, and teaching correctness over animation.
 - Do not add online multiplayer, wagering, Japanese rules, or cloud accounts.
 - Do not leave critical-path placeholders, mocked core behavior, disabled tests, or empty screens.
+
+## Visual-table HMR
+
+- After completing a visual-table feature or a batch of scene edits, run `pnpm hmr` from the repository
+  root while `pnpm dev` is running. This touches the scene HMR boundary so the connected browser performs
+  one Vite scene remount and immediately exercises the latest code. The development snapshot restores the
+  current presentation position; this is not a substitute for focused tests or browser acceptance.
+- Report when no Vite development server or connected browser is available instead of claiming that HMR ran.

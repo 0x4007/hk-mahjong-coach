@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
+import type { ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -20,6 +21,12 @@ const getVisualDebugScenePayload = (value: unknown): string | null => {
   }
   const scene = (value as { readonly scene?: unknown }).scene;
   return scene === undefined ? null : JSON.stringify(scene);
+};
+
+const setNoCacheHeaders = (response: ServerResponse): void => {
+  response.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  response.setHeader("Pragma", "no-cache");
+  response.setHeader("Expires", "0");
 };
 
 const getDevCertificateHosts = (): string[] => {
@@ -74,6 +81,7 @@ export default defineConfig(({ command }) => ({
       apply: "serve",
       configureServer(server) {
         server.middlewares.use(visualDebugStateEndpoint, (req, res, next) => {
+          setNoCacheHeaders(res);
           if (req.method === "GET") {
             try {
               if (!existsSync(visualDebugStatePath)) {

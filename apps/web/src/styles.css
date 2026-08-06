@@ -388,6 +388,27 @@ button[aria-pressed="true"] {
   pointer-events: auto;
 }
 
+.scene-overlay-controls .scene-video-quality {
+  pointer-events: auto;
+  display: grid;
+  gap: 0.24rem;
+  margin-top: 0.45rem;
+  color: #1b2728;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scene-overlay-controls .scene-video-quality select {
+  width: 100%;
+  padding: 0.36rem 0.42rem;
+  color: #081113;
+  background: #f7f9f6;
+  border: 1px solid rgb(0 0 0 / 18%);
+  border-radius: 0.35rem;
+  font: inherit;
+}
+
 .scene-debug-panel {
   position: absolute;
   z-index: 6;

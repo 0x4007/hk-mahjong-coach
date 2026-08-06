@@ -4,8 +4,14 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { MahjongTableScene } from "./scene/MahjongTableScene.js";
 import {
+  readVisualDebugPanelExpanded,
+  writeVisualDebugPanelExpanded,
+} from "./visual-debug-panel-state.js";
+import {
   DEBUG_BOKEH_STRENGTH_MAX,
   DEFAULT_ROOM_SEED,
+  DEFAULT_RETICLE_POSITION,
+  MAHJONG_TABLE_HMR_EVENT,
   normalizeVisualRoomSeed,
 } from "./scene/mahjong-table.js";
 import type {
@@ -22,6 +28,7 @@ import type {
 
 const DEBUG_PANEL_ENABLED =
   import.meta.env.DEV && new URLSearchParams(window.location.search).has("debug");
+const VISUAL_QUALITY_MODE_STORAGE_KEY = "hk-mahjong-coach:visual-quality-mode:v1";
 
 const debugCameraPresets: readonly {
   readonly value: VisualCameraPreset;
@@ -57,9 +64,11 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
     { value: "medium", label: "Medium" },
     { value: "low", label: "Low" },
   ];
+const RETICLE_POSITION = DEFAULT_RETICLE_POSITION;
 
 const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
 const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
+const VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS = 5000;
 
 interface PersistedVisualDebugScene {
   readonly roomSeed: string;
@@ -96,6 +105,150 @@ interface PersistedVisualDebugState {
   readonly savedAt: string;
   readonly scene: PersistedVisualDebugScene;
 }
+
+const INITIAL_ROOM_QUERY_VALUE = new URLSearchParams(window.location.search).get("room");
+const HAS_EXPLICIT_ROOM_QUERY = INITIAL_ROOM_QUERY_VALUE !== null;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+
+const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
+  value === "table" ||
+  value === "roomReveal" ||
+  value === "assetReview" ||
+  value === "focusCalibration" ||
+  value === "climbingGym";
+
+const isVisualToneMapper = (value: unknown): value is VisualToneMapper =>
+  value === "agx" || value === "neutral" || value === "cineon" || value === "linear";
+
+const isVisualShadowQuality = (value: unknown): value is VisualShadowQuality =>
+  value === "off" || value === "medium" || value === "high";
+
+const isVisualGlassMode = (value: unknown): value is VisualGlassMode =>
+  value === "simple" || value === "physical";
+
+const isVisualQualityMode = (value: unknown): value is VisualQualityMode =>
+  value === "adaptive" || value === "high" || value === "medium" || value === "low";
+
+const getStoredVisualQualityMode = (): VisualQualityMode | null => {
+  try {
+    const stored = window.localStorage.getItem(VISUAL_QUALITY_MODE_STORAGE_KEY);
+    return stored === null ? null : isVisualQualityMode(stored) ? stored : null;
+  } catch {
+    return null;
+  }
+};
+
+const getInitialVisualQualityMode = (): VisualQualityMode => {
+  const stored = getStoredVisualQualityMode();
+  return stored === null ? "adaptive" : stored;
+};
+
+const writeVisualQualityMode = (mode: VisualQualityMode): void => {
+  try {
+    window.localStorage.setItem(VISUAL_QUALITY_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Ignore unavailable or blocked storage.
+  }
+};
+
+const isPersistedVisualDebugScene = (value: unknown): value is PersistedVisualDebugScene => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
+    typeof value.roomSeed === "string" &&
+    typeof value.roomVariant === "string" &&
+    typeof value.explorationArea === "string" &&
+    isFiniteNumber(value.fov) &&
+    value.fov >= 30 &&
+    value.fov <= 100 &&
+    isFiniteNumber(value.exposure) &&
+    isVisualToneMapper(value.toneMapper) &&
+    isFiniteNumber(value.fogDensity) &&
+    value.fogDensity >= 0 &&
+    value.fogDensity <= 0.04 &&
+    isFiniteNumber(value.sunYaw) &&
+    value.sunYaw >= -Math.PI &&
+    value.sunYaw <= Math.PI &&
+    isFiniteNumber(value.sunElevation) &&
+    value.sunElevation >= 0.25 &&
+    value.sunElevation <= 1.45 &&
+    isFiniteNumber(value.sunIntensity) &&
+    value.sunIntensity >= 0 &&
+    value.sunIntensity <= 6 &&
+    isFiniteNumber(value.environmentIntensity) &&
+    value.environmentIntensity >= 0 &&
+    value.environmentIntensity <= 2.5 &&
+    isFiniteNumber(value.environmentRotation) &&
+    value.environmentRotation >= -Math.PI &&
+    value.environmentRotation <= Math.PI &&
+    isFiniteNumber(value.redAccentIntensity) &&
+    value.redAccentIntensity >= 0 &&
+    value.redAccentIntensity <= 2.5 &&
+    isFiniteNumber(value.cyanEmissiveIntensity) &&
+    value.cyanEmissiveIntensity >= 0 &&
+    value.cyanEmissiveIntensity <= 2.5 &&
+    isVisualShadowQuality(value.shadowQuality) &&
+    isVisualQualityMode(value.quality) &&
+    isVisualGlassMode(value.glassMode) &&
+    isFiniteNumber(value.ambientAnimationRate) &&
+    value.ambientAnimationRate >= 0 &&
+    value.ambientAnimationRate <= 2 &&
+    isFiniteNumber(value.dprCap) &&
+    value.dprCap >= 1 &&
+    value.dprCap <= 2 &&
+    isBoolean(value.wireframe) &&
+    isBoolean(value.boundsVisible) &&
+    isBoolean(value.bokehEnabled) &&
+    isFiniteNumber(value.bokehStrength) &&
+    value.bokehStrength >= 0 &&
+    isBoolean(value.ambientOcclusionEnabled) &&
+    isBoolean(value.autoExposureEnabled) &&
+    isBoolean(value.cameraShiftEnabled) &&
+    isBoolean(value.cameraBobEnabled)
+  );
+};
+
+const isPersistedVisualDebugState = (value: unknown): value is PersistedVisualDebugState => {
+  if (!isRecord(value) || typeof value.savedAt !== "string") {
+    return false;
+  }
+  return isPersistedVisualDebugScene((value as { scene?: unknown }).scene);
+};
+
+const loadPersistedVisualDebugState = async (): Promise<PersistedVisualDebugScene | null> => {
+  if (!import.meta.env.DEV) {
+    return null;
+  }
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${VISUAL_DEBUG_STATE_ENDPOINT}?r=${Date.now()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const payload: unknown = await response.json();
+    if (!isPersistedVisualDebugState(payload)) {
+      return null;
+    }
+    return payload.scene;
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
 
 const buildPersistedVisualDebugScene = (
   snapshot: SceneDebugSnapshot,
@@ -156,6 +309,17 @@ const writeMotionLookPreference = (enabled: boolean): void => {
   }
 };
 
+const getVisualDebugPanelStateStorage = (): Storage | null => {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
 interface VisualDebugPanelProps {
   readonly mount: MahjongTableMount;
   readonly isMobile: boolean;
@@ -179,7 +343,11 @@ const VisualDebugPanel = ({
     readonly scene: PersistedVisualDebugScene;
     readonly scenePayload: string;
   } | null>(null);
-  const [isExpanded, setIsExpanded] = React.useState(() => !isMobile);
+  const debugStatePersistTimerRef = React.useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const queuePersistPendingDebugStateRef = React.useRef<(() => void) | null>(null);
+  const [isExpanded, setIsExpanded] = React.useState(() =>
+    readVisualDebugPanelExpanded(getVisualDebugPanelStateStorage(), !isMobile),
+  );
   const [roomSeedDraft, setRoomSeedDraft] = React.useState(
     () => mount.debug.getSnapshot().roomSeed,
   );
@@ -233,9 +401,34 @@ const VisualDebugPanel = ({
         // development write endpoint is unavailable during pagehide.
       });
     };
-    window.addEventListener("pagehide", persistPendingDebugState);
+    const queuePersistPendingDebugState = (): void => {
+      if (debugStatePersistTimerRef.current !== null) {
+        window.clearTimeout(debugStatePersistTimerRef.current);
+      }
+      debugStatePersistTimerRef.current = window.setTimeout(() => {
+        debugStatePersistTimerRef.current = null;
+        persistPendingDebugState();
+      }, 250);
+    };
+    const flushPendingDebugState = (): void => {
+      if (debugStatePersistTimerRef.current !== null) {
+        window.clearTimeout(debugStatePersistTimerRef.current);
+        debugStatePersistTimerRef.current = null;
+      }
+      persistPendingDebugState();
+    };
+    queuePersistPendingDebugStateRef.current = queuePersistPendingDebugState;
+    window.addEventListener("pagehide", flushPendingDebugState);
+    document.addEventListener("visibilitychange", flushPendingDebugState);
     return () => {
-      window.removeEventListener("pagehide", persistPendingDebugState);
+      window.removeEventListener("pagehide", flushPendingDebugState);
+      document.removeEventListener("visibilitychange", flushPendingDebugState);
+      flushPendingDebugState();
+      if (debugStatePersistTimerRef.current !== null) {
+        window.clearTimeout(debugStatePersistTimerRef.current);
+        debugStatePersistTimerRef.current = null;
+      }
+      queuePersistPendingDebugStateRef.current = null;
       debugStatePendingRef.current = null;
     };
   }, [mount]);
@@ -254,6 +447,7 @@ const VisualDebugPanel = ({
       return;
     }
     debugStatePendingRef.current = { scene, scenePayload };
+    queuePersistPendingDebugStateRef.current?.();
   };
   const refresh = (): void => setSnapshot(mount.debug.getSnapshot());
   const applyDebugChange = (change: () => void): void => {
@@ -342,14 +536,18 @@ const VisualDebugPanel = ({
   const resetDefaults = (): void => {
     applyDebugChange(() => mount.debug.resetDefaults());
   };
+  const setPanelExpanded = (expanded: boolean): void => {
+    setIsExpanded(expanded);
+    writeVisualDebugPanelExpanded(getVisualDebugPanelStateStorage(), expanded);
+  };
   const openFocusCalibration = (): void => {
     setCameraPreset("focusCalibration");
     mount.debug.teleportToFocusLab();
-    setIsExpanded(true);
+    setPanelExpanded(true);
   };
   const openClimbingGym = (): void => {
     setCameraPreset("climbingGym");
-    setIsExpanded(true);
+    setPanelExpanded(true);
   };
   const radiansToDegrees = (radians: number): number => (radians * 180) / Math.PI;
   return (
@@ -362,7 +560,7 @@ const VisualDebugPanel = ({
             isExpanded ? "Collapse visual debug controls" : "Expand visual debug controls"
           }
           className="scene-debug-heading scene-debug-toggle"
-          onClick={() => setIsExpanded((expanded) => !expanded)}
+          onClick={() => setPanelExpanded(!isExpanded)}
           type="button"
         >
           <strong>Visual debug</strong>
@@ -742,16 +940,18 @@ const isMobileDevice = (): boolean =>
 const JOYSTICK_DEAD_ZONE = 0.08;
 
 const getInitialRoomSeed = (): string =>
-  normalizeVisualRoomSeed(
-    new URLSearchParams(window.location.search).get("room") ?? DEFAULT_ROOM_SEED,
-  );
+  normalizeVisualRoomSeed(INITIAL_ROOM_QUERY_VALUE ?? DEFAULT_ROOM_SEED);
 
 const App = (): React.JSX.Element => {
   const [view, setView] = React.useState<SceneView>("seat");
   const [roomSeed, setRoomSeed] = React.useState(getInitialRoomSeed);
   const [roomVariant, setRoomVariant] = React.useState("Northlight");
   const [explorationArea, setExplorationArea] = React.useState("Penthouse");
+  const [hmrSceneEpoch, setHmrSceneEpoch] = React.useState(0);
   const [isMobile, setIsMobile] = React.useState(isMobileDevice);
+  const [visualQualityMode, setVisualQualityMode] = React.useState<VisualQualityMode>(
+    getInitialVisualQualityMode,
+  );
   const [motionStatus, setMotionStatus] = React.useState<MotionLookStatus>(() =>
     isMobile ? "needs-permission" : "unsupported",
   );
@@ -765,6 +965,12 @@ const App = (): React.JSX.Element => {
   const joystickKnobRef = React.useRef<HTMLSpanElement>(null);
   const lastTouchActionAtRef = React.useRef(0);
   const roomSequenceRef = React.useRef(1);
+  const hasUserRoomOverrideRef = React.useRef(false);
+  const persistedVisualDebugStateRef = React.useRef<PersistedVisualDebugScene | null>(null);
+  const hasAppliedPersistedVisualStateRef = React.useRef(false);
+  const [persistedVisualStateReady, setPersistedVisualStateReady] = React.useState(
+    !import.meta.env.DEV || DEBUG_PANEL_ENABLED,
+  );
 
   React.useEffect(() => {
     const updateDeviceClass = (): void => setIsMobile(isMobileDevice());
@@ -777,6 +983,68 @@ const App = (): React.JSX.Element => {
     };
   }, []);
 
+  const applyPersistedVisualDebugState = React.useCallback((mount: MahjongTableMount): void => {
+    const persisted = persistedVisualDebugStateRef.current;
+    if (persisted === null || hasAppliedPersistedVisualStateRef.current) {
+      return;
+    }
+    try {
+      mount.debug.setQualityMode(persisted.quality);
+      if (persisted.cameraPreset !== null) {
+        mount.debug.setCameraPreset(persisted.cameraPreset);
+      }
+      mount.debug.setFov(persisted.fov);
+      mount.debug.setExposure(persisted.exposure);
+      mount.debug.setToneMapper(persisted.toneMapper);
+      mount.debug.setFogDensity(persisted.fogDensity);
+      mount.debug.setSunDirection(persisted.sunYaw, persisted.sunElevation);
+      mount.debug.setSunIntensity(persisted.sunIntensity);
+      mount.debug.setEnvironmentIntensity(persisted.environmentIntensity);
+      mount.debug.setEnvironmentRotation(persisted.environmentRotation);
+      mount.debug.setRedAccentIntensity(persisted.redAccentIntensity);
+      mount.debug.setCyanEmissiveIntensity(persisted.cyanEmissiveIntensity);
+      mount.debug.setShadowQuality(persisted.shadowQuality);
+      mount.debug.setDprCap(persisted.dprCap);
+      mount.debug.setBokehEnabled(persisted.bokehEnabled);
+      mount.debug.setBokehIntensity(persisted.bokehStrength);
+      mount.debug.setAmbientOcclusionEnabled(persisted.ambientOcclusionEnabled);
+      mount.debug.setAutoExposureEnabled(persisted.autoExposureEnabled);
+      mount.debug.setAmbientAnimationRate(persisted.ambientAnimationRate);
+      mount.debug.setGlassMode(persisted.glassMode);
+      mount.debug.setCameraShiftEnabled(persisted.cameraShiftEnabled);
+      mount.debug.setCameraBobEnabled(persisted.cameraBobEnabled);
+      mount.debug.setWireframe(persisted.wireframe);
+      mount.debug.setBoundsVisible(persisted.boundsVisible);
+      hasAppliedPersistedVisualStateRef.current = true;
+    } catch {
+      // Ignore invalid persisted values if replay fails.
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!import.meta.env.DEV || DEBUG_PANEL_ENABLED) {
+      setPersistedVisualStateReady(true);
+      return;
+    }
+    let aborted = false;
+    void (async (): Promise<void> => {
+      const persisted = await loadPersistedVisualDebugState();
+      if (aborted) {
+        return;
+      }
+      if (persisted !== null) {
+        persistedVisualDebugStateRef.current = persisted;
+        if (!HAS_EXPLICIT_ROOM_QUERY && !hasUserRoomOverrideRef.current) {
+          setRoomSeed(persisted.roomSeed);
+        }
+      }
+      setPersistedVisualStateReady(true);
+    })();
+    return () => {
+      aborted = true;
+    };
+  }, []);
+
   const handleMount = React.useCallback(
     (mount: MahjongTableMount | null): void => {
       mountRef.current = mount;
@@ -786,12 +1054,21 @@ const App = (): React.JSX.Element => {
         setIsCrouched(false);
         setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
+        hasAppliedPersistedVisualStateRef.current = false;
         return;
       }
       const snapshot = mount.debug.getSnapshot();
       setRoomVariant(snapshot.roomVariant);
       setExplorationArea(snapshot.explorationArea);
       hasAttemptedMotionReenable.current = false;
+      try {
+        mount.debug.setQualityMode(visualQualityMode);
+      } catch {
+        // The mount may initialize during a concurrent remount.
+      }
+      if (!DEBUG_PANEL_ENABLED) {
+        applyPersistedVisualDebugState(mount);
+      }
 
       // Re‑apply the motion‑look flag after a hot‑reload or scene recreation.
       // The original implementation lost this flag, causing the enable/disable
@@ -807,8 +1084,33 @@ const App = (): React.JSX.Element => {
     },
     // Adding `isMotionLookEnabled` as a dependency makes sure the latest UI
     // state is reflected when the mount is recreated (e.g., after a hot reload).
-    [isMotionLookEnabled],
+    [isMotionLookEnabled, visualQualityMode],
   );
+
+  const applyVisualQualityMode = (mode: VisualQualityMode): void => {
+    setVisualQualityMode(mode);
+    writeVisualQualityMode(mode);
+    const mount = mountRef.current;
+    if (mount === null) {
+      return;
+    }
+    try {
+      mount.debug.setQualityMode(mode);
+    } catch {
+      // The mount may disappear during a concurrent HMR remount.
+    }
+  };
+  React.useEffect(() => {
+    const mount = mountRef.current;
+    if (mount === null) {
+      return;
+    }
+    try {
+      mount.debug.setQualityMode(visualQualityMode);
+    } catch {
+      // Ignore transient mount disposal races during re-render or HMR.
+    }
+  }, [visualQualityMode]);
   const handleMotionLookStatusChange = React.useCallback((status: MotionLookStatus): void => {
     setMotionStatus(status);
     if (status === "denied" || status === "unsupported") {
@@ -957,11 +1259,13 @@ const App = (): React.JSX.Element => {
     mountRef.current?.jump();
   };
   const nextRoom = (): void => {
+    hasUserRoomOverrideRef.current = true;
     roomSequenceRef.current += 1;
     setExplorationArea("Penthouse");
     setRoomSeed(`room-${String(roomSequenceRef.current).padStart(2, "0")}`);
   };
   const loadRoomSeed = (seed: string): void => {
+    hasUserRoomOverrideRef.current = true;
     setExplorationArea("Penthouse");
     setRoomSeed(normalizeVisualRoomSeed(seed));
   };
@@ -985,6 +1289,46 @@ const App = (): React.JSX.Element => {
     }
     action();
   };
+  React.useEffect(() => {
+    const onSceneHotReload = (): void => {
+      setHmrSceneEpoch((epoch) => epoch + 1);
+    };
+    window.addEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
+
+    const disposeAfterUpdate =
+      import.meta.hot?.on(
+        "vite:afterUpdate",
+        (
+          payload:
+            | {
+                readonly updates?: readonly {
+                  readonly path?: string;
+                }[];
+              }
+            | undefined,
+        ): void => {
+          const updates = payload?.updates;
+          if (!Array.isArray(updates)) {
+            return;
+          }
+          if (
+            updates.some(
+              (update) =>
+                typeof update?.path === "string" &&
+                (update.path.includes("/scene/mahjong-table") ||
+                  update.path.includes("/scene/MahjongTableScene")),
+            )
+          ) {
+            onSceneHotReload();
+          }
+        },
+      ) ?? (() => {});
+
+    return () => {
+      window.removeEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
+      disposeAfterUpdate();
+    };
+  }, []);
 
   const motionInstruction =
     motionStatus === "ready"
@@ -1008,14 +1352,27 @@ const App = (): React.JSX.Element => {
             }
           }}
         >
-          <MahjongTableScene
-            debug={DEBUG_PANEL_ENABLED}
-            onExplorationAreaChange={handleExplorationAreaChange}
-            roomSeed={roomSeed}
-            view={view}
-            onMount={handleMount}
-            onMotionLookStatusChange={handleMotionLookStatusChange}
-          />
+          {persistedVisualStateReady ? (
+            <MahjongTableScene
+              key={`scene-${hmrSceneEpoch}-${roomSeed}`}
+              debug={DEBUG_PANEL_ENABLED}
+              reticlePosition={RETICLE_POSITION}
+              onExplorationAreaChange={handleExplorationAreaChange}
+              roomSeed={roomSeed}
+              view={view}
+              onMount={handleMount}
+              onMotionLookStatusChange={handleMotionLookStatusChange}
+            />
+          ) : (
+            <div className="scene-canvas">
+              <div className="scene-loading" role="status" aria-live="polite">
+                <span className="scene-loading-eyebrow">Hong Kong Mahjong Coach</span>
+                <strong>Loading saved visual settings</strong>
+                <span className="scene-loading-line" aria-hidden="true" />
+                <span>Preparing the table…</span>
+              </div>
+            </div>
+          )}
           {DEBUG_PANEL_ENABLED && debugMount !== null ? (
             <VisualDebugPanel
               isMobile={isMobile}
@@ -1024,7 +1381,11 @@ const App = (): React.JSX.Element => {
               onRoomSeedSubmit={loadRoomSeed}
             />
           ) : null}
-          <div className="scene-reticule" aria-hidden="true">
+          <div
+            className="scene-reticule"
+            aria-hidden="true"
+            style={{ left: `${RETICLE_POSITION.x * 100}%`, top: `${RETICLE_POSITION.y * 100}%` }}
+          >
             <span />
           </div>
           <header className="scene-overlay scene-overlay-intro">
@@ -1088,6 +1449,22 @@ const App = (): React.JSX.Element => {
                 </button>
               ) : null}
             </div>
+            {!DEBUG_PANEL_ENABLED ? (
+              <label className="scene-video-quality" htmlFor="visual-quality-mode">
+                Video quality
+                <select
+                  id="visual-quality-mode"
+                  onChange={(event) => applyVisualQualityMode(event.currentTarget.value as VisualQualityMode)}
+                  value={visualQualityMode}
+                >
+                  {debugQualityModes.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
           </div>
           <div className="scene-hud" aria-label="Scene details">
             <span>
@@ -1136,8 +1513,8 @@ const App = (): React.JSX.Element => {
           <footer className="scene-card-footer scene-overlay scene-overlay-footer">
             <p>
               {isMobile
-                ? "Drag joystick: center slow · edge sprint · Swipe to look · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap W sprint · Shift crouch · Space jump · Esc releases pointer"}
+                ? "Drag joystick: center slow · edge sprint · Swipe to look · Crouch · Jump · run into tall walls to hang · press Jump to climb"
+                : "Mouse look · WASD move · double-tap W sprint · Shift crouch · Space jump · run into tall walls to hang · hold W/Space to climb · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

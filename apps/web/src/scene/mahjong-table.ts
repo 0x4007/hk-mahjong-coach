@@ -61,11 +61,7 @@ export interface VisualSceneState {
 }
 
 export type VisualCameraPreset =
-  | "table"
-  | "roomReveal"
-  | "assetReview"
-  | "focusCalibration"
-  | "climbingGym";
+  "table" | "roomReveal" | "assetReview" | "focusCalibration" | "climbingGym";
 
 export type VisualToneMapper = "agx" | "neutral" | "cineon" | "linear";
 
@@ -123,10 +119,8 @@ const PENTHOUSE_CEILING_SLAB_THICKNESS_METERS = 0.34;
 const PENTHOUSE_WALL_THICKNESS_METERS = 0.34;
 const PENTHOUSE_HALF_WIDTH_METERS = PENTHOUSE_FLOOR_WIDTH_METERS / 2;
 const PENTHOUSE_HALF_DEPTH_METERS = PENTHOUSE_FLOOR_DEPTH_METERS / 2;
-const PENTHOUSE_SIDE_WALL_X =
-  PENTHOUSE_HALF_WIDTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2;
-const PENTHOUSE_NORTH_WALL_Z =
-  -(PENTHOUSE_HALF_DEPTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2);
+const PENTHOUSE_SIDE_WALL_X = PENTHOUSE_HALF_WIDTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2;
+const PENTHOUSE_NORTH_WALL_Z = -(PENTHOUSE_HALF_DEPTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS / 2);
 const PENTHOUSE_WINDOW_HEIGHT_METERS = PENTHOUSE_CEILING_HEIGHT_METERS - 0.12;
 const PENTHOUSE_WINDOW_CENTER_Y = PENTHOUSE_WINDOW_HEIGHT_METERS / 2 + 0.04;
 const PENTHOUSE_NORTH_GLASS_WIDTH_METERS =
@@ -337,12 +331,7 @@ export interface VisualDebugPreferences {
 
 export const VISUAL_MAP_DOCUMENT_VERSION = 1 as const;
 
-export type VisualMapEntityKind =
-  | "planter"
-  | "divider"
-  | "wallPanel"
-  | "lightBar"
-  | "sculpture";
+export type VisualMapEntityKind = "planter" | "divider" | "wallPanel" | "lightBar" | "sculpture";
 
 export type VisualMapEntityPosition = readonly [number, number, number];
 
@@ -389,8 +378,7 @@ const isVisualMapEntity = (value: unknown): value is VisualMapEntity => {
     VISUAL_MAP_ENTITY_ID.test(value.id) &&
     isVisualMapEntityKind(value.kind) &&
     isVisualMapPosition(value.position) &&
-    (value.rotationDegrees === undefined ||
-      isBoundedNumber(value.rotationDegrees, -180, 180)) &&
+    (value.rotationDegrees === undefined || isBoundedNumber(value.rotationDegrees, -180, 180)) &&
     (value.scale === undefined || isBoundedNumber(value.scale, 0.25, 3))
   );
 };
@@ -405,17 +393,14 @@ const isVisualMapDocument = (value: unknown): value is VisualMapDocument => {
     !isRecord(floor) ||
     !isBoundedNumber(floor.width, 2.8, PENTHOUSE_INTERIOR_FLOOR_WIDTH_METERS) ||
     !isBoundedNumber(floor.depth, 2.4, PENTHOUSE_INTERIOR_FLOOR_DEPTH_METERS) ||
-    (floor.rotationDegrees !== undefined &&
-      !isBoundedNumber(floor.rotationDegrees, -180, 180)) ||
+    (floor.rotationDegrees !== undefined && !isBoundedNumber(floor.rotationDegrees, -180, 180)) ||
     !Array.isArray(entities) ||
     entities.length > VISUAL_MAP_ENTITY_LIMIT ||
     !entities.every((entity: unknown) => isVisualMapEntity(entity))
   ) {
     return false;
   }
-  const ids = new Set(
-    entities.map((entity: VisualMapEntity) => entity.id),
-  );
+  const ids = new Set(entities.map((entity: VisualMapEntity) => entity.id));
   return ids.size === entities.length;
 };
 
@@ -498,15 +483,15 @@ const isVisualDebugPreferences = (value: unknown): value is VisualDebugPreferenc
     return false;
   }
   return (
-  value.version === VISUAL_DEBUG_PREFERENCES_VERSION &&
-  (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
-  isBoundedNumber(value.fov, 30, 100) &&
-  isBoundedNumber(value.exposure, 0.5, 2.2) &&
-  isVisualToneMapper(value.toneMapper) &&
-  isBoundedNumber(value.fogDensity, 0, 0.04) &&
-  isBoundedNumber(value.sunYaw, -Math.PI, Math.PI) &&
-  isBoundedNumber(value.sunElevation, 0.25, 1.45) &&
-  isBoundedNumber(value.sunIntensity, 0, 6) &&
+    value.version === VISUAL_DEBUG_PREFERENCES_VERSION &&
+    (value.cameraPreset === null || isVisualCameraPreset(value.cameraPreset)) &&
+    isBoundedNumber(value.fov, 30, 100) &&
+    isBoundedNumber(value.exposure, 0.5, 2.2) &&
+    isVisualToneMapper(value.toneMapper) &&
+    isBoundedNumber(value.fogDensity, 0, 0.04) &&
+    isBoundedNumber(value.sunYaw, -Math.PI, Math.PI) &&
+    isBoundedNumber(value.sunElevation, 0.25, 1.45) &&
+    isBoundedNumber(value.sunIntensity, 0, 6) &&
     isBoundedNumber(value.environmentIntensity, 0, 2.5) &&
     isBoundedNumber(value.environmentRotation, -Math.PI, Math.PI) &&
     isBoundedNumber(value.redAccentIntensity, 0, 2.5) &&
@@ -567,7 +552,18 @@ export interface MahjongTableSceneOptions {
   readonly onReady?: () => void;
   readonly quality?: VisualQualityPreset | "auto";
   readonly roomSeed?: string;
+  readonly reticlePosition?: ReticlePosition;
 }
+
+export interface ReticlePosition {
+  readonly x: number;
+  readonly y: number;
+}
+
+export const DEFAULT_RETICLE_POSITION: ReticlePosition = {
+  x: 0.5,
+  y: 0.6,
+};
 
 export interface PenthouseSceneAnchors {
   readonly tableRoot: THREE.Object3D;
@@ -589,6 +585,11 @@ export interface MahjongTableMount {
   readonly setTouchMovementVector: (forward: number, right: number, active: boolean) => void;
   readonly toggleCrouch: () => boolean;
   readonly jump: () => void;
+  readonly setReticlePosition: (reticlePosition: ReticlePosition) => void;
+  readonly getAimRay: () => {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  };
   readonly debug: MahjongTableDebugControls;
   readonly dispose: () => void;
   readonly anchors: PenthouseSceneAnchors;
@@ -705,6 +706,84 @@ interface SceneQuality {
   readonly ambientAnimationRate: number;
 }
 
+interface ClimbingTransition {
+  duration: number;
+  elapsed: number;
+  phase: "vault" | "landingBoost";
+  startX: number;
+  startY: number;
+  startZ: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+  preservedForwardVelocity: number;
+  preservedStrafeVelocity: number;
+  preserveSprinting: boolean;
+  landingBoostDistance: number;
+}
+
+interface WallHangState {
+  readonly target: PhysicsVector;
+  readonly wallNormal: PhysicsVector;
+  readonly wallFacePoint: PhysicsVector;
+  readonly wallTopY: number;
+  readonly box: PhysicsBox;
+  readonly approachDirection: PhysicsVector;
+  elapsed: number;
+}
+
+interface WallClimbTransition {
+  elapsed: number;
+  liftDuration: number;
+  crossDuration: number;
+  readonly startPosition: PhysicsVector;
+  readonly clearPosition: PhysicsVector;
+  readonly targetPosition: PhysicsVector;
+}
+
+type LedgeClimbMomentum = Readonly<{
+  readonly preservedForwardVelocity: number;
+  readonly preservedStrafeVelocity: number;
+  readonly preserveSprinting: boolean;
+}>;
+
+export const resolveLedgeClimbMomentum = (
+  desiredForward: number,
+  desiredStrafe: number,
+  fallbackForwardVelocity: number,
+  fallbackStrafeVelocity: number,
+  isSprinting: boolean,
+  moveSpeed: number,
+): LedgeClimbMomentum => {
+  const preservedBaseForward =
+    desiredForward !== 0 || desiredStrafe !== 0 ? desiredForward : fallbackForwardVelocity;
+  const preservedBaseStrafe =
+    desiredForward !== 0 || desiredStrafe !== 0 ? desiredStrafe : fallbackStrafeVelocity;
+  const rawMomentum = Math.hypot(preservedBaseForward, preservedBaseStrafe);
+  const minMomentum = isSprinting ? moveSpeed * SPRINT_MULTIPLIER : 0;
+  if (rawMomentum <= 0) {
+    return {
+      preservedForwardVelocity: 0,
+      preservedStrafeVelocity: 0,
+      preserveSprinting: isSprinting,
+    };
+  }
+  if (rawMomentum >= minMomentum) {
+    return {
+      preservedForwardVelocity: preservedBaseForward,
+      preservedStrafeVelocity: preservedBaseStrafe,
+      preserveSprinting: isSprinting,
+    };
+  }
+
+  const scale = minMomentum / rawMomentum;
+  return {
+    preservedForwardVelocity: preservedBaseForward * scale,
+    preservedStrafeVelocity: preservedBaseStrafe * scale,
+    preserveSprinting: isSprinting,
+  };
+};
+
 interface SceneAmbientResources {
   readonly cyanMaterials: readonly THREE.MeshStandardMaterial[];
   readonly redMaterials: readonly THREE.MeshStandardMaterial[];
@@ -744,14 +823,14 @@ const TILE_BLUE = "#315b86";
 const TILE_INK = "#253237";
 
 const COLORS = {
-  sky: 0x102b3c,
-  haze: 0x8fa8b1,
-  architecturalWhite: 0xe7eeed,
-  whiteLacquer: 0xf4f6f2,
-  structuralGray: 0x52636b,
+  sky: 0xf3f6f1,
+  haze: 0xe5eeea,
+  architecturalWhite: 0xf8faf8,
+  whiteLacquer: 0xffffff,
+  structuralGray: 0xc8d2d1,
   charcoal: 0x101a21,
-  glass: 0x78b7c8,
-  paleOak: 0x9a8068,
+  glass: 0x9bd5dc,
+  paleOak: 0xe4dfd3,
   red: 0xf04438,
   cyan: 0x62dce6,
   aluminum: 0xa9bbc0,
@@ -904,13 +983,23 @@ const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, Camera
 const STANDING_EYE_HEIGHT = cameraPresets.seat.position.y;
 const SEATED_EYE_HEIGHT = 1.45;
 const TABLE_CAMERA_FOV = 45;
+const SEAT_STANDING_FOV = 90;
+const SEAT_CROUCHED_FOV = 45;
 const DEBUG_STANDING_FOV = 90;
 const DEBUG_SEATED_FOV = 68;
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
 const JUMP_SPEED = 13.2;
 const GRAVITY = 48;
+// Climbing over ledges should feel like a short climb-up, not a snap.
+const LEDGE_CLIMB_DURATION = 0.24;
+const LEDGE_CLIMB_ARC_HEIGHT = 0.09;
+const LEDGE_CLIMB_FORWARD_OFFSET = 0.16;
+const LEDGE_CLIMB_EXIT_BOOST_DURATION = 0.06;
+const LEDGE_CLIMB_EXIT_BOOST_DISTANCE = 0.12;
+export const LEDGE_CLIMB_EYE_HEIGHT_METERS = 1.75;
 const LEDGE_GRAB_MIN_HEIGHT = 0.3;
 const LEDGE_GRAB_MAX_HEIGHT = 1.6;
+const LEDGE_GRAB_MIN_FALL_OFFSET = 0.05;
 const LEDGE_GRAB_APPROACH_DISTANCE = 1;
 const LEDGE_GRAB_SIDE_DISTANCE = 0.4;
 const LEDGE_GRAB_PLATFORM_TOLERANCE = 0.01;
@@ -955,8 +1044,14 @@ const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
 const BOKEH_BASE_APERTURE = 0.00095;
 const BOKEH_BASE_MAX_BLUR = 0.003;
 const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
-/** Debug-only multiplier cap; 1× remains the restrained human-eye baseline. */
+/** Debug-only multiplier cap; crouching uses the full available range. */
 export const DEBUG_BOKEH_STRENGTH_MAX = 25;
+export const STANDING_DOF_INTENSITY = 12.5;
+export const CROUCHING_DOF_INTENSITY = 25;
+
+/** Resolve the default depth-of-field multiplier for the player's posture. */
+export const resolveDofIntensityForPosture = (isCrouched: boolean): number =>
+  isCrouched ? CROUCHING_DOF_INTENSITY : STANDING_DOF_INTENSITY;
 // Practical calibration points from the focus-lab pass: at the reference 4 mm
 // pupil, 6 m reads as effectively sharp and 2.5 m retains roughly one quarter
 // of the close-focus blur. Other pupil sizes scale this cutoff with dilation.
@@ -969,8 +1064,8 @@ const BOKEH_NEAR_ACCOMMODATION_DAMPING = 7;
 const BOKEH_FAR_ACCOMMODATION_DAMPING = 4.5;
 const BOKEH_PUPIL_ADAPTATION_DAMPING = 2.4;
 const BOKEH_TILE_SAMPLE_OFFSET = 0.028;
-const FOCUS_CALIBRATION_START_X =
-  PLAY_AREA_ORIGINS.lookingFocusRoom.x - PLAY_AREA_SIZE_METERS / 4;
+const INCLUDE_EXPLORATION_GATEWAY = false;
+const FOCUS_CALIBRATION_START_X = PLAY_AREA_ORIGINS.lookingFocusRoom.x - PLAY_AREA_SIZE_METERS / 4;
 const FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE = HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE;
 const FOCUS_CALIBRATION_LENGTH = FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE * 2;
 const FOCUS_CALIBRATION_ENTRY_MARGIN = 1.6;
@@ -985,10 +1080,444 @@ const CLIMBING_GYM_RUN_Y = 0.11;
 // Keep the training lane centered in its own ground-level 50 m play area.
 const CLIMBING_GYM_ZONE_ORIGIN_X = PLAY_AREA_ORIGINS.climbingGym.x;
 const CLIMBING_GYM_ZONE_ORIGIN_Z = PLAY_AREA_ORIGINS.climbingGym.z;
-const CLIMBING_GYM_PRESET_START_X = CLIMBING_GYM_ZONE_ORIGIN_X - 0.55;
-const CLIMBING_GYM_PRESET_START_Z = CLIMBING_GYM_ZONE_ORIGIN_Z - 0.23;
-const CLIMBING_GYM_PRESET_TARGET_X = CLIMBING_GYM_ZONE_ORIGIN_X + 1.85;
-const CLIMBING_GYM_PRESET_TARGET_Z = CLIMBING_GYM_ZONE_ORIGIN_Z + 0.62;
+// Keep the demo spawn on open ground and point directly at the dedicated
+// training wall. The spawn is intentionally close enough that a normal walk
+// reaches the wall in about a second, so the traversal mechanic is easy to
+// exercise without relying on the sprint double-tap.
+const CLIMBING_GYM_PRESET_START_X = CLIMBING_GYM_ZONE_ORIGIN_X - 14.05;
+const CLIMBING_GYM_PRESET_START_Z = CLIMBING_GYM_ZONE_ORIGIN_Z - 12;
+const CLIMBING_GYM_PRESET_TARGET_X = CLIMBING_GYM_ZONE_ORIGIN_X - 9.7;
+const CLIMBING_GYM_PRESET_TARGET_Z = CLIMBING_GYM_ZONE_ORIGIN_Z - 12;
+const CLIMBING_GYM_PLATFORM_HEIGHT_METERS = 0.16;
+const CLIMBING_GYM_PLATFORM_COLLIDER_HEIGHT_METERS = 0.16;
+
+type ClimbingGymObstacleMaterial = "base" | "ledge" | "rail";
+
+type ClimbingGymObstacleBase = Readonly<{
+  name: string;
+  kind: "run" | "ledge" | "prism";
+  x: number;
+  z: number;
+  width: number;
+  height: number;
+  depth: number;
+  material: ClimbingGymObstacleMaterial;
+}>;
+
+type ClimbingGymRunObstacle = ClimbingGymObstacleBase & Readonly<{ kind: "run"; y: number }>;
+type ClimbingGymLedgeObstacle = ClimbingGymObstacleBase & Readonly<{ kind: "ledge"; topY: number }>;
+type ClimbingGymPrismObstacle = ClimbingGymObstacleBase & Readonly<{ kind: "prism"; y: number }>;
+
+type ClimbingGymObstacle =
+  ClimbingGymRunObstacle | ClimbingGymLedgeObstacle | ClimbingGymPrismObstacle;
+
+const CLIMBING_GYM_FEATURES: readonly ClimbingGymObstacle[] = [
+  {
+    name: "ClimbingGymHangWall",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 10,
+    y: 1.9,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 12,
+    width: 0.5,
+    height: 3.8,
+    depth: 6,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymRunEntry",
+    kind: "run",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X,
+    y: CLIMBING_GYM_RUN_Y,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z,
+    width: 3.25,
+    height: 0.22,
+    depth: 1.9,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymSouthWestRun",
+    kind: "run",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 21.6,
+    y: CLIMBING_GYM_RUN_Y,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 20.4,
+    width: 6.1,
+    height: 0.22,
+    depth: 2.6,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymSouthWestHoldOne",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 21.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 19.8,
+    topY: 1.02,
+    width: 3.6,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.9,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymSouthWestHoldTwo",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 23.2,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 18.6,
+    topY: 1.72,
+    width: 2.8,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.5,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymSouthWestHoldThree",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 22.6,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 22.1,
+    topY: 2.32,
+    width: 1.6,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.0,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymSouthWestColumnOne",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 23.4,
+    y: 1.4,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 20.2,
+    width: 0.46,
+    height: 2.5,
+    depth: 0.46,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymSouthWestBeamLow",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 20.8,
+    y: 0.56,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 21.0,
+    width: 3.8,
+    height: 0.16,
+    depth: 0.22,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymSouthWestBeamMid",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 24.0,
+    y: 1.22,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 19.5,
+    width: 2.0,
+    height: 0.14,
+    depth: 0.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymSouthWestWall",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 21.9,
+    y: 1.25,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 17.9,
+    width: 0.11,
+    height: 1.95,
+    depth: 2.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymWestRun",
+    kind: "run",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 8.9,
+    y: CLIMBING_GYM_RUN_Y,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 5.1,
+    width: 4.4,
+    height: 0.22,
+    depth: 2.3,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymWestHoldOne",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 9.8,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 4.8,
+    topY: 0.97,
+    width: 2.9,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.7,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymWestHoldTwo",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 8.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 6.2,
+    topY: 1.55,
+    width: 2.1,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.4,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymWestHoldThree",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 6.2,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 3.4,
+    topY: 2.27,
+    width: 1.8,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.2,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymWestColumnOne",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 7.4,
+    y: 1.2,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 5.0,
+    width: 0.42,
+    height: 2.6,
+    depth: 0.42,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymWestBeamLow",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 10.2,
+    y: 0.56,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 6.9,
+    width: 3.0,
+    height: 0.16,
+    depth: 0.22,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymWestBeamMid",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 7.0,
+    y: 1.18,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 4.3,
+    width: 2.2,
+    height: 0.14,
+    depth: 0.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymWestWall",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X - 5.4,
+    y: 1.5,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z - 5.7,
+    width: 0.11,
+    height: 2.1,
+    depth: 2.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymEastRun",
+    kind: "run",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 7.8,
+    y: CLIMBING_GYM_RUN_Y,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 6.0,
+    width: 5.0,
+    height: 0.22,
+    depth: 2.6,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymEastHoldOne",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 7.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 7.4,
+    topY: 1.02,
+    width: 2.9,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.7,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymEastHoldTwo",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 9.6,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 5.6,
+    topY: 1.7,
+    width: 2.4,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.4,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymEastHoldThree",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 11.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 8.2,
+    topY: 2.35,
+    width: 1.6,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.1,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymEastColumnOne",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 9.2,
+    y: 1.35,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 8.9,
+    width: 0.38,
+    height: 2.9,
+    depth: 0.38,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymEastBeamLow",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 10.4,
+    y: 0.56,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 4.4,
+    width: 3.4,
+    height: 0.16,
+    depth: 0.22,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymEastBeamMid",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 8.2,
+    y: 1.16,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 6.8,
+    width: 2.0,
+    height: 0.14,
+    depth: 0.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymEastWall",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 6.4,
+    y: 1.9,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 6.4,
+    width: 0.11,
+    height: 2.0,
+    depth: 2.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymNorthEastRun",
+    kind: "run",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 18.8,
+    y: CLIMBING_GYM_RUN_Y,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 18.8,
+    width: 5.8,
+    height: 0.22,
+    depth: 2.8,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymNorthEastHoldOne",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 17.2,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 19.4,
+    topY: 1.02,
+    width: 2.9,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.7,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymNorthEastHoldTwo",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 20.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 20.4,
+    topY: 1.72,
+    width: 2.3,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.3,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymNorthEastHoldThree",
+    kind: "ledge",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 22.0,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 17.6,
+    topY: 2.45,
+    width: 1.6,
+    height: CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+    depth: 1.1,
+    material: "ledge",
+  },
+  {
+    name: "ClimbingGymNorthEastColumnOne",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 20.4,
+    y: 1.55,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 18.2,
+    width: 0.44,
+    height: 2.4,
+    depth: 0.44,
+    material: "base",
+  },
+  {
+    name: "ClimbingGymNorthEastBeamLow",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 19.1,
+    y: 0.56,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 21.2,
+    width: 3.2,
+    height: 0.16,
+    depth: 0.22,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymNorthEastBeamMid",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 17.6,
+    y: 1.22,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 19.8,
+    width: 2.1,
+    height: 0.14,
+    depth: 0.2,
+    material: "rail",
+  },
+  {
+    name: "ClimbingGymNorthEastWall",
+    kind: "prism",
+    x: CLIMBING_GYM_ZONE_ORIGIN_X + 21.8,
+    y: 1.45,
+    z: CLIMBING_GYM_ZONE_ORIGIN_Z + 20.8,
+    width: 0.11,
+    height: 1.95,
+    depth: 1.9,
+    material: "rail",
+  },
+];
+
+const createClimbingGymCollider = (obstacle: ClimbingGymObstacle): PhysicsBox => {
+  if (obstacle.kind === "ledge") {
+    return {
+      center: {
+        x: obstacle.x,
+        y: obstacle.topY - CLIMBING_GYM_PLATFORM_COLLIDER_HEIGHT_METERS / 2,
+        z: obstacle.z,
+      },
+      halfExtents: {
+        x: obstacle.width / 2,
+        y: CLIMBING_GYM_PLATFORM_COLLIDER_HEIGHT_METERS / 2,
+        z: obstacle.depth / 2,
+      },
+    };
+  }
+
+  return {
+    center: {
+      x: obstacle.x,
+      y: obstacle.y,
+      z: obstacle.z,
+    },
+    halfExtents: {
+      x: obstacle.width / 2,
+      y: obstacle.height / 2,
+      z: obstacle.depth / 2,
+    },
+  };
+};
+
 const EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET = EXPLORATION_CHUNK_SIZE * (2.45 / 8);
 const EXPLORATION_CHUNK_BUILDING_EDGE_JITTER = EXPLORATION_CHUNK_SIZE * (2.3 / 8);
 
@@ -1113,7 +1642,8 @@ const clipExplorationRectAroundBounds = (
 /** Keep the existing penthouse clipping helper stable for map consumers. */
 export const clipExplorationRectAroundPenthouse = (
   rect: ExplorationRect,
-): readonly ExplorationRect[] => clipExplorationRectAroundBounds(rect, EXPLORATION_PENTHOUSE_BOUNDS);
+): readonly ExplorationRect[] =>
+  clipExplorationRectAroundBounds(rect, EXPLORATION_PENTHOUSE_BOUNDS);
 
 /** Keep streamed ground and paths out of every authored play-area footprint. */
 export const clipExplorationRectAroundPlayAreas = (
@@ -1428,104 +1958,391 @@ const createWallPhysicsBoxes = (wallRoot: THREE.Object3D | null): readonly Physi
 };
 
 const createClimbingGymPhysicsBoxes = (): readonly PhysicsBox[] => {
-  return [
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X,
-        y: CLIMBING_GYM_RUN_Y,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z,
-      },
-      halfExtents: {
-        x: 3.25 / 2,
-        y: 0.22 / 2,
-        z: 1.9 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
-        y: 0.95 - 0.08,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z - 0.3,
-      },
-      halfExtents: {
-        x: 1.55 / 2,
-        y: 0.16 / 2,
-        z: 1.35 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.9,
-        y: 1.54 - 0.08,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-      },
-      halfExtents: {
-        x: 1.4 / 2,
-        y: 0.16 / 2,
-        z: 1.28 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.58,
-        y: 2.12 - 0.08,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.44,
-      },
-      halfExtents: {
-        x: 1.25 / 2,
-        y: 0.16 / 2,
-        z: 1.12 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.95,
-        y: 1.07,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-      },
-      halfExtents: {
-        x: 0.18 / 2,
-        y: 1.95 / 2,
-        z: 1.45 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X - 0.95,
-        y: 1.4,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z - 0.06,
-      },
-      halfExtents: {
-        x: 0.11 / 2,
-        y: 0.15 / 2,
-        z: 2.2 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
-        y: 1.98,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-      },
-      halfExtents: {
-        x: 0.11 / 2,
-        y: 0.15 / 2,
-        z: 2.2 / 2,
-      },
-    },
-    {
-      center: {
-        x: CLIMBING_GYM_ZONE_ORIGIN_X + 1.35,
-        y: 2.56,
-        z: CLIMBING_GYM_ZONE_ORIGIN_Z + 0.32,
-      },
-      halfExtents: {
-        x: 0.11 / 2,
-        y: 0.15 / 2,
-        z: 2.2 / 2,
-      },
-    },
-  ];
+  return CLIMBING_GYM_FEATURES.map(createClimbingGymCollider);
+};
+
+export const resolveLedgeClimbTargetCameraY = (transitionY: number): number =>
+  transitionY - PLAYER_COLLIDER_CENTER_HEIGHT + LEDGE_CLIMB_EYE_HEIGHT_METERS;
+
+/* ----------------------------------------------------------------------
+ *  VAULT HELPERS
+ *
+ *  A “vault” is a jump onto a platform that is **not tall enough** for a
+ *  ledge grab, but **too high** for the controller’s autostep.
+ *
+ *  The numbers below are tuned for the default character capsule
+ *  (radius ≈ 0.3 m, eye height ≈ 0.86 m).  Feel free to expose them in a
+ *  JSON scenario if you want them tunable.
+ * ---------------------------------------------------------------------- */
+
+/** Minimum top of a box (relative to the player’s feet) that can be vaulted onto. */
+export const VAULT_MIN_HEIGHT = 0.15; // 15 cm above the feet
+/** Maximum top of a box that is still considered a “vault”. */
+export const VAULT_MAX_HEIGHT = 0.45; // 45 cm above the feet
+/** Horizontal clearance needed on each side of the box while vaulting. */
+export const VAULT_SIDE_BUFFER = 0.06; // same buffer used for ledge detection
+
+/**
+ * Try to find a static box that the player can “vault” onto.
+ *
+ * The algorithm mirrors `resolveLedgeGrabTarget` but uses a lower height
+ * window (`VAULT_*`).  If a suitable box is found, a point on its top‑center
+ * is returned; otherwise `null` is returned.
+ *
+ * @param fromPosition          Player position **before** the jump.
+ * @param desiredHorizontalDelta  Desired horizontal displacement for the current frame.
+ * @param feetY                 Height of the player’s feet (center.y – collider radius).
+ * @param staticPhysicsBoxes    All static colliders in the scene.
+ *
+ * @returns The top‑center of the vaultable box, or `null` if none found.
+ */
+export const resolveVaultTarget = (
+  fromPosition: PhysicsVector,
+  desiredHorizontalDelta: PhysicsVector,
+  feetY: number,
+  staticPhysicsBoxes: readonly PhysicsBox[],
+): PhysicsVector | null => {
+  const horizDist = Math.hypot(desiredHorizontalDelta.x, desiredHorizontalDelta.z);
+  if (horizDist < 0.015) return null; // not moving enough horizontally
+
+  // Normalised approach direction (same as ledge logic)
+  const dirX = desiredHorizontalDelta.x / horizDist;
+  const dirZ = desiredHorizontalDelta.z / horizDist;
+
+  const minTopY = feetY + VAULT_MIN_HEIGHT;
+  const maxTopY = feetY + VAULT_MAX_HEIGHT;
+
+  // Probe point a little in front of the capsule – the same point the ledge
+  // code uses to make sure we have clearance.
+  const probeX = fromPosition.x + dirX * (PLAYER_COLLIDER_RADIUS + VAULT_SIDE_BUFFER);
+  const probeZ = fromPosition.z + dirZ * (PLAYER_COLLIDER_RADIUS + VAULT_SIDE_BUFFER);
+
+  // Where the player *wants* to land if the vault succeeds.
+  const targetX = fromPosition.x + desiredHorizontalDelta.x;
+  const targetZ = fromPosition.z + desiredHorizontalDelta.z;
+
+  const best: { value: { x: number; y: number; z: number; gap: number } | null } = {
+    value: null,
+  };
+
+  const tryBox = (box: PhysicsBox): void => {
+    // The top of the box must be within the vault height window.
+    const topY = box.center.y + box.halfExtents.y;
+    if (topY < minTopY || topY > maxTopY) return;
+
+    // Ensure the probe is inside the “safe” horizontal region of the box.
+    const safeMinX = box.center.x - box.halfExtents.x - VAULT_SIDE_BUFFER;
+    const safeMaxX = box.center.x + box.halfExtents.x + VAULT_SIDE_BUFFER;
+    const safeMinZ = box.center.z - box.halfExtents.z - VAULT_SIDE_BUFFER;
+    const safeMaxZ = box.center.z + box.halfExtents.z + VAULT_SIDE_BUFFER;
+    if (probeX < safeMinX || probeX > safeMaxX) return;
+    if (probeZ < safeMinZ || probeZ > safeMaxZ) return;
+
+    // How far is the probe from the centre of the box?  Pick the nearest box.
+    const gap = Math.hypot(probeX - box.center.x, probeZ - box.center.z);
+    if (best.value === null || gap < best.value.gap) {
+      best.value = { x: targetX, y: topY, z: targetZ, gap };
+    }
+  };
+
+  // Scan all static boxes – you can also pass in a filtered subset if you
+  // only want “vault‑able” objects.
+  for (const box of staticPhysicsBoxes) {
+    tryBox(box);
+  }
+
+  const resolved = best.value;
+  return resolved === null ? null : { x: resolved.x, y: resolved.y, z: resolved.z };
+};
+
+// ----------------------------------------------------------------------
+//  WALL HANG HELPERS
+//
+//  Wall hanging is deliberately separate from ledge grabbing. A candidate
+//  must be a tall, vertically overlapping box in front of the player; an
+//  arbitrary collision is never enough to enter this state.
+// ----------------------------------------------------------------------
+
+/**
+ * Minimum wall-top height measured from the player's feet. A wall must clear
+ * the capsule's head before it can steal a ledge/vault contact.
+ */
+export const WALL_HANG_MIN_TOP = PLAYER_COLLIDER_CENTER_HEIGHT * 2 + 0.05;
+/** Maximum horizontal reach measured from the capsule's front surface. */
+export const WALL_HANG_REACH = 0.5;
+/** Horizontal side buffer for wall-hang detection. */
+export const WALL_HANG_SIDE_BUFFER = 0.06;
+/** Speed at which the character climbs up while hanging (metres per second). */
+export const WALL_CLIMB_SPEED = 2.5;
+
+const WALL_HANG_SEPARATION = 0.01;
+const WALL_HANG_EPSILON = 0.0001;
+const WALL_CLIMB_CLEARANCE = 0.04;
+const WALL_CLIMB_MIN_PHASE_DURATION = 0.14;
+// Keep the attachment visible for a short beat before a held approach input
+// starts the climb. Otherwise a run into the wall enters and leaves the hang
+// state within one animation frame and feels like an ordinary collision.
+const WALL_HANG_SETTLE_DURATION = 0.14;
+
+export type WallHangResolution = Readonly<{
+  readonly target: PhysicsVector;
+  /** Unit normal pointing away from the approached wall face. */
+  readonly wallNormal: PhysicsVector;
+  /** Point on the approached face at the player's current vertical anchor. */
+  readonly wallFacePoint: PhysicsVector;
+  readonly wallTopY: number;
+  readonly box: PhysicsBox;
+  /** Gap between the capsule front and the wall face in metres. */
+  readonly gap: number;
+}>;
+
+const normalizeHorizontal = (vector: PhysicsVector): PhysicsVector | null => {
+  const length = Math.hypot(vector.x, vector.z);
+  if (length <= WALL_HANG_EPSILON) {
+    return null;
+  }
+  return { x: vector.x / length, y: 0, z: vector.z / length };
+};
+
+const clampNumber = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value));
+
+/**
+ * Resolve a wall hang and retain the geometry needed by a climb transition.
+ *
+ * `fromPosition` is the capsule centre (its feet are at `y -
+ * PLAYER_COLLIDER_CENTER_HEIGHT`). Reach is measured from the capsule's front
+ * surface, so a target is always offset from the wall by the capsule radius
+ * and a small separation epsilon.
+ */
+export const resolveWallHangTargetDetails = (
+  fromPosition: PhysicsVector,
+  forwardVector: PhysicsVector,
+  staticPhysicsBoxes: readonly PhysicsBox[],
+): WallHangResolution | null => {
+  const forward = normalizeHorizontal(forwardVector);
+  if (forward === null) {
+    return null;
+  }
+
+  const facingX = Math.abs(forward.x) >= Math.abs(forward.z);
+  const topThreshold = fromPosition.y + (WALL_HANG_MIN_TOP - PLAYER_COLLIDER_CENTER_HEIGHT);
+  const capsuleBottomY = fromPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT;
+  const capsuleTopY = fromPosition.y + PLAYER_COLLIDER_CENTER_HEIGHT;
+  let best: WallHangResolution | null = null;
+
+  for (const box of staticPhysicsBoxes) {
+    const minX = box.center.x - box.halfExtents.x;
+    const maxX = box.center.x + box.halfExtents.x;
+    const minZ = box.center.z - box.halfExtents.z;
+    const maxZ = box.center.z + box.halfExtents.z;
+    const bottomY = box.center.y - box.halfExtents.y;
+    const topY = box.center.y + box.halfExtents.y;
+
+    if (topY < topThreshold) {
+      continue;
+    }
+    if (topY < capsuleBottomY || bottomY > capsuleTopY) {
+      continue;
+    }
+
+    const face = facingX ? (forward.x > 0 ? minX : maxX) : forward.z > 0 ? minZ : maxZ;
+    const centreAxis = facingX ? fromPosition.x : fromPosition.z;
+    const signedGap = facingX
+      ? forward.x > 0
+        ? face - centreAxis - PLAYER_COLLIDER_RADIUS
+        : centreAxis - face - PLAYER_COLLIDER_RADIUS
+      : forward.z > 0
+        ? face - centreAxis - PLAYER_COLLIDER_RADIUS
+        : centreAxis - face - PLAYER_COLLIDER_RADIUS;
+
+    // A negative signed gap means that the capsule is already through the
+    // approached face (or the wall is behind the player). Do not grab it.
+    if (signedGap < -WALL_HANG_SEPARATION || signedGap > WALL_HANG_REACH) {
+      continue;
+    }
+
+    const orthogonalPosition = facingX ? fromPosition.z : fromPosition.x;
+    const orthogonalMin = facingX ? minZ : minX;
+    const orthogonalMax = facingX ? maxZ : maxX;
+    const orthogonalReach = PLAYER_COLLIDER_RADIUS + WALL_HANG_SIDE_BUFFER;
+    if (
+      orthogonalPosition < orthogonalMin - orthogonalReach ||
+      orthogonalPosition > orthogonalMax + orthogonalReach
+    ) {
+      continue;
+    }
+
+    const safeOrthogonalMin = orthogonalMin + PLAYER_COLLIDER_RADIUS + WALL_HANG_SEPARATION;
+    const safeOrthogonalMax = orthogonalMax - PLAYER_COLLIDER_RADIUS - WALL_HANG_SEPARATION;
+    const targetOrthogonal =
+      safeOrthogonalMin <= safeOrthogonalMax
+        ? clampNumber(orthogonalPosition, safeOrthogonalMin, safeOrthogonalMax)
+        : (orthogonalMin + orthogonalMax) / 2;
+    const wallNormal = facingX
+      ? { x: forward.x > 0 ? -1 : 1, y: 0, z: 0 }
+      : { x: 0, y: 0, z: forward.z > 0 ? -1 : 1 };
+    const targetAxis =
+      face +
+      (facingX ? wallNormal.x : wallNormal.z) * (PLAYER_COLLIDER_RADIUS + WALL_HANG_SEPARATION);
+    const target = facingX
+      ? { x: targetAxis, y: fromPosition.y, z: targetOrthogonal }
+      : { x: targetOrthogonal, y: fromPosition.y, z: targetAxis };
+    const wallFacePoint = facingX
+      ? { x: face, y: fromPosition.y, z: targetOrthogonal }
+      : { x: targetOrthogonal, y: fromPosition.y, z: face };
+    const candidate: WallHangResolution = {
+      target,
+      wallNormal,
+      wallFacePoint,
+      wallTopY: topY,
+      box,
+      gap: Math.max(0, signedGap),
+    };
+    if (best === null || candidate.gap < best.gap) {
+      best = candidate;
+    }
+  }
+
+  return best;
+};
+
+/**
+ * Resolve only the capsule-centre target for callers that do not need climb
+ * metadata.
+ */
+export const resolveWallHangTarget = (
+  fromPosition: PhysicsVector,
+  forwardVector: PhysicsVector,
+  staticPhysicsBoxes: readonly PhysicsBox[],
+): PhysicsVector | null =>
+  resolveWallHangTargetDetails(fromPosition, forwardVector, staticPhysicsBoxes)?.target ?? null;
+
+const resolveWallClimbTarget = (wall: WallHangState): PhysicsVector => {
+  const movingAlongX = wall.wallNormal.x !== 0;
+  const orthogonalMin = movingAlongX
+    ? wall.box.center.z - wall.box.halfExtents.z
+    : wall.box.center.x - wall.box.halfExtents.x;
+  const orthogonalMax = movingAlongX
+    ? wall.box.center.z + wall.box.halfExtents.z
+    : wall.box.center.x + wall.box.halfExtents.x;
+  const safeOrthogonalMin = orthogonalMin + PLAYER_COLLIDER_RADIUS + WALL_HANG_SEPARATION;
+  const safeOrthogonalMax = orthogonalMax - PLAYER_COLLIDER_RADIUS - WALL_HANG_SEPARATION;
+  const wallOrthogonal = movingAlongX ? wall.wallFacePoint.z : wall.wallFacePoint.x;
+  const targetOrthogonal =
+    safeOrthogonalMin <= safeOrthogonalMax
+      ? clampNumber(wallOrthogonal, safeOrthogonalMin, safeOrthogonalMax)
+      : (orthogonalMin + orthogonalMax) / 2;
+  const targetY = wall.wallTopY + PLAYER_COLLIDER_CENTER_HEIGHT + WALL_CLIMB_CLEARANCE;
+
+  return movingAlongX
+    ? { x: wall.box.center.x, y: targetY, z: targetOrthogonal }
+    : { x: targetOrthogonal, y: targetY, z: wall.box.center.z };
+};
+
+export const resolveLedgeGrabTarget = (
+  fromPosition: PhysicsVector,
+  desiredHorizontalDelta: PhysicsVector,
+  feetY: number,
+  staticPhysicsBoxes: readonly PhysicsBox[],
+  dynamicPhysicsBoxes: readonly PhysicsBox[],
+): PhysicsVector | null => {
+  const horizontalDistance = Math.hypot(desiredHorizontalDelta.x, desiredHorizontalDelta.z);
+  if (horizontalDistance < 0.015) {
+    return null;
+  }
+  const approachDirectionX = desiredHorizontalDelta.x / horizontalDistance;
+  const approachDirectionZ = desiredHorizontalDelta.z / horizontalDistance;
+  const directionX = desiredHorizontalDelta.x / horizontalDistance;
+  const directionZ = desiredHorizontalDelta.z / horizontalDistance;
+  const minTopY = feetY + LEDGE_GRAB_MIN_HEIGHT;
+  const maxTopY = feetY + LEDGE_GRAB_MAX_HEIGHT;
+  const probeX = fromPosition.x + directionX * (PLAYER_COLLIDER_RADIUS + 0.06);
+  const probeZ = fromPosition.z + directionZ * (PLAYER_COLLIDER_RADIUS + 0.06);
+  const targetX = fromPosition.x + desiredHorizontalDelta.x;
+  const targetZ = fromPosition.z + desiredHorizontalDelta.z;
+  const best: { value: { x: number; y: number; z: number; gap: number } | null } = {
+    value: null,
+  };
+  const tryBox = (box: PhysicsBox): void => {
+    if (box.halfExtents.y < 0.06) {
+      return;
+    }
+    const topY = box.center.y + box.halfExtents.y;
+    if (topY < minTopY || topY > maxTopY) {
+      return;
+    }
+    const probeSafeMinX = box.center.x - box.halfExtents.x - LEDGE_GRAB_SIDE_DISTANCE;
+    const probeSafeMaxX = box.center.x + box.halfExtents.x + LEDGE_GRAB_SIDE_DISTANCE;
+    const probeSafeMinZ = box.center.z - box.halfExtents.z - LEDGE_GRAB_SIDE_DISTANCE;
+    const probeSafeMaxZ = box.center.z + box.halfExtents.z + LEDGE_GRAB_SIDE_DISTANCE;
+    if (
+      probeX < probeSafeMinX ||
+      probeX > probeSafeMaxX ||
+      probeZ < probeSafeMinZ ||
+      probeZ > probeSafeMaxZ
+    ) {
+      return;
+    }
+    const movingAlongX = Math.abs(desiredHorizontalDelta.x) >= Math.abs(desiredHorizontalDelta.z);
+    const edgeGap = movingAlongX
+      ? directionX >= 0
+        ? box.center.x - box.halfExtents.x - fromPosition.x
+        : fromPosition.x - (box.center.x + box.halfExtents.x)
+      : directionZ >= 0
+        ? box.center.z - box.halfExtents.z - fromPosition.z
+        : fromPosition.z - (box.center.z + box.halfExtents.z);
+    if (edgeGap < LEDGE_GRAB_PLATFORM_TOLERANCE || edgeGap > LEDGE_GRAB_APPROACH_DISTANCE) {
+      return;
+    }
+    const sideDelta = movingAlongX
+      ? Math.abs(probeZ - box.center.z)
+      : Math.abs(probeX - box.center.x);
+    const maxSideDelta =
+      (movingAlongX ? box.halfExtents.z : box.halfExtents.x) + LEDGE_GRAB_SIDE_DISTANCE;
+    if (sideDelta > maxSideDelta) {
+      return;
+    }
+    const halfInsetX = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.x * 0.85);
+    const halfInsetZ = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.z * 0.85);
+    const minTargetX = box.center.x - box.halfExtents.x + halfInsetX;
+    const maxTargetX = box.center.x + box.halfExtents.x - halfInsetX;
+    const minTargetZ = box.center.z - box.halfExtents.z + halfInsetZ;
+    const maxTargetZ = box.center.z + box.halfExtents.z - halfInsetZ;
+    const candidate = {
+      x:
+        minTargetX > maxTargetX
+          ? box.center.x
+          : THREE.MathUtils.clamp(
+              targetX + approachDirectionX * LEDGE_CLIMB_FORWARD_OFFSET,
+              minTargetX,
+              maxTargetX,
+            ),
+      y: topY + PLAYER_COLLIDER_CENTER_HEIGHT,
+      z:
+        minTargetZ > maxTargetZ
+          ? box.center.z
+          : THREE.MathUtils.clamp(
+              targetZ + approachDirectionZ * LEDGE_CLIMB_FORWARD_OFFSET,
+              minTargetZ,
+              maxTargetZ,
+            ),
+    };
+    if (best.value === null || edgeGap < best.value.gap) {
+      best.value = { ...candidate, gap: edgeGap };
+    }
+  };
+  for (const box of staticPhysicsBoxes) {
+    tryBox(box);
+  }
+  for (const box of dynamicPhysicsBoxes) {
+    tryBox(box);
+  }
+  const resolved = best.value;
+  if (resolved === null) {
+    return null;
+  }
+  return { x: resolved.x, y: resolved.y, z: resolved.z };
 };
 
 /**
@@ -1612,15 +2429,15 @@ const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => 
       center: { x: 0, y: -0.1, z: 0 },
       halfExtents: { x: WORLD_BOUNDS.maxX, y: 0.1, z: WORLD_BOUNDS.maxZ },
     },
-      {
-        center: { x: 0, y: 0.39, z: 0 },
-        halfExtents: { x: 0.92, y: 0.39, z: 0.92 },
-      },
-      ...focusRampPhysicsBoxes,
-      ...wallPhysicsBoxes,
-      ...climbingGymPhysicsBoxes,
-      ...collectScenePhysicsBoxes(scene),
-    ];
+    {
+      center: { x: 0, y: 0.39, z: 0 },
+      halfExtents: { x: 0.92, y: 0.39, z: 0.92 },
+    },
+    ...focusRampPhysicsBoxes,
+    ...wallPhysicsBoxes,
+    ...climbingGymPhysicsBoxes,
+    ...collectScenePhysicsBoxes(scene),
+  ];
 };
 
 const getTouchSprintCap = (forwardDirection: number): number => {
@@ -1778,11 +2595,7 @@ const lerp = (start: number, end: number, t: number): number => start + (end - s
 
 const hexToRgb = (color: number): readonly [number, number, number] => {
   const normalized = color & 0xffffff;
-  return [
-    (normalized >> 16) & 0xff,
-    (normalized >> 8) & 0xff,
-    normalized & 0xff,
-  ];
+  return [(normalized >> 16) & 0xff, (normalized >> 8) & 0xff, normalized & 0xff];
 };
 
 const hashNoise2d = (x: number, y: number, seed: number): number => {
@@ -1820,7 +2633,11 @@ const fbmNoise = (x: number, y: number, seed: number): number => {
   return clamp01ForNoise(total / 1.875);
 };
 
-const configureSurfaceTexture = (texture: THREE.CanvasTexture, repeatX: number, repeatY: number): void => {
+const configureSurfaceTexture = (
+  texture: THREE.CanvasTexture,
+  repeatX: number,
+  repeatY: number,
+): void => {
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
   texture.repeat.set(repeatX, repeatY);
@@ -1859,16 +2676,19 @@ const createProceduralSurfaceTexture = (
       const valueLift = clamp01ForNoise(0.91 + coarseNoise * 0.065 + microNoise * 0.025);
 
       data[pixelIndex] = Math.round(
-        clamp01ForNoise((base[0] / 255 * channelMix + secondary[0] / 255 * (1 - channelMix)) * valueLift) *
-          255,
+        clamp01ForNoise(
+          ((base[0] / 255) * channelMix + (secondary[0] / 255) * (1 - channelMix)) * valueLift,
+        ) * 255,
       );
       data[pixelIndex + 1] = Math.round(
-        clamp01ForNoise((base[1] / 255 * channelMix + secondary[1] / 255 * (1 - channelMix)) * valueLift) *
-          255,
+        clamp01ForNoise(
+          ((base[1] / 255) * channelMix + (secondary[1] / 255) * (1 - channelMix)) * valueLift,
+        ) * 255,
       );
       data[pixelIndex + 2] = Math.round(
-        clamp01ForNoise((base[2] / 255 * channelMix + secondary[2] / 255 * (1 - channelMix)) * valueLift) *
-          255,
+        clamp01ForNoise(
+          ((base[2] / 255) * channelMix + (secondary[2] / 255) * (1 - channelMix)) * valueLift,
+        ) * 255,
       );
       data[pixelIndex + 3] = 255;
     }
@@ -1921,27 +2741,9 @@ const createProceduralDetailTexture = (seed: number): THREE.CanvasTexture => {
 };
 
 const createInteriorSurfaceTextures = (): InteriorSurfaceTextures => {
-  const floor = createProceduralSurfaceTexture(
-    1,
-    0xcbd9db,
-    0xb6c8cb,
-    180,
-    0.35,
-  );
-  const wall = createProceduralSurfaceTexture(
-    2,
-    0xe4ebea,
-    0xcbd8d8,
-    220,
-    0.18,
-  );
-  const table = createProceduralSurfaceTexture(
-    3,
-    0xf1f4ef,
-    0xdfe8e5,
-    150,
-    0.28,
-  );
+  const floor = createProceduralSurfaceTexture(1, 0xcbd9db, 0xb6c8cb, 180, 0.35);
+  const wall = createProceduralSurfaceTexture(2, 0xe4ebea, 0xcbd8d8, 220, 0.18);
+  const table = createProceduralSurfaceTexture(3, 0xf1f4ef, 0xdfe8e5, 150, 0.28);
   const wood = createProceduralSurfaceTexture(4, COLORS.paleOak, 0xb29b83, 160, 0.28);
   const fabric = createProceduralSurfaceTexture(5, 0x4a5961, COLORS.charcoal, 110, 0.22);
   const detail = createProceduralDetailTexture(9);
@@ -2637,7 +3439,6 @@ const addDiscardRivers = (parent: THREE.Object3D, cache: TileTextureCache): void
   });
 };
 
-
 const makeLabelTexture = (label: string, accent: string): THREE.CanvasTexture => {
   const canvas = document.createElement("canvas");
   canvas.width = 480;
@@ -2713,25 +3514,25 @@ const createFocusCalibrationHallway = (
 
   const floorMaterial = createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail);
   floorMaterial.fog = false;
-  const wallMaterial = createMaterial(0xe5e9e4, 0.76, 0.08, surfaceTextures.wall, surfaceTextures.detail);
+  const wallMaterial = createMaterial(
+    0xe5e9e4,
+    0.76,
+    0.08,
+    surfaceTextures.wall,
+    surfaceTextures.detail,
+  );
   wallMaterial.fog = false;
-  const ceilingMaterial = createMaterial(0x5d6a6c, 0.7, 0.18, surfaceTextures.table, surfaceTextures.detail);
+  const ceilingMaterial = createMaterial(
+    0x5d6a6c,
+    0.7,
+    0.18,
+    surfaceTextures.table,
+    surfaceTextures.detail,
+  );
   ceilingMaterial.fog = false;
-  const cyanMaterial = createAccentMaterial(
-    COLORS.cyan,
-    0.35,
-    0.2,
-    0.42,
-    surfaceTextures.detail,
-  );
+  const cyanMaterial = createAccentMaterial(COLORS.cyan, 0.35, 0.2, 0.42, surfaceTextures.detail);
   cyanMaterial.fog = false;
-  const redMaterial = createAccentMaterial(
-    COLORS.red,
-    0.35,
-    0.12,
-    0.28,
-    surfaceTextures.detail,
-  );
+  const redMaterial = createAccentMaterial(COLORS.red, 0.35, 0.12, 0.28, surfaceTextures.detail);
   redMaterial.fog = false;
   const targetMaterials = [cyanMaterial, redMaterial] as const;
 
@@ -3039,9 +3840,21 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     surfaceTextures.wall,
     surfaceTextures.detail,
   );
-  const charcoal = createMaterial(COLORS.charcoal, 0.68, 0, surfaceTextures.wall, surfaceTextures.detail);
+  const charcoal = createMaterial(
+    COLORS.charcoal,
+    0.68,
+    0,
+    surfaceTextures.wall,
+    surfaceTextures.detail,
+  );
   const aluminum = createMaterial(COLORS.aluminum, 0.28, 0.9, undefined, surfaceTextures.detail);
-  const paleOak = createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail);
+  const paleOak = createMaterial(
+    COLORS.paleOak,
+    0.66,
+    0,
+    surfaceTextures.wood,
+    surfaceTextures.detail,
+  );
   const red = createAccentMaterial(COLORS.red, 0.38, 0, 0.12, surfaceTextures.detail);
   const cyan = createAccentMaterial(COLORS.cyan, 0.34, 0, 0.28, surfaceTextures.detail);
   const physicalGlassMaterial = new THREE.MeshPhysicalMaterial({
@@ -3109,7 +3922,13 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
   shell.add(ceiling);
   const cantilever = new THREE.Mesh(
     new RoundedBoxGeometry(6.1, 0.28, 2.35, 4, 0.08),
-    createMaterial(COLORS.architecturalWhite, 0.76, 0, surfaceTextures.wall, surfaceTextures.detail),
+    createMaterial(
+      COLORS.architecturalWhite,
+      0.76,
+      0,
+      surfaceTextures.wall,
+      surfaceTextures.detail,
+    ),
   );
   cantilever.name = "CantileveredCeiling";
   cantilever.position.set(
@@ -3129,8 +3948,20 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
         PENTHOUSE_FLOOR_DEPTH_METERS - PENTHOUSE_WALL_THICKNESS_METERS * 2,
       ),
       x < 0
-        ? createMaterial(COLORS.architecturalWhite, 0.76, 0, surfaceTextures.wall, surfaceTextures.detail)
-        : createMaterial(COLORS.structuralGray, 0.58, 0.05, surfaceTextures.wall, surfaceTextures.detail),
+        ? createMaterial(
+            COLORS.architecturalWhite,
+            0.76,
+            0,
+            surfaceTextures.wall,
+            surfaceTextures.detail,
+          )
+        : createMaterial(
+            COLORS.structuralGray,
+            0.58,
+            0.05,
+            surfaceTextures.wall,
+            surfaceTextures.detail,
+          ),
     );
     sideWall.name = x < 0 ? "WestStructuralWall" : "EastStructuralWall";
     sideWall.position.set(x, PENTHOUSE_CEILING_HEIGHT_METERS / 2, 0);
@@ -3157,11 +3988,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     createMaterial(COLORS.charcoal, 0.68, 0, surfaceTextures.wall, surfaceTextures.detail),
   );
   corridor.name = "DarkCorridorInset";
-  corridor.position.set(
-    PENTHOUSE_SIDE_WALL_X - 0.2,
-    2.15,
-    PENTHOUSE_HALF_DEPTH_METERS * 0.34,
-  );
+  corridor.position.set(PENTHOUSE_SIDE_WALL_X - 0.2, 2.15, PENTHOUSE_HALF_DEPTH_METERS * 0.34);
   shell.add(corridor);
 
   const northGlass = new THREE.Mesh(
@@ -3239,11 +4066,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     }),
   );
   teacherPanel.name = "TeacherPanel";
-  teacherPanel.position.set(
-    -PENTHOUSE_HALF_WIDTH_METERS + 8,
-    2.5,
-    PENTHOUSE_NORTH_GLASS_Z + 0.26,
-  );
+  teacherPanel.position.set(-PENTHOUSE_HALF_WIDTH_METERS + 8, 2.5, PENTHOUSE_NORTH_GLASS_Z + 0.26);
   teacherPanel.userData.dofIgnore = true;
   accents.add(teacherPanel);
   const teacherPanelLine = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.025, 0.05), cyan);
@@ -3261,11 +4084,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     new RoundedBoxGeometry(3.05, 0.34, 0.92, 5, 0.14),
     createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail),
   );
-  sofaSeat.position.set(
-    PENTHOUSE_HALF_WIDTH_METERS - 6.2,
-    0.48,
-    -PENTHOUSE_HALF_DEPTH_METERS + 4,
-  );
+  sofaSeat.position.set(PENTHOUSE_HALF_WIDTH_METERS - 6.2, 0.48, -PENTHOUSE_HALF_DEPTH_METERS + 4);
   sofaSeat.castShadow = true;
   sofa.add(sofaSeat);
   const sofaBack = new THREE.Mesh(
@@ -3316,11 +4135,7 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     new RoundedBoxGeometry(2.38, 0.08, 0.61, 4, 0.025),
     createMaterial(COLORS.paleOak, 0.66, 0, surfaceTextures.wood, surfaceTextures.detail),
   );
-  barTop.position.set(
-    -PENTHOUSE_HALF_WIDTH_METERS + 5.2,
-    0.96,
-    -PENTHOUSE_HALF_DEPTH_METERS + 4.2,
-  );
+  barTop.position.set(-PENTHOUSE_HALF_WIDTH_METERS + 5.2, 0.96, -PENTHOUSE_HALF_DEPTH_METERS + 4.2);
   bar.add(barTop);
   furniture.add(bar);
 
@@ -3331,7 +4146,13 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     surfaceTextures.table,
     surfaceTextures.detail,
   );
-  const stationInset = createMaterial(COLORS.charcoal, 0.72, 0, surfaceTextures.wall, surfaceTextures.detail);
+  const stationInset = createMaterial(
+    COLORS.charcoal,
+    0.72,
+    0,
+    surfaceTextures.wall,
+    surfaceTextures.detail,
+  );
   const stationPlacements = [
     ["SouthPlayerStation", 0, 0, 2.03, 0],
     ["NorthPlayerStation", 0, 0, -2.03, Math.PI],
@@ -3421,99 +4242,69 @@ const addArchitecture = (scene: THREE.Scene, quality: SceneQuality): Architectur
     const baseMaterial = createMaterial(0x3a4c57, 0.61, 0.05, undefined, surfaceTextures.detail);
     const ledgeMaterial = createMaterial(0x5f7784, 0.49, 0.12, undefined, surfaceTextures.detail);
     const railMaterial = createAccentMaterial(0x849ead, 0.54, 0.21, 0.18, surfaceTextures.detail);
-
-    const addLedge = (
-      name: string,
-      x: number,
-      z: number,
-      topY: number,
-      width: number,
-      depth: number,
-    ): void => {
-      const ledge = new THREE.Mesh(new RoundedBoxGeometry(width, 0.16, depth, 4, 0.05), ledgeMaterial);
-      ledge.name = name;
-      ledge.position.set(x, topY - 0.08, z);
-      ledge.castShadow = true;
-      ledge.receiveShadow = true;
-      gym.add(ledge);
+    const resolveMaterial = (material: ClimbingGymObstacleMaterial): THREE.Material => {
+      if (material === "base") {
+        return baseMaterial;
+      }
+      if (material === "ledge") {
+        return ledgeMaterial;
+      }
+      return railMaterial;
     };
 
-    const run = new THREE.Mesh(new RoundedBoxGeometry(3.25, 0.22, 1.9, 4, 0.08), baseMaterial);
-    run.name = "ClimbingGymRun";
-    run.position.set(
-      CLIMBING_GYM_ZONE_ORIGIN_X,
-      CLIMBING_GYM_RUN_Y,
-      CLIMBING_GYM_ZONE_ORIGIN_Z,
-    );
-    run.castShadow = true;
-    run.receiveShadow = true;
-    gym.add(run);
+    const addFeature = (obstacle: ClimbingGymObstacle): void => {
+      const material = resolveMaterial(obstacle.material);
 
-    addLedge(
-      "ClimbingGymHoldOne",
-      CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
-      CLIMBING_GYM_ZONE_ORIGIN_Z - 0.3,
-      0.95,
-      1.55,
-      1.35,
-    );
-    addLedge(
-      "ClimbingGymHoldTwo",
-      CLIMBING_GYM_ZONE_ORIGIN_X + 0.9,
-      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-      1.54,
-      1.40,
-      1.28,
-    );
-    addLedge(
-      "ClimbingGymHoldThree",
-      CLIMBING_GYM_ZONE_ORIGIN_X + 1.58,
-      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.44,
-      2.12,
-      1.25,
-      1.12,
-    );
+      if (obstacle.kind === "run") {
+        const run = new THREE.Mesh(
+          new RoundedBoxGeometry(obstacle.width, obstacle.height, obstacle.depth, 4, 0.08),
+          material,
+        );
+        run.name = obstacle.name;
+        run.position.set(obstacle.x, obstacle.y, obstacle.z);
+        run.castShadow = true;
+        run.receiveShadow = true;
+        gym.add(run);
+        return;
+      }
 
-    const rightWall = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.95, 1.45), railMaterial);
-    rightWall.name = "ClimbingGymRightWall";
-    rightWall.position.set(
-      CLIMBING_GYM_ZONE_ORIGIN_X + 1.95,
-      1.07,
-      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-    );
-    rightWall.castShadow = true;
-    rightWall.receiveShadow = true;
-    gym.add(rightWall);
-    const leftHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
-    leftHandrail.name = "ClimbingGymHandrailLeft";
-    leftHandrail.position.set(
-      CLIMBING_GYM_ZONE_ORIGIN_X - 0.95,
-      1.4,
-      CLIMBING_GYM_ZONE_ORIGIN_Z - 0.06,
-    );
-    leftHandrail.castShadow = true;
-    leftHandrail.receiveShadow = true;
-    gym.add(leftHandrail);
-    const centerHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
-    centerHandrail.name = "ClimbingGymHandrailCenter";
-    centerHandrail.position.set(
-      CLIMBING_GYM_ZONE_ORIGIN_X + 0.2,
-      1.98,
-      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.1,
-    );
-    centerHandrail.castShadow = true;
-    centerHandrail.receiveShadow = true;
-    gym.add(centerHandrail);
-    const rightHandrail = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.15, 2.2), railMaterial);
-    rightHandrail.name = "ClimbingGymHandrailRight";
-    rightHandrail.position.set(
-      CLIMBING_GYM_ZONE_ORIGIN_X + 1.35,
-      2.56,
-      CLIMBING_GYM_ZONE_ORIGIN_Z + 0.32,
-    );
-    rightHandrail.castShadow = true;
-    rightHandrail.receiveShadow = true;
-    gym.add(rightHandrail);
+      if (obstacle.kind === "ledge") {
+        const ledge = new THREE.Mesh(
+          new RoundedBoxGeometry(
+            obstacle.width,
+            CLIMBING_GYM_PLATFORM_HEIGHT_METERS,
+            obstacle.depth,
+            4,
+            0.05,
+          ),
+          material,
+        );
+        ledge.name = obstacle.name;
+        ledge.position.set(
+          obstacle.x,
+          obstacle.topY - CLIMBING_GYM_PLATFORM_HEIGHT_METERS / 2,
+          obstacle.z,
+        );
+        ledge.castShadow = true;
+        ledge.receiveShadow = true;
+        gym.add(ledge);
+        return;
+      }
+
+      const prism = new THREE.Mesh(
+        new THREE.BoxGeometry(obstacle.width, obstacle.height, obstacle.depth),
+        material,
+      );
+      prism.name = obstacle.name;
+      prism.position.set(obstacle.x, obstacle.y, obstacle.z);
+      prism.castShadow = true;
+      prism.receiveShadow = true;
+      gym.add(prism);
+    };
+
+    for (const obstacle of CLIMBING_GYM_FEATURES) {
+      addFeature(obstacle);
+    }
 
     root.add(gym);
   };
@@ -3832,7 +4623,13 @@ const addVisualMapEntity = (
       );
       break;
     case "lightBar":
-      addGeneratedLightBar(parent, position, THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0), palette, random);
+      addGeneratedLightBar(
+        parent,
+        position,
+        THREE.MathUtils.degToRad(entity.rotationDegrees ?? 0),
+        palette,
+        random,
+      );
       break;
     case "sculpture":
       addGeneratedSculpture(parent, position, palette, random);
@@ -3911,9 +4708,10 @@ const createGeneratedRoom = (
   const floorWidth = mapDocument.floor.width;
   const floorDepth = mapDocument.floor.depth;
   const requestedFloorRotationDegrees = mapDocument.floor.rotationDegrees;
-  const floorRotation = (requestedFloorRotationDegrees === undefined
-    ? (floorRotationSeed - 0.5) * 0.12
-    : THREE.MathUtils.degToRad(requestedFloorRotationDegrees)
+  const floorRotation = (
+    requestedFloorRotationDegrees === undefined
+      ? (floorRotationSeed - 0.5) * 0.12
+      : THREE.MathUtils.degToRad(requestedFloorRotationDegrees)
   ) as number;
   const floorMaterial = createEpoxyFloorMaterial(surfaceTextures.floor, surfaceTextures.detail);
   const floorPanel = new THREE.Mesh(
@@ -3964,11 +4762,7 @@ const createGeneratedRoom = (
     const z = quantizeToGrid(-ceilingLightSpanZ / 2 + random.nextFloat() * ceilingLightSpanZ);
     addGeneratedLightBar(
       root,
-      new THREE.Vector3(
-        x,
-        PENTHOUSE_CEILING_HEIGHT_METERS - 0.42 + random.nextFloat() * 0.16,
-        z,
-      ),
+      new THREE.Vector3(x, PENTHOUSE_CEILING_HEIGHT_METERS - 0.42 + random.nextFloat() * 0.16, z),
       random.nextFloat() > 0.5 ? 0 : Math.PI / 2,
       palette,
       random,
@@ -4021,7 +4815,13 @@ const createGeneratedRoom = (
     let entityKind: VisualMapEntityKind;
     if (kind === 0) {
       entityKind = "planter";
-      addGeneratedPlanter(root, new THREE.Vector3(position.x, 0, position.z), palette, random, surfaceTextures);
+      addGeneratedPlanter(
+        root,
+        new THREE.Vector3(position.x, 0, position.z),
+        palette,
+        random,
+        surfaceTextures,
+      );
     } else if (kind === 1) {
       entityKind = "divider";
       addGeneratedDivider(root, position, slot.rotation, palette, random, surfaceTextures);
@@ -4107,6 +4907,7 @@ interface ExplorationKnockable {
   angularVelocity: number;
   targetAngle: number;
   hasBodyState: boolean;
+  kickCooldownSeconds: number;
 }
 
 interface ExplorationBuildingSpec {
@@ -4205,39 +5006,32 @@ export const createExplorationWorld = (
   const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
   const windowGeometry = new THREE.BoxGeometry(0.56, 0.055, 0.045);
   const bridgeGeometry = new RoundedBoxGeometry(EXPLORATION_CHUNK_SIZE * 0.86, 0.14, 0.2, 3, 0.035);
-  const groundMaterials = EXPLORATION_BIOMES.map(
-    (style) => createMaterial(style.ground, 0.9, 0, undefined, surfaceTextures?.detail),
+  const groundMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.ground, 0.9, 0, undefined, surfaceTextures?.detail),
   );
-  const pathMaterials = EXPLORATION_BIOMES.map(
-    (style) => createMaterial(style.path, 0.82, 0, undefined, surfaceTextures?.detail),
+  const pathMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.path, 0.82, 0, undefined, surfaceTextures?.detail),
   );
-  const propMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createMaterial(style.prop, 0.66, 0.05, undefined, surfaceTextures?.detail),
+  const propMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.prop, 0.66, 0.05, undefined, surfaceTextures?.detail),
   );
-  const accentMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createAccentMaterial(style.accent, 0.35, 0.16, 0.28, surfaceTextures?.detail),
+  const accentMaterials = EXPLORATION_BIOMES.map((style) =>
+    createAccentMaterial(style.accent, 0.35, 0.16, 0.28, surfaceTextures?.detail),
   );
-  const buildingMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createMaterial(style.prop, 0.78, 0.08, undefined, surfaceTextures?.detail),
+  const buildingMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.prop, 0.78, 0.08, undefined, surfaceTextures?.detail),
   );
-  const windowMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createAccentMaterial(style.accent, 0.32, 0.18, 0.2, surfaceTextures?.detail),
+  const windowMaterials = EXPLORATION_BIOMES.map((style) =>
+    createAccentMaterial(style.accent, 0.32, 0.18, 0.2, surfaceTextures?.detail),
   );
-  const bridgeMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createMaterial(style.path, 0.48, 0.44, undefined, surfaceTextures?.detail),
+  const bridgeMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.path, 0.48, 0.44, undefined, surfaceTextures?.detail),
   );
-  const citySignMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createAccentMaterial(style.accent, 0.24, 0.25, 0.35, surfaceTextures?.detail),
+  const citySignMaterials = EXPLORATION_BIOMES.map((style) =>
+    createAccentMaterial(style.accent, 0.24, 0.25, 0.35, surfaceTextures?.detail),
   );
-  const utilityPostMaterials = EXPLORATION_BIOMES.map(
-    (style) =>
-      createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
+  const utilityPostMaterials = EXPLORATION_BIOMES.map((style) =>
+    createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
   );
   const activeChunks = new Map<string, ExplorationChunk>();
   const knockCollisionRefreshDistance = 1.05;
@@ -4249,6 +5043,11 @@ export const createExplorationWorld = (
   const knockLinearImpulseScale = 0.85;
   const knockLiftImpulse = 0.55;
   const knockAngularImpulseScale = 3.1;
+  const knockedLinearDamping = 0.22;
+  const knockedAngularDamping = 0.25;
+  const knockedRestitution = 0.35;
+  const knockedFriction = 0.21;
+  const knockRehitCooldownSeconds = 0.12;
   let nextKnockablePhysicsId = 0;
   const knockAxis = new THREE.Vector3(0, 0, 1);
   const knockDirection = new THREE.Vector3();
@@ -4289,7 +5088,11 @@ export const createExplorationWorld = (
       }
       const mesh = new THREE.Mesh(geometry, material);
       mesh.name = name;
-      mesh.position.set((clippedPiece.minX + clippedPiece.maxX) / 2, y, (clippedPiece.minZ + clippedPiece.maxZ) / 2);
+      mesh.position.set(
+        (clippedPiece.minX + clippedPiece.maxX) / 2,
+        y,
+        (clippedPiece.minZ + clippedPiece.maxZ) / 2,
+      );
       mesh.scale.set(
         (clippedPiece.maxX - clippedPiece.minX) / baseWidth,
         1,
@@ -4432,7 +5235,9 @@ export const createExplorationWorld = (
 
     const buildingCount = Math.max(
       1,
-      Math.round((style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE),
+      Math.round(
+        (style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE,
+      ),
     );
     const buildingSpecs: ExplorationBuildingSpec[] = [];
     for (let index = 0; index < buildingCount; index += 1) {
@@ -4441,14 +5246,14 @@ export const createExplorationWorld = (
       const x = quantizeToGrid(
         edge === 0
           ? originX - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-        : edge === 1
+          : edge === 1
             ? originX + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
             : originX + edgeOffset,
       );
       const z = quantizeToGrid(
         edge === 2
           ? originZ - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-        : edge === 3
+          : edge === 3
             ? originZ + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
             : originZ + edgeOffset,
       );
@@ -4631,7 +5436,9 @@ export const createExplorationWorld = (
 
     const propCount = Math.max(
       1,
-      Math.round((style.propDensity * 2 + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE),
+      Math.round(
+        (style.propDensity * 2 + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE,
+      ),
     );
     const propMatrices: THREE.Matrix4[] = [];
     const propTransforms: Array<{
@@ -4643,7 +5450,9 @@ export const createExplorationWorld = (
     }> = [];
     const citySignCount = Math.max(
       1,
-      Math.round((style.citySignDensity + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE),
+      Math.round(
+        (style.citySignDensity + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE,
+      ),
     );
     const citySignMatrices: THREE.Matrix4[] = [];
     const citySignTransforms: Array<{
@@ -4679,24 +5488,24 @@ export const createExplorationWorld = (
         quantizeScale(0.65 + random.nextFloat() * 1.25),
       );
       const halfExtent = 0.14 * Math.max(scale.x, scale.z);
-        if (
-          !isExplorationRectOutsidePenthouse({
-            minX: position.x - halfExtent,
-            maxX: position.x + halfExtent,
-            minZ: position.z - halfExtent,
-            maxZ: position.z + halfExtent,
-          }) ||
-          isExplorationRectOutsideWorld({
-            minX: position.x - halfExtent,
-            maxX: position.x + halfExtent,
-            minZ: position.z - halfExtent,
-            maxZ: position.z + halfExtent,
-          }) ||
-          !isExplorationRectOutsideFocusCalibrationRamp({
-            minX: position.x - halfExtent,
-            maxX: position.x + halfExtent,
-            minZ: position.z - halfExtent,
-            maxZ: position.z + halfExtent,
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        }) ||
+        isExplorationRectOutsideWorld({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
         })
       ) {
         continue;
@@ -4728,8 +5537,12 @@ export const createExplorationWorld = (
       const baseHalfWidth = 0.625 * scale.x;
       const baseHalfHeight = 0.11 * scale.y;
       const baseHalfDepth = 0.03 * scale.z;
-      const halfWidth = Math.abs(Math.cos(rotationY)) * baseHalfWidth + Math.abs(Math.sin(rotationY)) * baseHalfDepth;
-      const halfDepth = Math.abs(Math.sin(rotationY)) * baseHalfWidth + Math.abs(Math.cos(rotationY)) * baseHalfDepth;
+      const halfWidth =
+        Math.abs(Math.cos(rotationY)) * baseHalfWidth +
+        Math.abs(Math.sin(rotationY)) * baseHalfDepth;
+      const halfDepth =
+        Math.abs(Math.sin(rotationY)) * baseHalfWidth +
+        Math.abs(Math.cos(rotationY)) * baseHalfDepth;
       if (
         !isExplorationRectOutsidePenthouse({
           minX: position.x - halfWidth,
@@ -4737,7 +5550,7 @@ export const createExplorationWorld = (
           minZ: position.z - halfDepth,
           maxZ: position.z + halfDepth,
         }) ||
-          isExplorationRectOutsideWorld({
+        isExplorationRectOutsideWorld({
           minX: position.x - halfWidth,
           maxX: position.x + halfWidth,
           minZ: position.z - halfDepth,
@@ -4785,7 +5598,7 @@ export const createExplorationWorld = (
           minZ: position.z - baseHalfDepth,
           maxZ: position.z + baseHalfDepth,
         }) ||
-          isExplorationRectOutsideWorld({
+        isExplorationRectOutsideWorld({
           minX: position.x - baseHalfWidth,
           maxX: position.x + baseHalfWidth,
           minZ: position.z - baseHalfDepth,
@@ -4840,6 +5653,7 @@ export const createExplorationWorld = (
           launchLinearVelocity: new THREE.Vector3(),
           launchAngularVelocity: new THREE.Vector3(),
           hasBodyState: false,
+          kickCooldownSeconds: 0,
           isKnocked: false,
           angle: 0,
           angularVelocity: 0,
@@ -4881,6 +5695,7 @@ export const createExplorationWorld = (
           launchLinearVelocity: new THREE.Vector3(),
           launchAngularVelocity: new THREE.Vector3(),
           hasBodyState: false,
+          kickCooldownSeconds: 0,
           isKnocked: false,
           angle: 0,
           angularVelocity: 0,
@@ -4922,6 +5737,7 @@ export const createExplorationWorld = (
           launchLinearVelocity: new THREE.Vector3(),
           launchAngularVelocity: new THREE.Vector3(),
           hasBodyState: false,
+          kickCooldownSeconds: 0,
           isKnocked: false,
           angle: 0,
           angularVelocity: 0,
@@ -4936,8 +5752,12 @@ export const createExplorationWorld = (
 
     const beaconCount = random.nextFloat() < style.beaconDensity * 1.2 + featureBias * 0.2 ? 1 : 0;
     const beaconMatrices: THREE.Matrix4[] = [];
-    const beaconTransforms: Array<{ readonly position: THREE.Vector3; readonly quaternion: THREE.Quaternion; readonly scale: THREE.Vector3; readonly halfExtents: PhysicsVector; }> =
-      [];
+    const beaconTransforms: Array<{
+      readonly position: THREE.Vector3;
+      readonly quaternion: THREE.Quaternion;
+      readonly scale: THREE.Vector3;
+      readonly halfExtents: PhysicsVector;
+    }> = [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
     for (let index = 0; index < beaconCount; index += 1) {
@@ -5007,6 +5827,7 @@ export const createExplorationWorld = (
           launchLinearVelocity: new THREE.Vector3(),
           launchAngularVelocity: new THREE.Vector3(),
           hasBodyState: false,
+          kickCooldownSeconds: 0,
           isKnocked: false,
           angle: 0,
           angularVelocity: 0,
@@ -5076,6 +5897,11 @@ export const createExplorationWorld = (
     impactCollisions: number,
     playerGrounded: boolean,
     dynamicBodyStates: readonly PhysicsBodyState[] = [],
+    applyImpulse?: (
+      dynamicId: number,
+      linearVelocity: PhysicsVector,
+      angularVelocity: PhysicsVector,
+    ) => void,
   ): void => {
     if (deltaSeconds <= 0) {
       return;
@@ -5086,7 +5912,8 @@ export const createExplorationWorld = (
     }
     const impactMagnitude = Math.hypot(impactDelta.x, impactDelta.z);
     const impactSpeed = impactMagnitude / Math.max(deltaSeconds, 1 / 240);
-    const shouldKnock = impactSpeed >= knockImpactSpeedMin && playerGrounded && impactCollisions > 0;
+    const shouldKnock =
+      impactSpeed >= knockImpactSpeedMin && playerGrounded && impactCollisions > 0;
     if (impactMagnitude > 0) {
       knockDirection.set(impactDelta.x, 0, impactDelta.z).normalize();
     } else {
@@ -5096,6 +5923,10 @@ export const createExplorationWorld = (
 
     for (const chunk of activeChunks.values()) {
       for (const knockable of chunk.knockableProps) {
+        const wasKnocked = knockable.isKnocked;
+        if (knockable.kickCooldownSeconds > 0) {
+          knockable.kickCooldownSeconds = Math.max(0, knockable.kickCooldownSeconds - deltaSeconds);
+        }
         if (!knockable.isKnocked) {
           if (!shouldKnock || impactMagnitude <= 0) {
             continue;
@@ -5109,7 +5940,11 @@ export const createExplorationWorld = (
             knockable.basePosition.z - playerPosition.z,
           );
           const impactDistance = knockToObject.length();
-          if (impactDistance > knockCollisionRefreshDistance + Math.max(knockable.halfExtents.x, knockable.halfExtents.z)) {
+          if (
+            impactDistance >
+            knockCollisionRefreshDistance +
+              Math.max(knockable.halfExtents.x, knockable.halfExtents.z)
+          ) {
             continue;
           }
           if (impactDistance <= Number.EPSILON) {
@@ -5122,7 +5957,10 @@ export const createExplorationWorld = (
           knockable.isKnocked = true;
           knockable.angle = 0;
           knockable.hasBodyState = false;
-          const impactFactor = Math.max(0, Math.min(1, (impactSpeed - knockImpactSpeedMin) / knockImpactSpeedMin));
+          const impactFactor = Math.max(
+            0,
+            Math.min(1, (impactSpeed - knockImpactSpeedMin) / knockImpactSpeedMin),
+          );
           const knockScale = Math.max(0.02, impactFactor);
           knockable.angularVelocity =
             knockAngularVelocityMin +
@@ -5138,13 +5976,78 @@ export const createExplorationWorld = (
             knockLiftImpulse + knockScale * 0.8,
             knockDirection.z * knockLinearImpulseScale * knockScale * 1.9,
           );
-          knockable.launchAngularVelocity.copy(knockAxis).multiplyScalar(knockAngularImpulseScale * (knockScale + 0.12));
+          knockable.launchAngularVelocity
+            .copy(knockAxis)
+            .multiplyScalar(knockAngularImpulseScale * (knockScale + 0.12));
           physicsChanged = true;
         }
         if (!knockable.isKnocked) {
           continue;
         }
         const bodyState = dynamicStateById.get(knockable.physicsId);
+        if (bodyState !== undefined) {
+          knockable.basePosition.set(bodyState.center.x, bodyState.center.y, bodyState.center.z);
+        }
+        if (
+          wasKnocked &&
+          shouldKnock &&
+          knockable.kickCooldownSeconds <= 0 &&
+          impactMagnitude > 0 &&
+          knockable.halfExtents.y <= knockableHeightMax
+        ) {
+          knockToObject.set(
+            knockable.basePosition.x - playerPosition.x,
+            0,
+            knockable.basePosition.z - playerPosition.z,
+          );
+          const impactDistance = knockToObject.length();
+          if (
+            impactDistance <=
+              knockCollisionRefreshDistance +
+                Math.max(knockable.halfExtents.x, knockable.halfExtents.z) &&
+            impactDistance > Number.EPSILON
+          ) {
+            const knockApproach = knockToObject.dot(knockDirection) / impactDistance;
+            if (knockApproach > knockApproachDotMin) {
+              const impactFactor = Math.max(
+                0,
+                Math.min(1, (impactSpeed - knockImpactSpeedMin) / knockImpactSpeedMin),
+              );
+              const knockScale = Math.max(0.02, impactFactor);
+              knockAxis.set(knockDirection.z, 0, -knockDirection.x);
+              if (knockAxis.lengthSq() <= Number.EPSILON) {
+                knockAxis.set(1, 0, 0);
+              }
+              knockAxis.normalize();
+              const impulseLinear = {
+                x: knockDirection.x * knockLinearImpulseScale * knockScale * 1.1,
+                y: knockLiftImpulse * 0.2,
+                z: knockDirection.z * knockLinearImpulseScale * knockScale * 1.1,
+              };
+              const impulseAngular = {
+                x: knockAxis.x * knockAngularImpulseScale * (knockScale + 0.1),
+                y: knockAxis.y * knockAngularImpulseScale * (knockScale + 0.1),
+                z: knockAxis.z * knockAngularImpulseScale * (knockScale + 0.1),
+              };
+              if (bodyState === undefined) {
+                knockable.launchLinearVelocity.set(
+                  impulseLinear.x,
+                  impulseLinear.y,
+                  impulseLinear.z,
+                );
+                knockable.launchAngularVelocity.set(
+                  impulseAngular.x,
+                  impulseAngular.y,
+                  impulseAngular.z,
+                );
+                physicsChanged = true;
+              } else {
+                applyImpulse?.(knockable.physicsId, impulseLinear, impulseAngular);
+              }
+              knockable.kickCooldownSeconds = knockRehitCooldownSeconds;
+            }
+          }
+        }
         if (bodyState === undefined) {
           knockable.hasBodyState = false;
           if (knockable.angle < knockable.targetAngle) {
@@ -5247,9 +6150,10 @@ export const createExplorationWorld = (
                 y: knockable.launchAngularVelocity.y,
                 z: knockable.launchAngularVelocity.z,
               },
-              linearDamping: 0.75,
-              angularDamping: 0.75,
-              restitution: 0.15,
+              linearDamping: knockedLinearDamping,
+              angularDamping: knockedAngularDamping,
+              restitution: knockedRestitution,
+              friction: knockedFriction,
               ...(knockable.rotationY === undefined ? {} : { rotationY: knockable.rotationY }),
             });
             continue;
@@ -5376,23 +6280,28 @@ const addLighting = (scene: THREE.Scene): void => {
 
   // Keep a soft visual reference for the sun rig controls.
   const skySunGlow = new THREE.Mesh(
-    new THREE.SphereGeometry(0.82, 20, 12),
+    new THREE.SphereGeometry(0.92, 24, 16),
     new THREE.MeshBasicMaterial({
-      color: 0xffe7b6,
+      color: 0xffb95c,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.78,
       depthTest: false,
       depthWrite: false,
+      fog: false,
+      toneMapped: false,
+      blending: THREE.AdditiveBlending,
     }),
   );
   const skySunCore = new THREE.Mesh(
-    new THREE.SphereGeometry(0.24, 20, 12),
+    new THREE.SphereGeometry(0.3, 24, 16),
     new THREE.MeshBasicMaterial({
-      color: 0xfff0ce,
+      color: 0xffdf9b,
       transparent: true,
-      opacity: 0.95,
+      opacity: 1,
       depthTest: false,
       depthWrite: false,
+      fog: false,
+      toneMapped: false,
     }),
   );
   const skySunReference = new THREE.Group();
@@ -5400,6 +6309,8 @@ const addLighting = (scene: THREE.Scene): void => {
   skySunReference.add(skySunGlow, skySunCore);
   skySunReference.position.set(-5, 9.5, 6.5);
   skySunReference.userData.dofIgnore = true;
+  skySunGlow.renderOrder = 10;
+  skySunCore.renderOrder = 11;
   lightingRoot.add(skySunReference);
 };
 
@@ -5408,6 +6319,9 @@ const addFloor = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResour
 };
 
 const SKY_SUN_DISTANCE = 10;
+// Lower the visible reference into the north glazing so the complete disk stays
+// inside the seat camera's sky band instead of clipping against the viewport edge.
+const SKY_SUN_REFERENCE_ELEVATION_OFFSET = 0.42;
 
 const isDofIgnored = (object: THREE.Object3D): boolean => {
   let current: THREE.Object3D | null = object;
@@ -5495,14 +6409,20 @@ export const createMahjongTableScene = (
 ): MahjongTableMount => {
   const debugEnabled = options.debug === true;
   const roomSeed = normalizeVisualRoomSeed(options.roomSeed);
+  const clampReticleCoordinate = (value: number, fallback: number): number =>
+    Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : fallback;
+  const resolveReticlePosition = (
+    reticlePosition: ReticlePosition | undefined = DEFAULT_RETICLE_POSITION,
+  ): ReticlePosition => ({
+    x: clampReticleCoordinate(reticlePosition.x, DEFAULT_RETICLE_POSITION.x),
+    y: clampReticleCoordinate(reticlePosition.y, DEFAULT_RETICLE_POSITION.y),
+  });
   const visualCameraPresets = createVisualCameraPresets();
   const sceneStateStorage = getVisualSceneStateStorage();
   const persistedSceneState = readVisualSceneState(sceneStateStorage, roomSeed);
   const debugPreferencesStorage = getVisualDebugPreferencesStorage();
   const authoredRoomMap = getAuthoredVisualMapDocument();
-  const persistedDebugPreferences = debugEnabled
-    ? readVisualDebugPreferences(debugPreferencesStorage)
-    : null;
+  const persistedDebugPreferences = readVisualDebugPreferences(debugPreferencesStorage);
   const persistedQuality = persistedDebugPreferences?.qualityMode;
   const requestedQuality =
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
@@ -5582,7 +6502,12 @@ export const createMahjongTableScene = (
   composer.addPass(bokehPass);
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
-  const focusNdc = new THREE.Vector2(0, 0);
+  const focusNdc = new THREE.Vector2();
+  const setFocusReticle = (position?: ReticlePosition): void => {
+    const normalized = resolveReticlePosition(position);
+    focusNdc.set(normalized.x * 2 - 1, 1 - normalized.y * 2);
+  };
+  setFocusReticle(options.reticlePosition);
   let focusCalibrationRoot: THREE.Group | null = null;
   let focusCalibrationLabels: readonly THREE.Sprite[] = [];
   let debugBoundsRoot: THREE.Group | null = null;
@@ -5611,7 +6536,7 @@ export const createMahjongTableScene = (
   let debugCameraShiftEnabled = true;
   let debugCameraBobEnabled = true;
   let debugBokehEnabled = bokehPass.enabled;
-  let debugBokehStrength = 1;
+  let debugBokehStrength = STANDING_DOF_INTENSITY;
   let debugAmbientOcclusionEnabled = gtaoPass.enabled;
   let debugAutoExposureEnabled = true;
   let debugExposureTarget = 1.02;
@@ -5638,11 +6563,19 @@ export const createMahjongTableScene = (
     if (skySunReference === null) {
       return;
     }
-    const horizontal = Math.cos(debugSunElevation) * SKY_SUN_DISTANCE;
+    // Keep the southwest key light physically correct, but mirror its visible
+    // reference into the north-facing glazing so the seat camera can read it.
+    const visualSunYaw = Math.atan2(-Math.abs(Math.sin(debugSunYaw)), Math.cos(debugSunYaw));
+    const visualSunElevation = THREE.MathUtils.clamp(
+      debugSunElevation - SKY_SUN_REFERENCE_ELEVATION_OFFSET,
+      0.25,
+      1.2,
+    );
+    const horizontal = Math.cos(visualSunElevation) * SKY_SUN_DISTANCE;
     skySunReference.position.set(
-      Math.cos(debugSunYaw) * horizontal,
-      Math.sin(debugSunElevation) * SKY_SUN_DISTANCE,
-      Math.sin(debugSunYaw) * horizontal,
+      Math.cos(visualSunYaw) * horizontal,
+      Math.sin(visualSunElevation) * SKY_SUN_DISTANCE,
+      Math.sin(visualSunYaw) * horizontal,
     );
     const intensityScale = THREE.MathUtils.clamp(
       0.85 + Math.pow(debugSunIntensity / 6, 0.75) * 0.75,
@@ -5700,7 +6633,7 @@ export const createMahjongTableScene = (
     }
   };
   const persistDebugPreferences = (): void => {
-    if (!suppressDebugPreferencesPersistence) {
+    if (debugEnabled && !suppressDebugPreferencesPersistence) {
       saveDebugPreferences();
     }
   };
@@ -5945,6 +6878,16 @@ export const createMahjongTableScene = (
   let eyeHeight = STANDING_EYE_HEIGHT;
   let firstPersonGroundY = 0;
   let isCrouched = false;
+  let lastDofPosture: boolean | null = null;
+  const syncDofIntensityForPosture = (): void => {
+    const crouchedView = activeView === "seat" && isCrouched;
+    if (crouchedView === lastDofPosture) {
+      return;
+    }
+    lastDofPosture = crouchedView;
+    debugBokehStrength = resolveDofIntensityForPosture(crouchedView);
+    persistDebugPreferences();
+  };
   let jumpOffset = 0;
   let verticalVelocity = 0;
   let grounded = true;
@@ -5953,6 +6896,10 @@ export const createMahjongTableScene = (
   let staticPhysicsBoxes: readonly PhysicsBox[] = [];
   let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
   let appliedPhysicsVersion = -1;
+  let ledgeClimbTransition: ClimbingTransition | null = null;
+  let wallHangState: WallHangState | null = null;
+  let wallClimbTransition: WallClimbTransition | null = null;
+  let wallHangElapsed = 0;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
   let touchMovementActive = false;
@@ -6030,6 +6977,42 @@ export const createMahjongTableScene = (
       z: camera.position.z,
     };
   };
+  const clearWallTraversal = (): void => {
+    wallHangState = null;
+    wallClimbTransition = null;
+    wallHangElapsed = 0;
+  };
+  const beginWallClimb = (): void => {
+    const wall = wallHangState;
+    if (wall === null || wallClimbTransition !== null) {
+      return;
+    }
+    const targetPosition = resolveWallClimbTarget(wall);
+    const clearPosition: PhysicsVector = {
+      x: wall.target.x,
+      y: targetPosition.y,
+      z: wall.target.z,
+    };
+    const liftDistance = Math.max(0, clearPosition.y - wall.target.y);
+    const crossDistance = Math.hypot(
+      targetPosition.x - clearPosition.x,
+      targetPosition.z - clearPosition.z,
+    );
+    wallClimbTransition = {
+      elapsed: 0,
+      liftDuration: Math.max(WALL_CLIMB_MIN_PHASE_DURATION, liftDistance / WALL_CLIMB_SPEED),
+      crossDuration: Math.max(WALL_CLIMB_MIN_PHASE_DURATION, crossDistance / WALL_CLIMB_SPEED),
+      startPosition: { ...wall.target },
+      clearPosition,
+      targetPosition,
+    };
+    wallHangState = null;
+    wallHangElapsed = 0;
+    grounded = false;
+    verticalVelocity = 0;
+    forwardVelocity = 0;
+    strafeVelocity = 0;
+  };
   const resetCameraMotion = (): void => {
     cameraShiftRoll = 0;
     cameraShiftTarget = 0;
@@ -6049,6 +7032,7 @@ export const createMahjongTableScene = (
     "ArrowDown",
     "ArrowRight",
   ]);
+  let jumpKeyHeld = false;
   const hasMovementInput = (): boolean => {
     for (const key of movementKeys) {
       if (pressedKeys.has(key)) {
@@ -6070,6 +7054,9 @@ export const createMahjongTableScene = (
         if (!event.repeat) {
           isCrouched = !isCrouched;
         }
+      } else if (event.code === "Space") {
+        jumpKeyHeld = true;
+        jump();
       } else if (movementKeys.has(event.code)) {
         pressedKeys.add(event.code);
         if (event.code === "KeyW" && !event.repeat) {
@@ -6079,14 +7066,14 @@ export const createMahjongTableScene = (
           }
           lastForwardTapAt = now;
         }
-      } else if (event.code === "Space" && !event.repeat && grounded) {
-        verticalVelocity = JUMP_SPEED;
-        grounded = false;
       }
     }
   };
   const onKeyUp = (event: KeyboardEvent): void => {
     pressedKeys.delete(event.code);
+    if (event.code === "Space") {
+      jumpKeyHeld = false;
+    }
     if (movementKeys.has(event.code) && !hasMovementInput()) {
       isSprinting = false;
     }
@@ -6103,85 +7090,19 @@ export const createMahjongTableScene = (
     return isCrouched;
   };
   const jump = (): void => {
-    if (activeView === "seat" && grounded) {
+    if (activeView === "seat" && wallHangState !== null) {
+      beginWallClimb();
+      return;
+    }
+    if (
+      activeView === "seat" &&
+      grounded &&
+      ledgeClimbTransition === null &&
+      wallClimbTransition === null
+    ) {
       verticalVelocity = JUMP_SPEED;
       grounded = false;
     }
-  };
-  const resolveLedgeGrabTarget = (
-    fromPosition: PhysicsVector,
-    desiredHorizontalDelta: PhysicsVector,
-    feetY: number,
-  ): PhysicsVector | null => {
-    const horizontalDistance = Math.hypot(desiredHorizontalDelta.x, desiredHorizontalDelta.z);
-    if (horizontalDistance < 0.015) {
-      return null;
-    }
-    const directionX = desiredHorizontalDelta.x / horizontalDistance;
-    const directionZ = desiredHorizontalDelta.z / horizontalDistance;
-    const minTopY = feetY + LEDGE_GRAB_MIN_HEIGHT;
-    const maxTopY = feetY + LEDGE_GRAB_MAX_HEIGHT;
-    const probeX = fromPosition.x + directionX * (PLAYER_COLLIDER_RADIUS + 0.06);
-    const probeZ = fromPosition.z + directionZ * (PLAYER_COLLIDER_RADIUS + 0.06);
-    const targetX = fromPosition.x + desiredHorizontalDelta.x;
-    const targetZ = fromPosition.z + desiredHorizontalDelta.z;
-    let best: { x: number; y: number; z: number; gap: number } | null = null;
-    const tryBox = (box: PhysicsBox): void => {
-      if (box.halfExtents.y < 0.06) {
-        return;
-      }
-      const topY = box.center.y + box.halfExtents.y;
-      if (topY < minTopY || topY > maxTopY) {
-        return;
-      }
-      const probeSafeMinX = box.center.x - box.halfExtents.x - LEDGE_GRAB_SIDE_DISTANCE;
-      const probeSafeMaxX = box.center.x + box.halfExtents.x + LEDGE_GRAB_SIDE_DISTANCE;
-      const probeSafeMinZ = box.center.z - box.halfExtents.z - LEDGE_GRAB_SIDE_DISTANCE;
-      const probeSafeMaxZ = box.center.z + box.halfExtents.z + LEDGE_GRAB_SIDE_DISTANCE;
-      if (probeX < probeSafeMinX || probeX > probeSafeMaxX || probeZ < probeSafeMinZ || probeZ > probeSafeMaxZ) {
-        return;
-      }
-      const movingAlongX = Math.abs(desiredHorizontalDelta.x) >= Math.abs(desiredHorizontalDelta.z);
-      const edgeGap = movingAlongX
-        ? directionX >= 0
-          ? box.center.x - box.halfExtents.x - fromPosition.x
-          : fromPosition.x - (box.center.x + box.halfExtents.x)
-        : directionZ >= 0
-          ? box.center.z - box.halfExtents.z - fromPosition.z
-          : fromPosition.z - (box.center.z + box.halfExtents.z);
-      if (edgeGap < LEDGE_GRAB_PLATFORM_TOLERANCE || edgeGap > LEDGE_GRAB_APPROACH_DISTANCE) {
-        return;
-      }
-      const sideDelta = movingAlongX ? Math.abs(probeZ - box.center.z) : Math.abs(probeX - box.center.x);
-      const maxSideDelta = (movingAlongX ? box.halfExtents.z : box.halfExtents.x) + LEDGE_GRAB_SIDE_DISTANCE;
-      if (sideDelta > maxSideDelta) {
-        return;
-      }
-      const halfInsetX = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.x * 0.85);
-      const halfInsetZ = Math.min(LEDGE_GRAB_PLATFORM_INSET, box.halfExtents.z * 0.85);
-      const minTargetX = box.center.x - box.halfExtents.x + halfInsetX;
-      const maxTargetX = box.center.x + box.halfExtents.x - halfInsetX;
-      const minTargetZ = box.center.z - box.halfExtents.z + halfInsetZ;
-      const maxTargetZ = box.center.z + box.halfExtents.z - halfInsetZ;
-      const candidate = {
-        x: minTargetX > maxTargetX ? box.center.x : THREE.MathUtils.clamp(targetX, minTargetX, maxTargetX),
-        y: topY + PLAYER_COLLIDER_CENTER_HEIGHT,
-        z: minTargetZ > maxTargetZ ? box.center.z : THREE.MathUtils.clamp(targetZ, minTargetZ, maxTargetZ),
-      };
-      if (best === null || edgeGap < best.gap) {
-        best = { ...candidate, gap: edgeGap };
-      }
-    };
-    for (const box of staticPhysicsBoxes) {
-      tryBox(box);
-    }
-    for (const box of dynamicPhysicsBoxes) {
-      tryBox(box);
-    }
-    if (best === null) {
-      return null;
-    }
-    return { x: best.x, y: best.y, z: best.z };
   };
   const onWindowBlur = (): void => {
     swipePointerId = null;
@@ -6192,10 +7113,13 @@ export const createMahjongTableScene = (
     verticalVelocity = 0;
     jumpOffset = 0;
     grounded = true;
+    jumpKeyHeld = false;
     forwardVelocity = 0;
     strafeVelocity = 0;
     isSprinting = false;
     lastForwardTapAt = Number.NEGATIVE_INFINITY;
+    ledgeClimbTransition = null;
+    clearWallTraversal();
     resetCameraMotion();
   };
   const setControlActive = (active: boolean): void => {
@@ -6232,6 +7156,8 @@ export const createMahjongTableScene = (
     jumpOffset = 0;
     verticalVelocity = 0;
     grounded = true;
+    ledgeClimbTransition = null;
+    clearWallTraversal();
     forwardVelocity = 0;
     strafeVelocity = 0;
     isSprinting = false;
@@ -6248,13 +7174,15 @@ export const createMahjongTableScene = (
     const preset = cameraPresets.seat;
     firstPersonGroundY = 0;
     activeView = "seat";
+    ledgeClimbTransition = null;
+    clearWallTraversal();
     resetCameraMotion();
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
     camera.updateMatrix();
     camera.updateMatrixWorld(true);
     syncPhysicsCharacterToCamera();
-    camera.fov = TABLE_CAMERA_FOV;
+    camera.fov = SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
     resetMotionCalibration();
   };
@@ -6307,6 +7235,8 @@ export const createMahjongTableScene = (
     jumpOffset = 0;
     verticalVelocity = 0;
     grounded = true;
+    ledgeClimbTransition = null;
+    clearWallTraversal();
     forwardVelocity = 0;
     strafeVelocity = 0;
     isSprinting = false;
@@ -6316,7 +7246,7 @@ export const createMahjongTableScene = (
     camera.position.copy(preset.position);
     camera.lookAt(preset.target);
     debugFovOverride = null;
-    camera.fov = debugEnabled ? DEBUG_STANDING_FOV : TABLE_CAMERA_FOV;
+    camera.fov = debugEnabled ? DEBUG_STANDING_FOV : SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
     camera.updateMatrix();
     camera.updateMatrixWorld(true);
@@ -6349,6 +7279,8 @@ export const createMahjongTableScene = (
       jumpOffset = 0;
       verticalVelocity = 0;
       grounded = true;
+      ledgeClimbTransition = null;
+      clearWallTraversal();
       forwardVelocity = 0;
       strafeVelocity = 0;
       isSprinting = false;
@@ -6391,6 +7323,8 @@ export const createMahjongTableScene = (
       jumpOffset = 0;
       verticalVelocity = 0;
       grounded = true;
+      ledgeClimbTransition = null;
+      clearWallTraversal();
       forwardVelocity = 0;
       strafeVelocity = 0;
       isSprinting = false;
@@ -6446,6 +7380,7 @@ export const createMahjongTableScene = (
       setDebugCameraPreset("focusCalibration");
       firstPersonGroundY = FOCUS_CALIBRATION_DECK_HEIGHT;
       isCrouched = state.isCrouched;
+      ledgeClimbTransition = null;
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
       camera.position.y = FOCUS_CALIBRATION_DECK_HEIGHT + eyeHeight;
@@ -6465,6 +7400,7 @@ export const createMahjongTableScene = (
       setDebugCameraPreset("climbingGym");
       firstPersonGroundY = CLIMBING_GYM_RUN_Y;
       isCrouched = state.isCrouched;
+      ledgeClimbTransition = null;
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
       camera.position.y = CLIMBING_GYM_RUN_Y + eyeHeight;
@@ -6499,6 +7435,7 @@ export const createMahjongTableScene = (
 
     setView("seat");
     onWindowBlur();
+    ledgeClimbTransition = null;
     firstPersonGroundY = 0;
     isCrouched = state.isCrouched;
     eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
@@ -6514,7 +7451,11 @@ export const createMahjongTableScene = (
       WORLD_BOUNDS.maxZ,
     );
     camera.quaternion.fromArray(state.cameraQuaternion).normalize();
-    camera.fov = debugEnabled ? THREE.MathUtils.clamp(state.cameraFov, 30, 100) : TABLE_CAMERA_FOV;
+    camera.fov = debugEnabled
+      ? THREE.MathUtils.clamp(state.cameraFov, 30, 100)
+      : isCrouched
+        ? SEAT_CROUCHED_FOV
+        : SEAT_STANDING_FOV;
     debugFovOverride = debugEnabled ? camera.fov : null;
     camera.updateProjectionMatrix();
     camera.updateMatrix();
@@ -6558,10 +7499,7 @@ export const createMahjongTableScene = (
       persistDebugPreferences();
       return;
     }
-    const nextFog =
-      scene.fog instanceof THREE.Fog
-        ? scene.fog
-        : new THREE.Fog(COLORS.haze, 10, 34);
+    const nextFog = scene.fog instanceof THREE.Fog ? scene.fog : new THREE.Fog(COLORS.haze, 10, 34);
     scene.fog = nextFog;
     nextFog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
     nextFog.near = THREE.MathUtils.clamp(nextFog.far * 0.3, 4, 12);
@@ -6778,7 +7716,7 @@ export const createMahjongTableScene = (
     wireframe: false,
     boundsVisible: false,
     bokehEnabled: quality.preset === "high",
-    bokehStrength: 1,
+    bokehStrength: STANDING_DOF_INTENSITY,
     ambientOcclusionEnabled: false,
     autoExposureEnabled: true,
     cameraShiftEnabled: true,
@@ -6824,10 +7762,11 @@ export const createMahjongTableScene = (
     } finally {
       suppressDebugPreferencesPersistence = false;
     }
+    lastDofPosture = null;
     saveDebugPreferences();
   };
 
-const getDebugSnapshot = (): SceneDebugSnapshot => ({
+  const getDebugSnapshot = (): SceneDebugSnapshot => ({
     roomSeed,
     roomVariant: generatedRoomVariant,
     explorationArea,
@@ -6891,7 +7830,11 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
   );
   focusCalibrationRoot = focusCalibration.root;
   focusCalibrationLabels = focusCalibration.labels;
-  addExplorationGateway(scene);
+  // Keep the penthouse clean and uncluttered; intentionally suppress the framed
+  // gateway marker that is useful for debug layouting but reads as a door frame.
+  if (INCLUDE_EXPLORATION_GATEWAY) {
+    addExplorationGateway(scene);
+  }
   explorationWorld = createExplorationWorld(
     scene,
     roomSeed,
@@ -7024,11 +7967,7 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
   debugBoundsRoot.name = "DebugRoot";
   debugBoundsRoot.userData.dofIgnore = true;
   debugBoundsRoot.visible = false;
-  const debugBoundTargets = [
-    scene.getObjectByName("EnvironmentRoot"),
-    table,
-    wallRoot,
-  ];
+  const debugBoundTargets = [scene.getObjectByName("EnvironmentRoot"), table, wallRoot];
   for (const target of debugBoundTargets) {
     if (target === undefined || target === null) {
       continue;
@@ -7040,7 +7979,12 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
   scene.add(debugBoundsRoot);
 
   if (persistedDebugPreferences !== null) {
-    applyDebugPreferences(persistedDebugPreferences);
+    suppressDebugPreferencesPersistence = true;
+    try {
+      applyDebugPreferences(persistedDebugPreferences);
+    } finally {
+      suppressDebugPreferencesPersistence = false;
+    }
   } else {
     setDebugFogDensity(debugFogDensity);
     setDebugRedAccentIntensity(debugRedAccentIntensity);
@@ -7095,6 +8039,7 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
   let animationFrame = 0;
   let disposed = false;
   container.dataset.physicsReady = "loading";
+  container.dataset.wallTraversal = "none";
   staticPhysicsBoxes = createStaticPhysicsBoxes(scene);
   void createMahjongPhysics(staticPhysicsBoxes).then(
     (runtime) => {
@@ -7131,6 +8076,13 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
       .intersectObjects(scene.children, true)
       .find((intersection) => !isDofIgnored(intersection.object));
   };
+  const getAimRay = (): { origin: THREE.Vector3; direction: THREE.Vector3 } => {
+    focusRaycaster.setFromCamera(focusNdc, camera);
+    return {
+      origin: focusRaycaster.ray.origin.clone(),
+      direction: focusRaycaster.ray.direction.clone(),
+    };
+  };
   const moveSpeed = 3.4;
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") {
@@ -7160,6 +8112,7 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
     // the damping math to infinity.
     timer.update();
     const delta = THREE.MathUtils.clamp(timer.getDelta(), 0, 0.05);
+    syncDofIntensityForPosture();
     const currentTimestamp = performance.now();
     if (previousAnimationTimestamp > 0) {
       const frameTime = Math.max(0.1, currentTimestamp - previousAnimationTimestamp);
@@ -7190,13 +8143,9 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
       debugExposureTarget = THREE.MathUtils.damp(debugExposureTarget, targetExposure, 1.6, delta);
       renderer.toneMappingExposure = debugExposureTarget;
     }
+    const seatTargetFov = isCrouched ? SEAT_CROUCHED_FOV : SEAT_STANDING_FOV;
     const targetFov =
-      debugFovOverride ??
-      (debugEnabled && activeView === "seat" && isCrouched
-        ? DEBUG_SEATED_FOV
-        : debugEnabled && activeView === "seat"
-          ? DEBUG_STANDING_FOV
-          : TABLE_CAMERA_FOV);
+      activeView === "seat" ? seatTargetFov : (debugFovOverride ?? TABLE_CAMERA_FOV);
     const nextFov = THREE.MathUtils.damp(camera.fov, targetFov, 10, delta);
     if (Math.abs(nextFov - camera.fov) > 0.001) {
       camera.fov = nextFov;
@@ -7219,13 +8168,36 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
       camera.updateMatrixWorld(true);
       const crouching = isCrouched;
       const targetEyeHeight = crouching ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
+      const isLedgeClimbing = ledgeClimbTransition !== null;
+      const isWallClimbing = wallClimbTransition !== null;
       eyeHeight = THREE.MathUtils.damp(eyeHeight, targetEyeHeight, 14, delta);
       let forward: number;
       let right: number;
       let currentMoveSpeed: number;
       let movementMagnitude: number;
       let inputScale = 1;
-      if (touchMovementActive) {
+      if (isLedgeClimbing || isWallClimbing) {
+        forward = 0;
+        right = 0;
+        movementMagnitude = 0;
+        const transition = ledgeClimbTransition;
+        if (transition !== null) {
+          const preservedSpeed = Math.hypot(
+            transition.preservedForwardVelocity,
+            transition.preservedStrafeVelocity,
+          );
+          movementMagnitude =
+            transition.preserveSprinting && preservedSpeed > 0
+              ? 1
+              : Math.min(1, preservedSpeed / (moveSpeed * 1));
+          currentMoveSpeed = Math.max(
+            isSprinting || transition.preserveSprinting ? moveSpeed * SPRINT_MULTIPLIER : moveSpeed,
+            preservedSpeed,
+          );
+        } else {
+          currentMoveSpeed = 0;
+        }
+      } else if (touchMovementActive) {
         const touchMagnitude = Math.min(1, Math.hypot(touchForward, touchRight));
         const touchDirectionScale = touchMagnitude > 0 ? 1 / touchMagnitude : 0;
         forward = touchForward * touchDirectionScale;
@@ -7248,15 +8220,31 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
         const speedMultiplier = crouching ? 0.5 : sprinting ? SPRINT_MULTIPLIER : 1;
         currentMoveSpeed = moveSpeed * speedMultiplier;
       }
-      const desiredForward = forward * inputScale * currentMoveSpeed;
-      const desiredStrafe = right * inputScale * currentMoveSpeed;
+      if (wallHangState !== null) {
+        wallHangElapsed = Math.min(wallHangElapsed + delta, WALL_HANG_SETTLE_DURATION);
+        if (forward < -0.1) {
+          wallHangState = null;
+          wallHangElapsed = 0;
+          grounded = false;
+          verticalVelocity = 0;
+        } else if (
+          wallHangElapsed >= WALL_HANG_SETTLE_DURATION &&
+          (forward > 0.1 || jumpKeyHeld)
+        ) {
+          beginWallClimb();
+        }
+      }
+      const isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
+      const desiredForward = isWallTraversalActive ? 0 : forward * inputScale * currentMoveSpeed;
+      const desiredStrafe = isWallTraversalActive ? 0 : right * inputScale * currentMoveSpeed;
       const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
       const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
       if (debugCameraShiftEnabled && Math.abs(right) > 0.05) {
         const lateralDirection = Math.sign(right);
         if (lastLateralDirection === 0 || lateralDirection !== lastLateralDirection) {
           const sprintStrength = THREE.MathUtils.clamp(
-            (movementSpeedRatio - 1 / SPRINT_MULTIPLIER) / (1 - 1 / SPRINT_MULTIPLIER),
+            (currentMoveSpeed / (moveSpeed * SPRINT_MULTIPLIER) - 1 / SPRINT_MULTIPLIER) /
+              (1 - 1 / SPRINT_MULTIPLIER),
             0,
             1,
           );
@@ -7278,62 +8266,196 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
         lastLateralDirection = 0;
         lateralIdleTime = Number.POSITIVE_INFINITY;
       }
-      forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
-      strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
+      if (isWallTraversalActive) {
+        forwardVelocity = 0;
+        strafeVelocity = 0;
+      } else {
+        forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
+        strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
+      }
       const movementStart = camera.position.clone();
-      if (Math.abs(forwardVelocity) > 0.001) {
+      if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(forwardVelocity) > 0.001) {
         firstPersonControls.moveForward(forwardVelocity * delta);
       }
-      if (Math.abs(strafeVelocity) > 0.001) {
+      if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(strafeVelocity) > 0.001) {
         firstPersonControls.moveRight(strafeVelocity * delta);
       }
       const desiredHorizontalDelta = camera.position.clone().sub(movementStart);
       let baseCameraY: number;
       if (physicsRuntime !== null) {
         camera.position.copy(movementStart);
-        if (physicsCharacterPosition === null) {
-          syncPhysicsCharacterToCamera();
-        }
-        const characterPosition = physicsCharacterPosition ?? {
-          x: camera.position.x,
-          y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
-          z: camera.position.z,
-        };
-        if (!grounded || verticalVelocity > 0) {
-          verticalVelocity -= GRAVITY * delta;
-        }
-        const movement = physicsRuntime.move(characterPosition, {
-          x: desiredHorizontalDelta.x,
-          y: verticalVelocity * delta,
-          z: desiredHorizontalDelta.z,
-        });
-        knockImpactDelta = {
-          x: desiredHorizontalDelta.x,
-          y: 0,
-          z: desiredHorizontalDelta.z,
-        };
-        knockCollisionCount = movement.collisions;
-        const clampedPosition: PhysicsVector = {
-          x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
-          y: movement.position.y,
-          z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
-        };
+        if (wallHangState !== null || wallClimbTransition !== null) {
+          knockImpactDelta = { x: 0, y: 0, z: 0 };
+          knockCollisionCount = 0;
+          if (wallHangState !== null) {
+            const target = wallHangState.target;
+            physicsCharacterPosition = { ...target };
+            grounded = false;
+            verticalVelocity = 0;
+            jumpOffset = Math.max(0, target.y - PLAYER_COLLIDER_CENTER_HEIGHT);
+            camera.position.x = target.x;
+            camera.position.z = target.z;
+            baseCameraY = target.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+          } else {
+            const transition = wallClimbTransition;
+            if (transition === null) {
+              baseCameraY = camera.position.y;
+            } else {
+              transition.elapsed = Math.min(
+                transition.elapsed + delta,
+                transition.liftDuration + transition.crossDuration,
+              );
+              const liftProgress = THREE.MathUtils.clamp(
+                transition.elapsed / transition.liftDuration,
+                0,
+                1,
+              );
+              const crossProgress = THREE.MathUtils.clamp(
+                (transition.elapsed - transition.liftDuration) / transition.crossDuration,
+                0,
+                1,
+              );
+              const position =
+                transition.elapsed <= transition.liftDuration
+                  ? {
+                      x: transition.startPosition.x,
+                      y: THREE.MathUtils.lerp(
+                        transition.startPosition.y,
+                        transition.clearPosition.y,
+                        smoothStep(liftProgress),
+                      ),
+                      z: transition.startPosition.z,
+                    }
+                  : {
+                      x: THREE.MathUtils.lerp(
+                        transition.clearPosition.x,
+                        transition.targetPosition.x,
+                        smoothStep(crossProgress),
+                      ),
+                      y: transition.clearPosition.y,
+                      z: THREE.MathUtils.lerp(
+                        transition.clearPosition.z,
+                        transition.targetPosition.z,
+                        smoothStep(crossProgress),
+                      ),
+                    };
+              physicsCharacterPosition = position;
+              grounded = false;
+              verticalVelocity = 0;
+              jumpOffset = Math.max(0, position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
+              camera.position.x = position.x;
+              camera.position.z = position.z;
+              baseCameraY = position.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+              if (transition.elapsed >= transition.liftDuration + transition.crossDuration) {
+                const landing = physicsRuntime.move(transition.targetPosition, {
+                  x: 0,
+                  y: -0.14,
+                  z: 0,
+                });
+                const landedPosition: PhysicsVector = {
+                  x: THREE.MathUtils.clamp(landing.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+                  y: landing.position.y,
+                  z: THREE.MathUtils.clamp(landing.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+                };
+                physicsCharacterPosition = landedPosition;
+                grounded = landing.grounded;
+                verticalVelocity = 0;
+                jumpOffset = Math.max(
+                  0,
+                  landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
+                );
+                camera.position.x = landedPosition.x;
+                camera.position.z = landedPosition.z;
+                baseCameraY =
+                  landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+                wallClimbTransition = null;
+              }
+            }
+          }
+        } else {
+          if (physicsCharacterPosition === null) {
+            syncPhysicsCharacterToCamera();
+          }
+          const characterPosition = physicsCharacterPosition ?? {
+            x: camera.position.x,
+            y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+            z: camera.position.z,
+          };
+          if (!grounded || verticalVelocity > 0) {
+            verticalVelocity -= GRAVITY * delta;
+          }
+          const movement = physicsRuntime.move(characterPosition, {
+            x: desiredHorizontalDelta.x,
+            y: verticalVelocity * delta,
+            z: desiredHorizontalDelta.z,
+          });
+          knockImpactDelta = {
+            x: desiredHorizontalDelta.x,
+            y: 0,
+            z: desiredHorizontalDelta.z,
+          };
+          knockCollisionCount = movement.collisions;
+          const clampedPosition: PhysicsVector = {
+            x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+            y: movement.position.y,
+            z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+          };
         let ledgeGrabTarget: PhysicsVector | null = null;
         if (
           !grounded &&
           !movement.grounded &&
           verticalVelocity <= 0 &&
           movement.collisions > 0 &&
-          jumpOffset > 0.05 &&
+          jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET &&
           desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002
         ) {
           ledgeGrabTarget = resolveLedgeGrabTarget(
             characterPosition,
             desiredHorizontalDelta,
             characterPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
+            staticPhysicsBoxes,
+            dynamicPhysicsBoxes,
           );
         }
-        if (ledgeGrabTarget !== null) {
+        let wallHangResolution: WallHangResolution | null = null;
+        const horizontalApproachDistance = Math.hypot(
+          desiredHorizontalDelta.x,
+          desiredHorizontalDelta.z,
+        );
+        if (
+          ledgeGrabTarget === null &&
+          ledgeClimbTransition === null &&
+          movement.collisions > 0 &&
+          horizontalApproachDistance > 0.015
+        ) {
+          // Streamed buildings and authored obstacle boxes live in the second
+          // physics set. They are still static for traversal purposes; only
+          // knocked props are marked dynamic and must not become hang points.
+          const wallHangPhysicsBoxes =
+            dynamicPhysicsBoxes.length === 0
+              ? staticPhysicsBoxes
+              : [
+                  ...staticPhysicsBoxes,
+                  ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
+                ];
+          wallHangResolution = resolveWallHangTargetDetails(
+            // Rapier may report a contact position a few centimetres inside a
+            // thin box after resolving a fast frame. Probe from the capsule's
+            // safe pre-move position instead, so a valid approached wall is
+            // not discarded merely because collision correction already ran.
+            characterPosition,
+            {
+              x: desiredHorizontalDelta.x / horizontalApproachDistance,
+              y: 0,
+              z: desiredHorizontalDelta.z / horizontalApproachDistance,
+            },
+            wallHangPhysicsBoxes,
+          );
+        }
+        if (ledgeGrabTarget !== null && ledgeClimbTransition === null) {
+          const climbStartX = clampedPosition.x;
+          const climbStartY = clampedPosition.y;
+          const climbStartZ = clampedPosition.z;
           const clampedX = THREE.MathUtils.clamp(
             ledgeGrabTarget.x,
             WORLD_BOUNDS.minX,
@@ -7344,14 +8466,71 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
             WORLD_BOUNDS.minZ,
             WORLD_BOUNDS.maxZ,
           );
+          const momentum = resolveLedgeClimbMomentum(
+            desiredForward,
+            desiredStrafe,
+            forwardVelocity,
+            strafeVelocity,
+            isSprinting,
+            moveSpeed,
+          );
+          const preservedSpeed = Math.hypot(
+            momentum.preservedForwardVelocity,
+            momentum.preservedStrafeVelocity,
+          );
+          const landingBoostDistance =
+            preservedSpeed > 0
+              ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
+              : 0;
           clampedPosition.x = clampedX;
           clampedPosition.z = clampedZ;
           clampedPosition.y = ledgeGrabTarget.y;
+          ledgeClimbTransition = {
+            duration: LEDGE_CLIMB_DURATION,
+            elapsed: 0,
+            phase: "vault",
+            startX: climbStartX,
+            startY: climbStartY,
+            startZ: climbStartZ,
+            targetX: clampedPosition.x,
+            targetY: clampedPosition.y,
+            targetZ: clampedPosition.z,
+            preservedForwardVelocity: momentum.preservedForwardVelocity,
+            preservedStrafeVelocity: momentum.preservedStrafeVelocity,
+            preserveSprinting: momentum.preserveSprinting,
+            landingBoostDistance,
+          };
           grounded = true;
           verticalVelocity = 0;
         }
+        if (wallHangResolution !== null && ledgeGrabTarget === null) {
+          clampedPosition.x = wallHangResolution.target.x;
+          clampedPosition.y = wallHangResolution.target.y;
+          clampedPosition.z = wallHangResolution.target.z;
+          wallHangState = {
+            target: wallHangResolution.target,
+            wallNormal: wallHangResolution.wallNormal,
+            wallFacePoint: wallHangResolution.wallFacePoint,
+            wallTopY: wallHangResolution.wallTopY,
+            box: wallHangResolution.box,
+            approachDirection: {
+              x: desiredHorizontalDelta.x / horizontalApproachDistance,
+              y: 0,
+              z: desiredHorizontalDelta.z / horizontalApproachDistance,
+            },
+          };
+          grounded = false;
+          verticalVelocity = 0;
+          forwardVelocity = 0;
+          strafeVelocity = 0;
+        }
         physicsCharacterPosition = clampedPosition;
-        grounded = ledgeGrabTarget === null ? movement.grounded : true;
+        grounded =
+          wallHangResolution !== null
+            ? false
+            : ledgeGrabTarget === null
+              ? movement.grounded
+              : true;
         jumpOffset = Math.max(0, clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
         if (grounded && verticalVelocity < 0) {
           verticalVelocity = 0;
@@ -7359,7 +8538,87 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
         camera.position.x = clampedPosition.x;
         camera.position.z = clampedPosition.z;
         baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
-      } else {
+        if (ledgeClimbTransition !== null) {
+          const transition = ledgeClimbTransition;
+          transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
+          const progress = smoothStep(
+            THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
+          );
+          const transitionX = THREE.MathUtils.lerp(transition.startX, transition.targetX, progress);
+          const transitionZ = THREE.MathUtils.lerp(transition.startZ, transition.targetZ, progress);
+          const transitionY =
+            transition.phase === "vault"
+              ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
+                Math.sin(progress * Math.PI) * LEDGE_CLIMB_ARC_HEIGHT
+              : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+          camera.position.x = transitionX;
+          camera.position.z = transitionZ;
+          baseCameraY = resolveLedgeClimbTargetCameraY(transitionY);
+          jumpOffset = Math.max(0, transitionY - PLAYER_COLLIDER_CENTER_HEIGHT);
+          forwardVelocity = transition.preservedForwardVelocity;
+          strafeVelocity = transition.preservedStrafeVelocity;
+          physicsCharacterPosition = {
+            x: transitionX,
+            y: transitionY,
+            z: transitionZ,
+          };
+          if (transition.elapsed >= transition.duration) {
+            if (transition.phase === "vault" && transition.landingBoostDistance > 0) {
+              const preservedSpeed = Math.hypot(
+                transition.preservedForwardVelocity,
+                transition.preservedStrafeVelocity,
+              );
+              const boostDirectionForward =
+                preservedSpeed > 0 ? transition.preservedForwardVelocity / preservedSpeed : 0;
+              const boostDirectionRight =
+                preservedSpeed > 0 ? transition.preservedStrafeVelocity / preservedSpeed : 0;
+              const landingTargetX =
+                transition.targetX + boostDirectionForward * transition.landingBoostDistance;
+              const landingTargetZ =
+                transition.targetZ + boostDirectionRight * transition.landingBoostDistance;
+              transition.startX = transition.targetX;
+              transition.startY = transition.targetY;
+              transition.startZ = transition.targetZ;
+              transition.targetX = landingTargetX;
+              transition.targetY = transition.targetY;
+              transition.targetZ = landingTargetZ;
+              transition.duration = LEDGE_CLIMB_EXIT_BOOST_DURATION;
+              transition.elapsed = 0;
+              transition.phase = "landingBoost";
+            } else {
+              const targetX = transition.targetX;
+              const targetY = transition.targetY;
+              const targetZ = transition.targetZ;
+              ledgeClimbTransition = null;
+              grounded = true;
+              verticalVelocity = 0;
+              jumpOffset = Math.max(0, targetY - PLAYER_COLLIDER_CENTER_HEIGHT);
+              physicsCharacterPosition = {
+                x: targetX,
+                y: targetY,
+                z: targetZ,
+              };
+              camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+            }
+          }
+          if (transition.phase === "landingBoost" && transition.elapsed >= transition.duration) {
+            const targetX = transition.targetX;
+            const targetY = transition.targetY;
+            const targetZ = transition.targetZ;
+            ledgeClimbTransition = null;
+            grounded = true;
+            verticalVelocity = 0;
+            jumpOffset = Math.max(0, targetY - PLAYER_COLLIDER_CENTER_HEIGHT);
+            physicsCharacterPosition = {
+              x: targetX,
+              y: targetY,
+              z: targetZ,
+            };
+            camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+          }
+        }
+      }
+    } else {
         camera.position.x = THREE.MathUtils.clamp(
           camera.position.x,
           WORLD_BOUNDS.minX,
@@ -7380,6 +8639,9 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
           }
         }
         baseCameraY = firstPersonGroundY + eyeHeight + jumpOffset;
+      }
+      if (jumpKeyHeld) {
+        jump();
       }
       cameraShiftTarget = THREE.MathUtils.damp(
         cameraShiftTarget,
@@ -7438,6 +8700,8 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
     if (!isVisualScenePositionRecoverable(cameraPosition) || physicsPositionIsUnrecoverable) {
       resetToSpawn();
     }
+    container.dataset.wallTraversal =
+      wallClimbTransition !== null ? "climbing" : wallHangState !== null ? "hanging" : "none";
     camera.updateMatrixWorld(true);
     // The focus lab is part of the same streamed world, so moving through it
     // must continue loading and retaining the surrounding development map.
@@ -7449,6 +8713,7 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
       knockCollisionCount,
       grounded,
       physicsRuntime?.getDynamicBodyStates() ?? [],
+      physicsRuntime?.applyImpulseToDynamicBody,
     );
     const nextPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
     if (physicsRuntime !== null && nextPhysicsVersion !== appliedPhysicsVersion) {
@@ -7563,6 +8828,8 @@ const getDebugSnapshot = (): SceneDebugSnapshot => ({
     setTouchMovementVector,
     toggleCrouch,
     jump,
+    setReticlePosition: setFocusReticle,
+    getAimRay,
     debug: {
       setCameraPreset: setDebugCameraPreset,
       setFov: setDebugFov,

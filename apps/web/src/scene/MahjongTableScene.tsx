@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   createMahjongTableScene,
   DEFAULT_ROOM_SEED,
-  MAHJONG_TABLE_HMR_EVENT,
+  type ReticlePosition,
   type MahjongTableMount,
   type MotionLookStatus,
   type SceneView,
@@ -14,6 +14,7 @@ interface MahjongTableSceneProps {
   readonly onExplorationAreaChange?: (area: string) => void;
   readonly roomSeed?: string;
   readonly view: SceneView;
+  readonly reticlePosition?: ReticlePosition;
   readonly onMount?: (mount: MahjongTableMount | null) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
 }
@@ -23,6 +24,7 @@ export const MahjongTableScene = ({
   onExplorationAreaChange,
   roomSeed = DEFAULT_ROOM_SEED,
   view,
+  reticlePosition,
   onMount,
   onMotionLookStatusChange,
 }: MahjongTableSceneProps): React.JSX.Element => {
@@ -68,6 +70,7 @@ export const MahjongTableScene = ({
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
           onReady: () => setSceneReady(true),
           roomSeed: roomSeedRef.current,
+          reticlePosition,
         });
         appliedViewRef.current = viewRef.current;
         mountRef.current = mount;
@@ -79,14 +82,8 @@ export const MahjongTableScene = ({
       }
     };
 
-    const onSceneHotReload = (): void => {
-      disposeScene();
-      mountScene();
-    };
-    window.addEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
     mountScene();
     return () => {
-      window.removeEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
       disposeScene();
     };
   }, [roomSeed]);
@@ -98,6 +95,12 @@ export const MahjongTableScene = ({
     appliedViewRef.current = view;
     mountRef.current?.setView(view);
   }, [view]);
+  useEffect(() => {
+    if (reticlePosition === undefined) {
+      return;
+    }
+    mountRef.current?.setReticlePosition(reticlePosition);
+  }, [reticlePosition?.x, reticlePosition?.y]);
 
   return (
     <div className="scene-canvas">

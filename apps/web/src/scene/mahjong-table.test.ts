@@ -7,10 +7,21 @@ import {
   createExplorationWorld,
   EXPLORATION_PENTHOUSE_BOUNDS,
   getVisualSceneStateStorageKey,
+  LEDGE_CLIMB_EYE_HEIGHT_METERS,
+  resolveLedgeClimbTargetCameraY,
+  resolveLedgeGrabTarget,
+  resolveLedgeClimbMomentum,
+  resolveWallHangTarget,
+  resolveWallHangTargetDetails,
+  WALL_HANG_MIN_TOP,
+  WALL_HANG_REACH,
+  WALL_HANG_SIDE_BUFFER,
+  WALL_CLIMB_SPEED,
   isExplorationRectOutsidePenthouse,
   readVisualDebugPreferences,
   readVisualSceneState,
   resolveFocusAccommodationDamping,
+  resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
   serializeVisualSceneState,
@@ -18,6 +29,7 @@ import {
   writeVisualSceneState,
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
+import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -129,9 +141,14 @@ describe("human-eye bokeh model", () => {
     expect(quarterBlurFocus.intensity).toBeCloseTo(0.25, 2);
     expect(practicalHyperfocalFocus.intensity).toBe(0);
     expect(farFocus.intensity).toBe(0);
-    expect(quarterBlurFocus.intensity).toBeGreaterThan(
-      resolveHumanEyeBokeh(4, 4).intensity,
-    );
+    expect(quarterBlurFocus.intensity).toBeGreaterThan(resolveHumanEyeBokeh(4, 4).intensity);
+  });
+});
+
+describe("posture depth-of-field defaults", () => {
+  it("uses 12.5x standing and 25x crouched intensity", () => {
+    expect(resolveDofIntensityForPosture(false)).toBe(12.5);
+    expect(resolveDofIntensityForPosture(true)).toBe(25);
   });
 });
 
@@ -246,6 +263,232 @@ describe("append-only exploration chunks", () => {
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);
     world.dispose();
+  });
+});
+
+describe("ledge vaulting helpers", () => {
+  it("nudges ledge grab targets forward onto a supported landing zone", () => {
+    const playerColliderCenterHeight = 0.86;
+    const fromPosition: PhysicsVector = { x: 0, y: playerColliderCenterHeight, z: -0.6 };
+    const delta: PhysicsVector = { x: 0, y: 0, z: 0.6 };
+    const boxes: PhysicsBox[] = [
+      {
+        center: { x: 0, y: 0.5, z: 0 },
+        halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+      },
+    ];
+    const target = resolveLedgeGrabTarget(
+      fromPosition,
+      delta,
+      fromPosition.y - playerColliderCenterHeight,
+      boxes,
+      [],
+    );
+
+    expect(target).not.toBeNull();
+    expect(target?.x).toBeCloseTo(0);
+    expect(target?.z).toBeGreaterThan(fromPosition.z + delta.z);
+    expect(target?.z).toBeCloseTo(0.16);
+    expect(target?.y).toBeCloseTo(1.86);
+  });
+
+  it("locks ledge transition camera to a 1.75m eye height", () => {
+    expect(resolveLedgeClimbTargetCameraY(1.86)).toBeCloseTo(2.75);
+    expect(LEDGE_CLIMB_EYE_HEIGHT_METERS).toBe(1.75);
+  });
+
+  it("captures at least sprint momentum at vault start", () => {
+    const moveSpeed = 3.4;
+    const momentum = resolveLedgeClimbMomentum(0.2, 0, 0, 0, true, moveSpeed);
+    expect(
+      Math.hypot(momentum.preservedForwardVelocity, momentum.preservedStrafeVelocity),
+    ).toBeCloseTo(moveSpeed * 3, 2);
+  });
+
+  it("falls back to stored velocity when input is still resolving", () => {
+    const momentum = resolveLedgeClimbMomentum(0, 0, 0.6, 0.8, false, 3.4);
+    expect(momentum.preservedForwardVelocity).toBeCloseTo(0.6);
+    expect(momentum.preservedStrafeVelocity).toBeCloseTo(0.8);
+    expect(momentum.preserveSprinting).toBe(false);
+  });
+});
+
+describe("wall hanging helper", () => {
+  const playerY = 0.86;
+  const forwardZWall: PhysicsBox = {
+    center: { x: 0, y: 2, z: -4 },
+    halfExtents: { x: 0.5, y: 2, z: 0.5 },
+  };
+
+  it("detects the approached near face and keeps the capsule outside it", () => {
+    const target = resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -4 }, [
+      forwardZWall,
+    ]);
+
+    expect(target).not.toBeNull();
+    expect(target?.y).toBe(playerY);
+    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
+    expect(Math.abs((target?.z ?? 0) - -3.5)).toBeGreaterThan(0.26);
+    expect(WALL_HANG_REACH).toBeGreaterThan(0);
+    expect(WALL_HANG_SIDE_BUFFER).toBeGreaterThan(0);
+    expect(WALL_CLIMB_SPEED).toBeGreaterThan(0);
+  });
+
+  it("uses a relative height threshold and rejects a short wall", () => {
+    const shortWall: PhysicsBox = {
+      center: { x: 0, y: 0.4, z: -4 },
+      halfExtents: { x: 0.5, y: 0.4, z: 0.5 },
+    };
+
+    expect(WALL_HANG_MIN_TOP).toBeCloseTo(0.86 * 2 + 0.05);
+    expect(
+      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [shortWall]),
+    ).toBeNull();
+
+    const vaultHeightPlatform: PhysicsBox = {
+      center: { x: 0, y: 0.5, z: -4 },
+      halfExtents: { x: 1, y: 0.5, z: 1 },
+    };
+    expect(
+      resolveWallHangTarget(
+        { x: 0, y: playerY, z: -3 },
+        { x: 0, y: 0, z: -1 },
+        [vaultHeightPlatform],
+      ),
+    ).toBeNull();
+
+    const floatingWall: PhysicsBox = {
+      ...forwardZWall,
+      center: { x: 0, y: 3.2, z: -4 },
+      halfExtents: { x: 0.5, y: 0.4, z: 0.5 },
+    };
+    expect(
+      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [floatingWall]),
+    ).toBeNull();
+  });
+
+  it("rejects walls outside lateral overlap or beyond reach", () => {
+    const lateralWall: PhysicsBox = {
+      ...forwardZWall,
+      center: { x: 2, y: 2, z: -4 },
+    };
+    const distantWall: PhysicsBox = {
+      ...forwardZWall,
+      center: { x: 0, y: 2, z: -5 },
+    };
+
+    expect(
+      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [lateralWall]),
+    ).toBeNull();
+    expect(
+      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [distantWall]),
+    ).toBeNull();
+  });
+
+  it("allows the capsule radius to overlap a wall's lateral edge", () => {
+    const edgeWall: PhysicsBox = {
+      ...forwardZWall,
+      center: { x: 0.72, y: 2, z: -4 },
+    };
+
+    const target = resolveWallHangTarget(
+      { x: 0, y: playerY, z: -3 },
+      { x: 0, y: 0, z: -1 },
+      [edgeWall],
+    );
+
+    expect(target).not.toBeNull();
+    expect(target?.x).toBeGreaterThanOrEqual(
+      edgeWall.center.x - edgeWall.halfExtents.x + 0.26 + 0.01,
+    );
+  });
+
+  it("does not grab a wall behind the player", () => {
+    const behindWall: PhysicsBox = {
+      center: { x: 0, y: 2, z: -1.9 },
+      halfExtents: { x: 0.5, y: 2, z: 0.2 },
+    };
+
+    expect(
+      resolveWallHangTarget({ x: 0, y: playerY, z: -2.2 }, { x: 0, y: 0, z: -1 }, [behindWall]),
+    ).toBeNull();
+  });
+
+  it("selects the closest qualifying wall", () => {
+    const nearer: PhysicsBox = {
+      center: { x: 0, y: 2, z: -4 },
+      halfExtents: { x: 0.5, y: 2, z: 0.5 },
+    };
+    const farther: PhysicsBox = {
+      center: { x: 0, y: 2, z: -4.2 },
+      halfExtents: { x: 0.5, y: 2, z: 0.5 },
+    };
+    const target = resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [
+      farther,
+      nearer,
+    ]);
+
+    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
+  });
+
+  it.each([
+    [
+      { x: 1, y: 0, z: 0 },
+      { x: 3, y: playerY, z: 0 },
+      { x: 3.5 - 0.26 - 0.01, y: playerY, z: 0 },
+    ],
+    [
+      { x: -1, y: 0, z: 0 },
+      { x: -3, y: playerY, z: 0 },
+      { x: -3.5 + 0.26 + 0.01, y: playerY, z: 0 },
+    ],
+    [
+      { x: 0, y: 0, z: 1 },
+      { x: 0, y: playerY, z: 3 },
+      { x: 0, y: playerY, z: 3.5 - 0.26 - 0.01 },
+    ],
+  ])("handles an approach on each cardinal axis", (forward, fromPosition, expected) => {
+    const target = resolveWallHangTarget(fromPosition, forward, [
+      {
+        center: {
+          x: expected.x === 0 ? 0 : expected.x > 0 ? 4 : -4,
+          y: 2,
+          z: expected.z === 0 ? 0 : expected.z > 0 ? 4 : -4,
+        },
+        halfExtents: { x: expected.x === 0 ? 0.5 : 0.5, y: 2, z: expected.z === 0 ? 0.5 : 0.5 },
+      },
+    ]);
+
+    expect(target?.x).toBeCloseTo(expected.x, 6);
+    expect(target?.z).toBeCloseTo(expected.z, 6);
+  });
+
+  it("supports a diagonal approach using the dominant axis", () => {
+    const target = resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0.45, y: 0, z: -0.9 }, [
+      forwardZWall,
+    ]);
+
+    expect(target).not.toBeNull();
+    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
+    expect(target?.x).toBeGreaterThanOrEqual(-0.5 + 0.26);
+    expect(target?.x).toBeLessThanOrEqual(0.5 - 0.26);
+  });
+
+  it("resolves a valid hang from the safe position just before a contact response", () => {
+    const wall: PhysicsBox = {
+      center: { x: -70, y: 1.9, z: -12 },
+      halfExtents: { x: 0.25, y: 1.9, z: 3 },
+    };
+    const resolution = resolveWallHangTargetDetails(
+      { x: -70.64, y: 0.97, z: -12 },
+      { x: 1, y: 0, z: 0 },
+      [wall],
+    );
+
+    expect(resolution?.target.x).toBeCloseTo(-70.52, 6);
+    expect(resolution?.target.y).toBeCloseTo(0.97, 6);
+    expect(resolution?.target.z).toBeCloseTo(-12, 6);
+    expect(resolution?.wallFacePoint.x).toBeCloseTo(-70.25, 6);
   });
 });
 

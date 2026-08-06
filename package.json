@@ -22,6 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "test:sim:fast": "tsx scripts/simulate.ts 500",
     "test:sim": "tsx scripts/simulate.ts 10000",
+    "test:movement:sim": "tsx scripts/movement-simulate.ts",
+    "hmr": "tsx scripts/hmr.ts",
     "test:e2e": "playwright test",
     "smoke": "tsx scripts/smoke.ts",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:coverage && pnpm test:sim:fast && pnpm build && pnpm smoke"

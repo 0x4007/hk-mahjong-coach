@@ -5,41 +5,5 @@
     "depth": 48,
     "rotationDegrees": 0
   },
-  "entities": [
-    {
-      "id": "ceiling-light-1",
-      "kind": "lightBar",
-      "position": [-9, 4.58, 0],
-      "rotationDegrees": 0,
-      "scale": 1
-    },
-    {
-      "id": "ceiling-light-2",
-      "kind": "lightBar",
-      "position": [9, 4.58, 0],
-      "rotationDegrees": 0,
-      "scale": 1
-    },
-    {
-      "id": "wall-slot-1",
-      "kind": "planter",
-      "position": [-22.5, 0, 14],
-      "rotationDegrees": 90,
-      "scale": 1
-    },
-    {
-      "id": "wall-slot-2",
-      "kind": "wallPanel",
-      "position": [22.5, 0, 15],
-      "rotationDegrees": -90,
-      "scale": 1
-    },
-    {
-      "id": "sculpture",
-      "kind": "sculpture",
-      "position": [20.5, 0.3, 19],
-      "rotationDegrees": 0,
-      "scale": 1
-    }
-  ]
+  "entities": []
 }

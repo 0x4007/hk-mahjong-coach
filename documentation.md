@@ -121,7 +121,8 @@
   with broad architectural whites, charcoal recesses, a restrained red floor direction line, pale cyan
   system seams, floor-to-ceiling glazing, and depth-compressed Midtown geometry. The shipping seat view
   starts as a fixed 45° composition, then supports click-to-lock first-person look and movement so the
-  preview remains usable; the debug-only overhead view and visual panel remain behind `?debug=1`.
+  preview remains usable; the overhead view and advanced visual panel remain behind `?debug=1`, while normal mode
+  now includes a persistent video quality selector for adaptive/high/medium/low.
 - The play space uses a larger 17.2 m × 13.4 m shell and matching first-person bounds, preserving the
   4.5–5.5 m double-height feel while giving the player more room around the table.
 - Tile bodies are warm ivory with crisp local face artwork; backs use an original charcoal, red, and cyan
@@ -155,9 +156,16 @@
   a physics body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does
   not change its collision layout.
 - When airborne and moving into a nearby top edge, first-person movement can perform a short edge-grab: if the
-  player is within a small height and approach window, the controller snaps the camera to the top of that
-  surface instead of stopping dead. This produces the requested parkour edge climb feel while keeping collision
-  authoritative through the Rapier capsule.
+  player is within a small height and approach window, the controller eases the camera and capsule to the top of that
+  surface over a brief climb arc rather than snapping dead-center. This produces the requested parkour edge climb
+  feel while keeping collision authoritative through the Rapier capsule.
+- Tall walls use a separate traversal state. On a real horizontal collision, a wall must extend above the capsule head
+  relative to the player's current feet, overlap the player's lateral reach, and be within 0.5 m of the capsule front.
+  The capsule is placed 0.27 m outside the approached face (radius plus separation), remains attached with gravity
+  suppressed, and climbs when forward or Space is pressed. The wall target scan includes streamed static boxes but
+  excludes knocked dynamic props, and the original airborne-only ledge-grab gate remains in force so low vault/ledge
+  movement is not reclassified as a wall hang. The `?debug=1` climbing-gym preset places the player near its tall wall;
+  walk into it, release movement to hang, then hold W or press Space to climb.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -169,6 +177,9 @@
   change. The panel keeps the latest dirty tuning payload in memory and sends it once with `keepalive` on
   `pagehide`; its 500 ms live telemetry refresh never writes the artifact. The Vite middleware also skips
   unchanged scene payloads, so normal rendering cannot create a self-triggered HMR/write loop.
+- Normal development mode reads that endpoint before constructing the 3D scene. This avoids a fresh-origin
+  default-fog frame on a tunnel and keeps debug mode as the write path; the read is cache-busted, no-store,
+  and bounded so a stalled tunnel still falls back to the normal scene.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
   Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
   jump apex. Double-tapping W engages a 3× sprint that remains active while any movement key is held, so
@@ -186,8 +197,8 @@
   uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
   warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
-  intensity for visual tuning, with a 0–25× DoF-intensity slider; 1× is the restrained baseline and higher
-  values are available for stronger cinematic bokeh experiments. The practical blur envelope uses a smooth
+  intensity for visual tuning, with a 0–25× DoF-intensity slider; the posture defaults are 12.5× standing and
+  25× crouching, while the slider remains available for stronger cinematic bokeh experiments. The practical blur envelope uses a smooth
   eased falloff: with the reference pupil, near-zero focus is full strength, 2.5 m is roughly one quarter,
   and 6 m is effectively sharp; pupil dilation scales that cutoff in low light.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
@@ -201,11 +212,14 @@
   presets, adaptive/high/medium/low quality mode, Bokeh/GTAO, physical/simple glass, motion feel, FOV,
   exposure, tone mapper, fog density, skyline visibility, lighting, DPR, and live renderer metrics. The
   quality selector applies its DPR, shadow, post-effect, glass, ambient-animation, and skyline-LOD defaults
-  immediately; each individual control can then be overridden without remounting the app. Repeated skyline
+  immediately; each individual control can then be overridden without remounting the app. In production, only the
+  adaptive/high/medium/low quality selector remains visible for users; this value is persisted in local storage so
+  reloads reuse the same video preset. Repeated skyline
   windows are batched with `InstancedMesh`, and the Empire State, One Vanderbilt, and Chrysler silhouettes
-  use distance-based `LOD` fallbacks. Every debug control is persisted in validated v1 `localStorage`,
-  including the all-skyline and per-layer visibility switches, and `Reset debug defaults` restores the
-  device-appropriate defaults and rewrites the stored preferences.
+  use distance-based `LOD` fallbacks. Every scene debug control is persisted in validated v1 `localStorage`,
+  including the all-skyline and per-layer visibility switches. The panel's expanded/collapsed disclosure state
+  is persisted separately in the same local storage so HMR and page reloads keep the chosen layout;
+  `Reset debug defaults` restores the device-appropriate scene defaults and rewrites those preferences.
 - The development map is divided into three independent ground-level play areas: the penthouse at the origin, the
   looking focus room 60 m east, and the climbing gym 60 m west. Each area is marked as a 50 m x 50 m square with a
   10 m open gap to its neighbor. Generated city buildings, props, windows, bridges, and beacons are rejected from
@@ -213,9 +227,9 @@
 - The `Focus calibration` debug preset now opens the looking focus room on the shared ground plane. The hallway still
   marks each metre from `0` through `2H` and places the close, halfway, hyperfocal, and double-hyperfocal targets,
   but the former elevated deck/ramp is no longer part of the navigation path.
-- The `Climbing gym` debug preset opens the west play area, where the compact ledge field and handrails remain
-  available for repeatable Mirror's Edge-style edge-grab tuning without sharing collision space with the penthouse
-  or focus room.
+- The `Climbing gym` debug preset opens the west play area, where an expanded obstacle course now layers
+  compact ledges, support columns, and varying-height cross-beams for repeatable Mirror's Edge-style movement and
+  edge-grab tuning without sharing collision space with the penthouse or focus room.
 - The debug panel header is an accessible disclosure control. It opens by default on desktop and starts
   collapsed for coarse-pointer/mobile devices, preserving a compact scene view; expanding it reveals the
   same scrollable controls without changing their runtime state.
@@ -263,6 +277,29 @@
   duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
   objects.
 
+## Wall hang and climb
+
+The movement CLI (`pnpm test:movement:sim`) models wall traversal after ledge and vault checks. A wall is
+eligible only when its approached axis-aligned face is in front of the capsule, within 0.5 m of the capsule
+front surface, laterally overlapped, vertically reachable, and above the player's current centre height by the
+small wall-hang threshold. The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01 m
+separation, so the hang does not embed the player in the collider. The helper scans all boxes and chooses the
+closest valid candidate.
+
+The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
+are suppressed. Forward or jump starts a climb that first raises the capsule until its bottom clears the wall top,
+then moves onto a collision-free top target. It becomes grounded only after that target has support. Samples emit
+`wallHang` only on the entry frame and expose `hanging`, `climbing`, and `traversalState` for later frames. JSON
+mode writes only the summary to stdout; the current Rapier package warning is emitted on stderr.
+
+The same traversal state is active in the live first-person browser controller. Open the `Climbing gym`
+debug preset from `?debug=1`; it starts on clear ground facing a dedicated tall training wall. Click the scene to
+capture pointer lock, and run into the wall with `W` or
+the touch joystick. The capsule attaches to the near face without gravity, remains hanging while forward is
+released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump action is used.
+Backward input releases the hang. The climb lifts above the obstacle before crossing onto its top and asks Rapier
+for the final supported position instead of marking the player grounded in midair.
+
 ## Commands
 
 ```bash
@@ -278,6 +315,11 @@ pnpm start
 workspace package build first; Vite resolves the browser package sources for development, while
 `pnpm build` retains the complete package build for production artifacts.
 
+After a visual-table coding agent finishes a feature or a batch of scene edits, run `pnpm hmr` from
+the repository root with `pnpm dev` still running. The command touches the scene HMR boundary so Vite
+remounts the scene in the connected browser; the development session snapshot restores the current
+presentation position. This is a development convenience, not browser acceptance proof.
+
 ## Material deviations
 
 - The visual-table scene now uses a shared procedural material detail channel. Neutral surfaces receive
@@ -291,6 +333,12 @@ workspace package build first; Vite resolves the browser package sources for dev
   city batches so new generated geometry inherits the architectural-futurist language without assets.
 - Red/cyan wayfinding remains deliberately emissive and comparatively clean; the detail channel is used
   for response variation rather than decorative noise on the scene's command accents.
+- The visual-table sky now uses a warm apricot background and matching haze so the daylight palette agrees
+  with the warm sun key. A larger additive glow and opaque core make the sun readable through the north glazing;
+  the reference materials bypass scene fog and tone mapping, and the mirrored elevation is kept inside the
+  seat-camera sky band without changing physical light placement.
+- The presentation palette now follows a white Mirror's Edge direction: near-white sky and architecture, pale
+  cyan glass, light structural gray, and restrained charcoal framing keep the existing red/cyan wayfinding legible.
 
 ## Penthouse level pass
 

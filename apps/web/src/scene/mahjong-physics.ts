@@ -43,6 +43,11 @@ export interface MahjongPhysicsRuntime {
   readonly move: (position: PhysicsVector, desiredDelta: PhysicsVector) => PhysicsMovement;
   /** Replace coarse colliders for streamed scene content, including static boxes. */
   readonly setDynamicBoxes: (boxes: readonly PhysicsBox[]) => void;
+  readonly applyImpulseToDynamicBody: (
+    dynamicId: number,
+    linearVelocity: PhysicsVector,
+    angularVelocity: PhysicsVector,
+  ) => void;
   readonly getDynamicBodyStates: () => readonly PhysicsBodyState[];
   readonly dispose: () => void;
 }
@@ -233,6 +238,30 @@ export const createMahjongPhysics = async (
         });
       }
       return states;
+    },
+    applyImpulseToDynamicBody: (dynamicId, linearVelocity, angularVelocity) => {
+      const body = dynamicBodies.get(dynamicId);
+      if (body === undefined) {
+        return;
+      }
+      const currentLinearVelocity = body.linvel();
+      body.setLinvel(
+        {
+          x: currentLinearVelocity.x + linearVelocity.x,
+          y: currentLinearVelocity.y + linearVelocity.y,
+          z: currentLinearVelocity.z + linearVelocity.z,
+        },
+        true,
+      );
+      const currentAngularVelocity = body.angvel();
+      body.setAngvel(
+        {
+          x: currentAngularVelocity.x + angularVelocity.x,
+          y: currentAngularVelocity.y + angularVelocity.y,
+          z: currentAngularVelocity.z + angularVelocity.z,
+        },
+        true,
+      );
     },
     dispose: () => {
       world.removeCharacterController(characterController);
