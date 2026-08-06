@@ -649,9 +649,7 @@ the existing reticule gaze distance and adaptive pupil, then applies the recipro
 viewmodel geometry becomes increasingly soft as it approaches the camera. Geometry near the focus plane remains
 sharp, and the viewmodel is excluded only from choosing the gaze target; it still participates in the normal depth
 pass. Camera FOV and the existing global posture-strength slider normalize the same response for every object, with
-no weapon-name or ADS-specific branch. The screen mapping is intentionally conservative because the stock pass
-gathers 41 samples and the sniper compositor can magnify the result; this keeps the distant world readable while a
-viewmodel close to the eye still receives continuous blur.
+no weapon-name or ADS-specific branch.
 
 This branch is rebased on the latest source checkpoint and intentionally re-enables the physical shader for isolated
 calibration. The source branch keeps the zoom-only intensity rule: 12.5× outside explicit ADS and 25× while aiming,

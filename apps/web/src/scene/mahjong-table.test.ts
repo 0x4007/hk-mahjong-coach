@@ -141,7 +141,7 @@ describe("human-eye bokeh model", () => {
     expect(indoorTile.maxBlur).toBeGreaterThan(brightRoom.maxBlur);
     expect(darkTile.maxBlur).toBeGreaterThan(indoorTile.maxBlur);
     expect(darkTile.maxBlur).toBeLessThanOrEqual(0.1);
-    expect(brightRoom.aperture).toBeCloseTo(1 / (0.017 * 10), 6);
+    expect(brightRoom.aperture).toBeCloseTo(1 / 0.017, 6);
   });
 
   it("normalizes physical blur by camera projection and the shared strength slider", () => {
