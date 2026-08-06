@@ -1251,10 +1251,6 @@ const HUMAN_EYE_FOCAL_LENGTH_MM = 17;
 const HUMAN_EYE_FOCAL_LENGTH_METERS = HUMAN_EYE_FOCAL_LENGTH_MM / 1000;
 const HUMAN_EYE_CIRCLE_OF_CONFUSION_MM =
   HUMAN_EYE_FOCAL_LENGTH_MM * Math.tan((1 / 60) * (Math.PI / 180));
-// The stock 41-tap compositor turns sub-acuity CoC into visible softness. Keep
-// a small global sharpness threshold, then ease into the physical response so
-// ordinary room depths stay crisp while genuinely near geometry still blurs.
-const HUMAN_EYE_COC_SHARPNESS_THRESHOLD_MM = 0.04;
 const HUMAN_EYE_REFERENCE_PUPIL_MM = 4;
 const HUMAN_EYE_BRIGHT_PUPIL_MM = 2.5;
 const HUMAN_EYE_DARK_PUPIL_MM = 6.5;
@@ -2814,16 +2810,6 @@ export const resolveHumanEyeCircleOfConfusion = (
       denominator) *
     1000
   );
-};
-
-/** Remove sub-acuity CoC while retaining a smooth global near-field response. */
-export const resolveHumanEyeVisibleCircleOfConfusion = (circleOfConfusionMm: number): number => {
-  const safeCircle = Number.isFinite(circleOfConfusionMm) ? Math.max(0, circleOfConfusionMm) : 0;
-  const normalizedExcess = clampUnit(
-    (safeCircle - HUMAN_EYE_COC_SHARPNESS_THRESHOLD_MM) / HUMAN_EYE_COC_SHARPNESS_THRESHOLD_MM,
-  );
-  const smoothExcess = normalizedExcess * normalizedExcess * (3 - 2 * normalizedExcess);
-  return safeCircle * smoothExcess;
 };
 
 /** Resolve restrained scene-space bokeh from eye focus and pupil size. */
@@ -7780,17 +7766,14 @@ const configureHumanEyeBokehShader = (bokehPass: BokehPass): void => {
   material.uniforms.eyePupilDiameter = {
     value: HUMAN_EYE_REFERENCE_PUPIL_MM / 1000,
   };
-  material.uniforms.eyeSharpnessThreshold = {
-    value: HUMAN_EYE_COC_SHARPNESS_THRESHOLD_MM / 1000,
-  };
   material.fragmentShader = material.fragmentShader
     .replace(
       apertureDeclaration,
-      `${apertureDeclaration}\n\n\t\tuniform float eyeFocalLength;\n\t\tuniform float eyePupilDiameter;\n\t\tuniform float eyeSharpnessThreshold;`,
+      `${apertureDeclaration}\n\n\t\tuniform float eyeFocalLength;\n\t\tuniform float eyePupilDiameter;`,
     )
     .replace(
       `${factorExpression}\n\n\t\tvec2 dofblur = vec2 ( clamp( factor * aperture, -maxblur, maxblur ) );`,
-      `${factorExpression}\n\n\t\tfloat objectDistance = max( -viewZ, nearClip );\n\t\tfloat focusDistance = max( focus, nearClip );\n\t\tfloat lensDenominator = max( focusDistance - eyeFocalLength, eyeFocalLength );\n\t\tfloat signedCircleOfConfusion =\n\t\t\t( factor * eyePupilDiameter * eyeFocalLength ) /\n\t\t\t( objectDistance * lensDenominator );\n\t\tfloat cocMagnitude = abs( signedCircleOfConfusion );\n\t\tfloat cocBlend = smoothstep( eyeSharpnessThreshold, eyeSharpnessThreshold * 2.0, cocMagnitude );\n\t\tfloat visibleCircleOfConfusion = signedCircleOfConfusion * cocBlend;\n\n\t\tvec2 dofblur = vec2( clamp( visibleCircleOfConfusion * aperture, -maxblur, maxblur ) );`,
+      `${factorExpression}\n\n\t\tfloat objectDistance = max( -viewZ, nearClip );\n\t\tfloat focusDistance = max( focus, nearClip );\n\t\tfloat lensDenominator = max( focusDistance - eyeFocalLength, eyeFocalLength );\n\t\tfloat signedCircleOfConfusion =\n\t\t\t( factor * eyePupilDiameter * eyeFocalLength ) /\n\t\t\t( objectDistance * lensDenominator );\n\n\t\tvec2 dofblur = vec2( clamp( signedCircleOfConfusion * aperture, -maxblur, maxblur ) );`,
     );
   material.needsUpdate = true;
 };
