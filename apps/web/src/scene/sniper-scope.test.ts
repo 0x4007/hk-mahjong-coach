@@ -2,7 +2,9 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 
 import {
+  resolveSniperScopeCameraFov,
   resolveSniperScopeProjection,
+  shouldRenderSniperScopeObject,
   shouldEnableSniperScope,
   SNIPER_SCOPE_FRAGMENT_SHADER,
   SNIPER_SCOPE_MAGNIFICATION,
@@ -68,13 +70,37 @@ describe("sniper scope lens projection", () => {
     expect(projection.radius).toBeGreaterThan(0.045);
     expect(projection.radius).toBeLessThan(0.34);
     expect(projection.resolution).toEqual({ x: 1600, y: 900 });
+    expect(projection.sceneResolution.x).toBe(projection.sceneResolution.y);
+    expect(projection.sceneResolution.x).toBeGreaterThanOrEqual(256);
   });
 
-  it("contains a real scene-texture sample and inverse magnification", () => {
+  it("derives a tighter camera FOV without dividing degrees", () => {
+    const scopeFov = resolveSniperScopeCameraFov(45);
+    expect(scopeFov).toBeGreaterThan(0);
+    expect(scopeFov).toBeLessThan(45);
+    expect(scopeFov).toBeCloseTo(9.47, 1);
+    expect(resolveSniperScopeCameraFov(45, 1)).toBeCloseTo(45, 8);
+  });
+
+  it("keeps bullet-hole decals in the clean world feed", () => {
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true }, false)).toBe(false);
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true, bulletHoleRoot: true }, false)).toBe(
+      true,
+    );
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true, bulletHole: true }, false)).toBe(
+      true,
+    );
+    expect(shouldRenderSniperScopeObject({}, true)).toBe(false);
+  });
+
+  it("resamples the tight-FOV scene and draws an X scope mark", () => {
     expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("uniform sampler2D tDiffuse");
     expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("uniform sampler2D uScopeScene");
-    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("texture2D(uScopeScene");
-    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("delta / max(uMagnification, 1.0)");
+    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("uniform vec2 uScopeSceneResolution");
+    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("scopeBicubicSample");
+    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("scopeCubicWeights");
+    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("abs(lensDelta.y - lensDelta.x)");
+    expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("abs(lensDelta.y + lensDelta.x)");
     expect(SNIPER_SCOPE_FRAGMENT_SHADER).toContain("smoothstep");
   });
 });

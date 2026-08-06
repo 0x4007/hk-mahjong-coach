@@ -2,10 +2,14 @@ import * as THREE from "three";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 
 /** The optical power of the prototype sniper scope. */
-export const SNIPER_SCOPE_MAGNIFICATION = 4.6;
+export const SNIPER_SCOPE_MAGNIFICATION = 5;
 /** Default lens radius used before the camera projects the real glass. */
 export const SNIPER_SCOPE_DEFAULT_RADIUS = 0.18;
 export const SNIPER_SCOPE_FEATHER = 0.018;
+/** Render the square scope feed above its final lens diameter for crisp decals. */
+export const SNIPER_SCOPE_RENDER_SUPERSAMPLE = 2;
+export const SNIPER_SCOPE_MIN_RENDER_SIZE = 256;
+export const SNIPER_SCOPE_MAX_RENDER_SIZE = 2048;
 
 export interface SniperScopeProjection {
   readonly enabled: boolean;
@@ -17,6 +21,11 @@ export interface SniperScopeProjection {
   /** Lens radius in UV units, measured vertically. */
   readonly radius: number;
   readonly resolution: {
+    readonly x: number;
+    readonly y: number;
+  };
+  /** Pixel dimensions of the square, tight-FOV world feed. */
+  readonly sceneResolution: {
     readonly x: number;
     readonly y: number;
   };
@@ -89,6 +98,7 @@ const disabledProjection = (width: number, height: number): SniperScopeProjectio
   center: { x: 0.5, y: 0.5 },
   radius: SNIPER_SCOPE_DEFAULT_RADIUS,
   resolution: { x: width, y: height },
+  sceneResolution: { x: 1, y: 1 },
   magnification: SNIPER_SCOPE_MAGNIFICATION,
   feather: SNIPER_SCOPE_FEATHER,
   blend: 0,
@@ -129,6 +139,16 @@ export const resolveSniperScopeProjection = (
   const projectedRadius =
     Math.hypot((edgeNdc.x - centerNdc.x) * 0.5 * viewportAspect, (edgeNdc.y - centerNdc.y) * 0.5) ||
     SNIPER_SCOPE_DEFAULT_RADIUS;
+  const resolvedRadius = clamp(
+    Number.isFinite(projectedRadius) ? projectedRadius : SNIPER_SCOPE_DEFAULT_RADIUS,
+    0.045,
+    0.34,
+  );
+  const sceneSize = clamp(
+    Math.ceil(resolvedRadius * 2 * height * SNIPER_SCOPE_RENDER_SUPERSAMPLE),
+    SNIPER_SCOPE_MIN_RENDER_SIZE,
+    SNIPER_SCOPE_MAX_RENDER_SIZE,
+  );
 
   return {
     enabled: true,
@@ -136,12 +156,9 @@ export const resolveSniperScopeProjection = (
       x: clamp(centerX, -0.5, 1.5),
       y: clamp(centerY, -0.5, 1.5),
     },
-    radius: clamp(
-      Number.isFinite(projectedRadius) ? projectedRadius : SNIPER_SCOPE_DEFAULT_RADIUS,
-      0.045,
-      0.34,
-    ),
+    radius: resolvedRadius,
     resolution: { x: width, y: height },
+    sceneResolution: { x: sceneSize, y: sceneSize },
     magnification: SNIPER_SCOPE_MAGNIFICATION,
     feather: SNIPER_SCOPE_FEATHER,
     blend,
@@ -168,12 +185,60 @@ export const SNIPER_SCOPE_FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D uScopeScene;
   uniform vec2 uScopeCenter;
   uniform vec2 uScopeResolution;
+  uniform vec2 uScopeSceneResolution;
   uniform float uScopeRadius;
   uniform float uMagnification;
   uniform float uFeather;
   uniform float uBlend;
 
   varying vec2 vUv;
+
+  vec4 scopeCubicWeights(float value) {
+    float value2 = value * value;
+    float value3 = value2 * value;
+    return vec4(
+      -0.5 * value + value2 - 0.5 * value3,
+      1.0 - 2.5 * value2 + 1.5 * value3,
+      0.5 * value + 2.0 * value2 - 1.5 * value3,
+      -0.5 * value2 + 0.5 * value3
+    );
+  }
+
+  /** Catmull-Rom reconstruction keeps the tight-FOV render sharp in the lens. */
+  vec4 scopeBicubicSample(sampler2D source, vec2 uv, vec2 resolution) {
+    vec2 texelSize = 1.0 / max(resolution, vec2(1.0));
+    vec2 coord = uv / texelSize - 0.5;
+    vec2 base = floor(coord);
+    vec2 fraction = coord - base;
+    vec4 weightsX = scopeCubicWeights(fraction.x);
+    vec4 weightsY = scopeCubicWeights(fraction.y);
+    vec2 origin = (base + vec2(-1.0, -1.0) + 0.5) * texelSize;
+    vec2 xStep = vec2(texelSize.x, 0.0);
+    vec2 yStep = vec2(0.0, texelSize.y);
+    vec2 low = vec2(0.0);
+    vec2 high = vec2(1.0);
+    vec4 row0 =
+      texture2D(source, clamp(origin, low, high)) * weightsX.x +
+      texture2D(source, clamp(origin + xStep, low, high)) * weightsX.y +
+      texture2D(source, clamp(origin + xStep * 2.0, low, high)) * weightsX.z +
+      texture2D(source, clamp(origin + xStep * 3.0, low, high)) * weightsX.w;
+    vec4 row1 =
+      texture2D(source, clamp(origin + yStep, low, high)) * weightsX.x +
+      texture2D(source, clamp(origin + yStep + xStep, low, high)) * weightsX.y +
+      texture2D(source, clamp(origin + yStep + xStep * 2.0, low, high)) * weightsX.z +
+      texture2D(source, clamp(origin + yStep + xStep * 3.0, low, high)) * weightsX.w;
+    vec4 row2 =
+      texture2D(source, clamp(origin + yStep * 2.0, low, high)) * weightsX.x +
+      texture2D(source, clamp(origin + yStep * 2.0 + xStep, low, high)) * weightsX.y +
+      texture2D(source, clamp(origin + yStep * 2.0 + xStep * 2.0, low, high)) * weightsX.z +
+      texture2D(source, clamp(origin + yStep * 2.0 + xStep * 3.0, low, high)) * weightsX.w;
+    vec4 row3 =
+      texture2D(source, clamp(origin + yStep * 3.0, low, high)) * weightsX.x +
+      texture2D(source, clamp(origin + yStep * 3.0 + xStep, low, high)) * weightsX.y +
+      texture2D(source, clamp(origin + yStep * 3.0 + xStep * 2.0, low, high)) * weightsX.z +
+      texture2D(source, clamp(origin + yStep * 3.0 + xStep * 3.0, low, high)) * weightsX.w;
+    return row0 * weightsY.x + row1 * weightsY.y + row2 * weightsY.z + row3 * weightsY.w;
+  }
 
   void main() {
     vec4 baseSample = texture2D(tDiffuse, vUv);
@@ -187,26 +252,52 @@ export const SNIPER_SCOPE_FRAGMENT_SHADER = /* glsl */ `
       distanceFromCentre
     );
     float blend = lensMask * clamp(uBlend, 0.0, 1.0);
+    if (blend <= 0.0001) {
+      gl_FragColor = baseSample;
+      return;
+    }
 
-    vec2 magnifiedUv = uScopeCenter + delta / max(uMagnification, 1.0);
+    // The hidden scope camera already renders the world at the tighter FOV.
+    // Map that full-resolution feed into the projected glass instead of
+    // stretching a few low-resolution player-viewport pixels.
+    vec2 scopeUv = vec2(
+      0.5 + lensDelta.x / max(2.0 * uScopeRadius, 0.001),
+      0.5 + lensDelta.y / max(2.0 * uScopeRadius, 0.001)
+    );
     // A small radial colour split sells the curved glass without changing the
-    // ray used by the weapon or exposing a second hidden scene render.
+    // ray used by the weapon or exposing another gameplay camera.
     vec2 aberration = normalize(lensDelta + vec2(0.00001)) * 0.0016 *
       smoothstep(0.0, max(uScopeRadius, 0.001), distanceFromCentre);
     vec3 magnifiedSample = vec3(
-      texture2D(uScopeScene, clamp(magnifiedUv + vec2(aberration.x / aspect, aberration.y), 0.0, 1.0)).r,
-      texture2D(uScopeScene, clamp(magnifiedUv, 0.0, 1.0)).g,
-      texture2D(uScopeScene, clamp(magnifiedUv - vec2(aberration.x / aspect, aberration.y), 0.0, 1.0)).b
+      scopeBicubicSample(
+        uScopeScene,
+        clamp(scopeUv + vec2(aberration.x / aspect, aberration.y), 0.0, 1.0),
+        uScopeSceneResolution
+      ).r,
+      scopeBicubicSample(uScopeScene, clamp(scopeUv, 0.0, 1.0), uScopeSceneResolution).g,
+      scopeBicubicSample(
+        uScopeScene,
+        clamp(scopeUv - vec2(aberration.x / aspect, aberration.y), 0.0, 1.0),
+        uScopeSceneResolution
+      ).b
     );
     float edge = smoothstep(0.55 * uScopeRadius, uScopeRadius, distanceFromCentre);
     magnifiedSample *= 1.0 - edge * 0.28;
 
-    // Fine cyan scope marks are deliberately inside the sampled lens and do
-    // not replace the app's reticule or the weapon's authoritative aim ray.
+    // Fine cyan X marks are deliberately inside the sampled lens and do not
+    // replace the app's reticule or the weapon's authoritative aim ray.
     float lineWidth = max(0.0014, uScopeRadius * 0.018);
-    float horizontalLine = 1.0 - smoothstep(lineWidth, lineWidth * 1.8, abs(lensDelta.y));
-    float verticalLine = 1.0 - smoothstep(lineWidth, lineWidth * 1.8, abs(lensDelta.x));
-    float scopeMarks = max(horizontalLine, verticalLine) *
+    float diagonalDown = 1.0 - smoothstep(
+      lineWidth,
+      lineWidth * 1.8,
+      abs(lensDelta.y - lensDelta.x)
+    );
+    float diagonalUp = 1.0 - smoothstep(
+      lineWidth,
+      lineWidth * 1.8,
+      abs(lensDelta.y + lensDelta.x)
+    );
+    float scopeMarks = max(diagonalDown, diagonalUp) *
       step(distanceFromCentre, uScopeRadius * 0.86) * 0.48 * clamp(uBlend, 0.0, 1.0);
     vec3 withMarks = mix(magnifiedSample, vec3(0.36, 0.92, 1.0), scopeMarks);
 
@@ -223,6 +314,7 @@ export const createSniperScopePass = (): ShaderPass =>
       uScopeScene: { value: null },
       uScopeCenter: { value: new THREE.Vector2(0.5, 0.5) },
       uScopeResolution: { value: new THREE.Vector2(1, 1) },
+      uScopeSceneResolution: { value: new THREE.Vector2(1, 1) },
       uScopeRadius: { value: SNIPER_SCOPE_DEFAULT_RADIUS },
       uMagnification: { value: SNIPER_SCOPE_MAGNIFICATION },
       uFeather: { value: SNIPER_SCOPE_FEATHER },
@@ -240,6 +332,7 @@ export const applySniperScopeProjection = (
   const uniforms = pass.uniforms as unknown as Record<string, { value?: unknown } | undefined>;
   const centerUniform = uniforms.uScopeCenter;
   const resolutionUniform = uniforms.uScopeResolution;
+  const sceneResolutionUniform = uniforms.uScopeSceneResolution;
   const radiusUniform = uniforms.uScopeRadius;
   const magnificationUniform = uniforms.uMagnification;
   const featherUniform = uniforms.uFeather;
@@ -251,6 +344,10 @@ export const applySniperScopeProjection = (
   }
   if (resolution instanceof THREE.Vector2) {
     resolution.set(projection.resolution.x, projection.resolution.y);
+  }
+  const sceneResolution = sceneResolutionUniform?.value;
+  if (sceneResolution instanceof THREE.Vector2) {
+    sceneResolution.set(projection.sceneResolution.x, projection.sceneResolution.y);
   }
   if (typeof radiusUniform?.value === "number") {
     radiusUniform.value = projection.radius;

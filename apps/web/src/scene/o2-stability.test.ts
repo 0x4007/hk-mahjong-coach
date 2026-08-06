@@ -35,4 +35,18 @@ describe("continuous O₂ stability response", () => {
     expect(exhausted.reticleSwayRadians).toBe(unheldExhausted.reticleSwayRadians);
     expect(exhausted.weaponSwayRadians).toBe(unheldExhausted.weaponSwayRadians);
   });
+
+  it("lets wall support stabilize aim without reserve or a hold-breath state", () => {
+    const braced = resolveO2Stability({
+      oxygenRatio: 0,
+      aimingDownSights: true,
+      stabilizedByWall: true,
+    });
+    const normal = resolveO2Stability({ oxygenRatio: 0, aimingDownSights: true });
+
+    expect(braced.reticleSwayRadians).toBe(0);
+    expect(braced.weaponSwayRadians).toBe(0);
+    expect(braced.accuracyMultiplier).toBeLessThan(normal.accuracyMultiplier);
+    expect(braced.accuracyMultiplier).toBeGreaterThanOrEqual(1);
+  });
 });

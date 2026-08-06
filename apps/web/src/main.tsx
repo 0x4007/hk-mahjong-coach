@@ -1024,6 +1024,7 @@ const App = (): React.JSX.Element => {
   const hasAttemptedMotionReenable = React.useRef(false);
   const [isCrouched, setIsCrouched] = React.useState(false);
   const [isSprinting, setIsSprinting] = React.useState(false);
+  const [isCapsLockOn, setIsCapsLockOn] = React.useState(false);
   const [playerVitals, setPlayerVitals] = React.useState<PlayerVitalsState>(() =>
     createPlayerVitals(),
   );
@@ -1052,6 +1053,18 @@ const App = (): React.JSX.Element => {
     return () => {
       window.removeEventListener("resize", updateDeviceClass);
       window.removeEventListener("orientationchange", updateDeviceClass);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const updateCapsLockState = (event: KeyboardEvent): void => {
+      setIsCapsLockOn(event.getModifierState("CapsLock"));
+    };
+    window.addEventListener("keydown", updateCapsLockState);
+    window.addEventListener("keyup", updateCapsLockState);
+    return () => {
+      window.removeEventListener("keydown", updateCapsLockState);
+      window.removeEventListener("keyup", updateCapsLockState);
     };
   }, []);
 
@@ -1383,7 +1396,10 @@ const App = (): React.JSX.Element => {
     }
   };
   const jump = (): void => {
-    mountRef.current?.jump();
+    const nextCrouched = mountRef.current?.jump();
+    if (nextCrouched !== undefined) {
+      setIsCrouched(nextCrouched);
+    }
   };
   const fire = (): void => {
     mountRef.current?.fire();
@@ -1558,9 +1574,9 @@ const App = (): React.JSX.Element => {
           ) : null}
           <div
             ref={reticleRef}
-            className={`scene-reticule${isSprinting ? " is-sprinting" : ""}${
-              weaponState.reloading ? " is-reloading" : ""
-            }`}
+            className={`scene-reticule${isCapsLockOn ? "" : " is-caps-lock-off"}${
+              isSprinting ? " is-sprinting" : ""
+            }${weaponState.reloading ? " is-reloading" : ""}`}
             aria-hidden="true"
             style={{ left: `${RETICLE_POSITION.x * 100}%`, top: `${RETICLE_POSITION.y * 100}%` }}
           >

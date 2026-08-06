@@ -26,6 +26,7 @@ import {
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
+  resolveCrouchedStateAfterJump,
   resolveReticleZoomViewOffset,
   resolveDesktopAimInput,
   isMovementDoubleTap,
@@ -215,6 +216,14 @@ describe("movement sprint double-tap", () => {
   });
 });
 
+describe("jump posture", () => {
+  it("automatically stands from crouch only when the jump is accepted", () => {
+    expect(resolveCrouchedStateAfterJump(true, true)).toBe(false);
+    expect(resolveCrouchedStateAfterJump(true, false)).toBe(true);
+    expect(resolveCrouchedStateAfterJump(false, true)).toBe(false);
+  });
+});
+
 describe("reticule-anchored seat zoom", () => {
   it("does not shift the standing projection", () => {
     expect(resolveReticleZoomViewOffset(90)).toEqual({ x: 0, y: 0 });
@@ -246,10 +255,15 @@ describe("reticule-anchored seat zoom", () => {
   });
 });
 
-describe("posture depth-of-field defaults", () => {
-  it("uses 12.5x standing and 25x crouched intensity", () => {
+describe("zoom depth-of-field defaults", () => {
+  it("uses 12.5x outside zoom regardless of posture", () => {
     expect(resolveDofIntensityForPosture(false)).toBe(12.5);
-    expect(resolveDofIntensityForPosture(true)).toBe(25);
+    expect(resolveDofIntensityForPosture(true)).toBe(12.5);
+  });
+
+  it("uses 25x while zoomed for both standing and crouched posture", () => {
+    expect(resolveDofIntensityForPosture(false, true)).toBe(25);
+    expect(resolveDofIntensityForPosture(true, true)).toBe(25);
   });
 });
 

@@ -1,7 +1,5 @@
 import { createSeededRandom } from "@hk-mahjong/core/public";
 
-import { resolveO2Stability } from "./o2-stability.js";
-
 export const WEAPON_IDS = ["pistol", "shotgun", "machineGun", "sniper"] as const;
 export type WeaponId = (typeof WEAPON_IDS)[number];
 
@@ -214,19 +212,12 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
  * Pistol, machine-gun, and sniper rounds leave the muzzle on the live reticle
  * ray. Their apparent spread is produced by the shared first-person
  * presentation stack: movement, breathing, posture, and prior shot recoil
- * move that ray before the next shot. The shotgun keeps a real pellet cone;
- * O₂ can widen or tighten that cone without introducing spread to other guns.
+ * move that ray before the next shot. The shotgun keeps a fixed real-world
+ * pellet cone, centered on that same live reticle ray. O₂ never changes the
+ * cone; it only contributes to the reticle and presentation motion.
  */
-export const resolveWeaponSpreadRadians = (
-  definition: WeaponDefinition,
-  oxygenRatio: number,
-  aimingDownSights = false,
-  holdingBreath = false,
-): number =>
-  definition.id === "shotgun"
-    ? definition.spreadRadians *
-      resolveO2Stability({ oxygenRatio, aimingDownSights, holdingBreath }).accuracyMultiplier
-    : 0;
+export const resolveWeaponSpreadRadians = (definition: WeaponDefinition): number =>
+  definition.id === "shotgun" ? definition.spreadRadians : 0;
 
 /**
  * Resolve the short local view-model slide from the same per-projectile

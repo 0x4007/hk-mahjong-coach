@@ -13,6 +13,8 @@ export interface O2StabilityInput {
   readonly aimingDownSights?: boolean;
   /** Whether the player is currently holding breath. */
   readonly holdingBreath?: boolean;
+  /** Whether a wall is providing free aim and breathing support. */
+  readonly stabilizedByWall?: boolean;
 }
 
 export interface O2StabilityResponse {
@@ -48,12 +50,15 @@ export const resolveO2Stability = (input: O2StabilityInput): O2StabilityResponse
   const fatigue = breathlessness ** O2_STABILITY_CURVE_EXPONENT;
   const aimingDownSights = input.aimingDownSights === true;
   // The vitals model drops holdingBreath as soon as the reserve is empty.
-  // Keep this boundary here too so callers cannot retain a free stabilised
-  // reticle by passing a stale hold flag after O₂ reaches zero.
+  // Keep this boundary here too so callers cannot retain a paid stabilised
+  // reticle by passing a stale hold flag after O₂ reaches zero. Wall support
+  // is separate and remains free even when the reserve is empty.
   const holdingBreath = input.holdingBreath === true && oxygenRatio > 0;
+  const stabilizedByWall = input.stabilizedByWall === true;
+  const stabilized = holdingBreath || stabilizedByWall;
   const postureFactor = aimingDownSights ? O2_AIM_SWAY_FACTOR : 1;
-  const breathControlFactor = holdingBreath ? O2_HOLD_BREATH_STABILITY_FACTOR : 1;
-  const accuracyFatigue = holdingBreath ? fatigue * O2_HOLD_BREATH_ACCURACY_FACTOR : fatigue;
+  const breathControlFactor = stabilized ? O2_HOLD_BREATH_STABILITY_FACTOR : 1;
+  const accuracyFatigue = stabilized ? fatigue * O2_HOLD_BREATH_ACCURACY_FACTOR : fatigue;
 
   return {
     oxygenRatio,

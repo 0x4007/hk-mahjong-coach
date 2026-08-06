@@ -210,8 +210,8 @@
   uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
   warm loading treatment. The debug panel reports focus distance, target kind, pupil size, and current blur
-  intensity for visual tuning, with a 0–25× DoF-intensity slider; the posture defaults are 12.5× standing and
-  25× crouching, while the slider remains available for stronger cinematic bokeh experiments. The practical blur
+  intensity for visual tuning, with a 0–25× DoF-intensity slider; the defaults are 12.5× outside zoom and 25× during
+  explicit ADS, while the slider remains available for stronger cinematic bokeh experiments. The practical blur
   envelope uses a smooth eased focus envelope for the debug telemetry.
 - Four restrained player stations and a static, text-safe AI-teacher display now complete the room fixture;
   cyan system and skyline window materials modulate only with a subtle ambient pulse.
@@ -375,12 +375,25 @@ are treated as game input; browser-reserved shortcuts such as macOS Command+W ma
 JavaScript receives an event. While the hold is active and O₂ remains above zero, the shared camera damper
 keeps the reticle and weapon aim centred and pauses the stationary breathing bob. Releasing the hold or
 reaching zero restores the normal reserve-driven response. The continuous response in
-`apps/web/src/scene/o2-stability.ts` maps the current reserve to reticle sway, weapon viewmodel sway, and
-spread without threshold states outside this explicit hold-breath stabilisation. Camera breathing grows
+`apps/web/src/scene/o2-stability.ts` maps the current reserve to reticle sway and weapon viewmodel sway
+without threshold states outside explicit hold-breath or wall-brace stabilisation. Camera breathing grows
 smoothly as the reserve falls, including while stationary.
+
+Pressing Jump while crouched automatically returns the player to standing when the jump is accepted. The
+automatic posture change is part of the jump action, so it keeps the existing single 5-point jump cost; an
+O₂-insufficient jump is rejected and leaves the crouch state unchanged. The returned jump posture also keeps
+the mobile Crouch button's pressed state aligned with the scene controller.
+
+When the first-person capsule is touching the side of any active physics box,
+aiming down sights receives the same reticle, weapon, and stationary-breathing
+stabilisation as holding breath, but the wall brace does not change or drain the
+player's O₂ state. The contact probe uses the controller capsule gap, supports
+yaw-rotated boxes, ignores floors and sloped surfaces, and publishes the
+data-player-wall-contact and data-player-wall-braced attributes for local diagnostics.
 Focused coverage is in
 `apps/web/src/scene/player-vitals.test.ts`, `apps/web/src/scene/o2-stability.test.ts`,
 `apps/web/src/scene/camera-motion.test.ts`, and `apps/web/src/scene/weapons.test.ts`.
+The geometry-specific brace coverage is in apps/web/src/scene/wall-contact.test.ts.
 
 ## Commands
 
@@ -467,8 +480,9 @@ physics obstacles, so seeded pickups do not appear inside authored rooms or city
 The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
 gun, and E equips the nearest pickup while stopped; number keys or Q switch
 owned weapons, 0 holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
-Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. Each weapon
-has a distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
+Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. All four procedural gun
+models use a shared near-black finish across their bodies, barrels, sights, and accent details. Each weapon has a
+distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
 projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
 recoil, ammo, reload state, and a four-slot HUD make the loop visible. Shot raycasts stay on authored
 scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss.
@@ -480,18 +494,21 @@ on Y and continuously rotates toward the moving reticule dot. Reloading uses one
 weapon: the muzzle pitches skyward, pauses for a small clip-change nudge, then returns to the reticule.
 The shared camera-motion damper also owns the held viewmodel posture: standing uses a right-hand hip-fire offset,
 crouching uses an intermediate raised offset, and explicit ADS smoothly centres and raises the weapon fully onto
-the optical axis. The weapon continues to aim and fire through the same reticule ray. A double-tap movement sprint
-clears the persistent right-mouse ADS toggle before acceleration begins.
+the optical axis using the original crouched sight height, preserving existing ironsight and sniper-scope alignment.
+The weapon continues to aim and fire through the same reticule ray. A double-tap movement sprint clears the persistent
+right-mouse ADS toggle before acceleration begins.
 Each procedural weapon now carries its own top-rail sight profile: an open two-ear rear notch, a forward post, and
-a small weapon-color bead make the sight picture readable when crouched and zoomed. Those meshes are camera children
+a small black bead make the sight picture readable when crouched and zoomed. Those meshes are camera children
 and inherit the same reticule aim quaternion, so the sights do not introduce a second or divergent firing direction.
-The receivers now stay low and the sight rails are split to leave a clear center channel. The pistol's rear orange
-detail and machine gun's former full-width top accent sit off-axis, so neither covers the centered reticule.
+The receivers now stay low and the sight rails are split to leave a clear center channel. The pistol's rear detail and
+machine gun's former full-width top accent sit off-axis, so neither covers the centered reticule.
 The sniper now adds a real camera-child scope tube, rings, tinted glass disk, and lens anchor. While the sniper is
 equipped and explicit ADS is active, `SniperScopeLensShader` runs after Bokeh and samples a clean world-only render
-texture inside the projected glass. Floating sprites and weapon/UI overlays are excluded, so the 4.6× inverse-UV
-magnification follows the underlying scene geometry rather than only enlarging labels. It uses a feathered circular
-mask, restrained glass colour split, and fine cyan scope marks, then leaves `OutputPass` to perform normal tone mapping.
+texture inside the projected glass. A hidden secondary camera aims through the live reticule with a true 5× tighter
+FOV and renders only a square 2×-supersampled lens target, so bullet-hole decals receive fresh geometry pixels instead
+of a stretched viewport crop. Floating sprites and weapon/UI overlays are excluded while the bullet-hole root remains
+visible. Catmull–Rom bicubic reconstruction, a feathered circular mask, restrained glass colour split, and diagonal
+cyan X marks keep the optic legible, then `OutputPass` performs normal tone mapping.
 Right-mouse ADS remains independent from left-Command hold-breath. Because the mask is projected from the actual scope anchor after
 viewmodel transforms, it follows sway, recoil, reload, and reticule-relative aim while the weapon ray remains authoritative.
 The scope tube is open-ended at the rear and the glass sits just ahead of its rim; this avoids a capped-cylinder face
@@ -502,20 +519,28 @@ Render hits attach a typed `lastWeaponHit` record to the struck object for local
 not an authoritative enemy, damage, replay, or multiplayer system.
 
 Shot recoil is part of the centralized first-person damper. Each fire event passes the weapon's per-projectile
-damage and the current visible centre-dot displacement into the damper. It adds a short upward impulse plus
-same-direction yaw/pitch follow-through, scaled from the damage value. That output is applied to the camera matrix,
-the reticule's CSS/NDC position, and the camera-child held weapon, so an already off-centre reticle is visibly pushed
-further in that direction while the whole character view moves together. The four profiles therefore produce ordered
-recoil from their 12/16/28/100 damage values; the shotgun uses 16 damage per pellet rather than multiplying the visual
-kick by its pellet count. Ordinary guns do not add a second random projectile offset: movement, breathing, posture,
-and the previous shot's recoil naturally move the shared reticule aim before the next round. The shotgun is the only
-weapon with an inherent pellet cone, and its O₂ response widens or tightens that cone.
+damage and the current visible centre-dot displacement from its resting position into the damper. The damper draws
+that vector as a line from the resting dot to the live dot, normalizes it, and nudges the aim farther along the same
+direction; there is no fixed centered or upward kick. The outer reticule ring is the 100-point reference radius. The
+base 100-damage impulse carries the aim 25% beyond that radius; the current shared 2× shot-jerk tuning carries the
+sniper 250% beyond the centre. Pistol, shotgun, and machine-gun impulses use the same distance algorithm scaled by
+their 28/16/12 damage values. That output is applied to the camera matrix, the
+reticule's CSS/NDC position, and the camera-child held weapon, so movement, breathing, posture, and prior recoil all
+participate in the next shot's live direction. Each kick holds its outward offset for 60 ms, then adds a shared
+1.5× return impulse through the rest point, so a rapid sequence visibly jerks outward and overshoots to the other
+side before the next machine-gun shot instead of aligning back on center. The recovery is the same for every weapon; only the existing
+per-projectile damage scale changes the kick size. The shotgun uses 16 damage per pellet rather than multiplying the
+visual kick by its eight-pellet count. Ordinary guns do not add a second random projectile offset; the shotgun is the
+only weapon with an inherent fixed pellet cone. Every pellet cone is centered on the current live reticule ray;
+O₂ does not widen or tighten it. O₂-driven sway still moves the reticule and therefore moves the cone's center.
 
 During sprint movement, the reticle centre dot fades out and fades back in when sprinting stops. The outer circle is
 kept visible as the persistent movement/aim reference.
 During a reload, the browser shell fades only the centre reticle dot to zero opacity from the authoritative weapon
 snapshot; the outer circle remains visible and the dot returns when the reload finishes without changing the shared
 aim ray or camera motion.
+The browser shell also listens for the keyboard Caps Lock modifier: the centre dot is visible only while Caps Lock is
+on, while the outer circle remains visible regardless of the lock state. Sprint and reload still hide the same dot.
 
 Focused coverage lives in `apps/web/src/scene/weapons.test.ts`, `apps/web/src/scene/reticle-aim.test.ts`, and
 `apps/web/src/scene/sniper-scope.test.ts`.
@@ -620,5 +645,11 @@ explicit commands and are not silently run by the scheduler.
 
 The physical eye-CoC path is preserved in checkpoint commit `534f04b` for later calibration, but it is disabled in the
 current runtime because the first visual pass made the whole scene too soft during zoom. The active renderer uses the
-previous stock normalized Bokeh response while we reassess the blur scale and depth-buffer mapping. No ADS-specific
-state was added.
+previous stock normalized Bokeh response while we reassess the blur scale and depth-buffer mapping. The physical
+experiment itself does not add a separate ADS-specific shader state.
+
+## DoF intensity defaults
+
+The active stock Bokeh pass uses a 12.5× multiplier in normal first-person view. Standing and crouching share this
+default. The multiplier becomes 25× only while the shared explicit ADS state is active, covering both iron-sight zoom
+and the sniper scope; crouching by itself does not increase blur.

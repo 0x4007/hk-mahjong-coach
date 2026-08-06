@@ -72,16 +72,13 @@ describe("weapon definitions", () => {
 
   it("keeps ordinary guns on the live aim ray and reserves inherent spread for the shotgun", () => {
     for (const weapon of ["pistol", "machineGun", "sniper"] as const) {
-      expect(resolveWeaponSpreadRadians(WEAPON_DEFINITIONS[weapon], 0.4, true, false)).toBe(0);
+      expect(resolveWeaponSpreadRadians(WEAPON_DEFINITIONS[weapon])).toBe(0);
     }
 
-    const rested = resolveWeaponSpreadRadians(WEAPON_DEFINITIONS.shotgun, 1, true, false);
-    const strained = resolveWeaponSpreadRadians(WEAPON_DEFINITIONS.shotgun, 0.4, true, false);
-    const controlled = resolveWeaponSpreadRadians(WEAPON_DEFINITIONS.shotgun, 0.4, true, true);
+    const spread = resolveWeaponSpreadRadians(WEAPON_DEFINITIONS.shotgun);
 
-    expect(rested).toBeGreaterThan(0);
-    expect(strained).toBeGreaterThan(rested);
-    expect(controlled).toBeLessThan(strained);
+    expect(spread).toBe(WEAPON_DEFINITIONS.shotgun.spreadRadians);
+    expect(spread).toBeGreaterThan(0);
   });
 });
 

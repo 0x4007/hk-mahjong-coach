@@ -181,7 +181,7 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   2.5–6.5 mm pupil adapts slowly to the estimated room luminance, changing the hyperfocal distance and blur
   ceiling; ordinary focus stays restrained while close tile focus remains visible. Debug metrics expose focus
   distance, target kind, pupil diameter, and blur intensity, and the debug menu now includes a 0–25× DoF-strength
-  slider for visual comparison, with posture defaults of 12.5× standing and 25× crouching; higher values remain
+  slider for visual comparison, with defaults of 12.5× outside zoom and 25× during explicit ADS; higher values remain
   available for stronger cinematic bokeh experiments. The practical distance envelope now uses a smooth eased curve
   calibrated from the focus lab for telemetry. The physical eye-CoC shader experiment is checkpointed separately and
   currently disabled after visual review; the active post-process uses the stock normalized depth response while the
@@ -379,8 +379,8 @@ restart/resume path before beginning dependent CLI/server integration.
 - Added pure hold-breath state transitions. Right mouse requests ADS plus hold breath in the scene; the
   model drains -15/s, auto-stops at zero, and prevents reactivation until O₂ is above 25.
 - Added `apps/web/src/scene/o2-stability.ts`, a smooth reserve-to-presentation curve shared by camera
-  reticle sway and weapon viewmodel/spread calculations. No reserve-percentage accuracy or sway thresholds
-  are used; the explicit hold-breath state is the only full-stabilisation mode. The HUD reports active
+  reticle sway and weapon viewmodel calculations. No reserve-percentage accuracy or sway thresholds
+  are used; explicit hold-breath and free wall-brace states are the full-stabilisation modes. The HUD reports active
   hold-breath and rearm status, while `data-player-o2` remains the numeric reserve.
 - Hold-breath presentation now removes reticle and weapon sway, and pauses the stationary breathing bob
   while O₂ remains above zero; the normal reserve-driven motion returns as soon as the hold ends or O₂ is
@@ -497,9 +497,10 @@ restart/resume path before beginning dependent CLI/server integration.
 
 ## 2026-08-06 — Damage-scaled reticle-following recoil
 
-- Added a damage-normalized shot impulse to the centralized camera damper. A shot starts with a small upward kick,
-  then adds a signed yaw/pitch component in the direction of the current visible reticle displacement, so movement,
-  breathing, and low-O2 sway are temporarily exaggerated instead of replaced.
+- Added a damage-normalized shot impulse to the centralized camera damper. A shot follows the signed yaw/pitch vector
+  from the resting centre dot to the current visible reticle displacement, so movement, breathing, and low-O2 sway
+  are temporarily exaggerated instead of replaced; a centred dot contributes no direction and there is no fixed
+  upward kick.
 - The same damper output now drives the camera's local view kick, the reticle CSS/NDC aim position, and the
   camera-attached weapon. The held weapon's local slide uses the same per-projectile damage value, including the
   shotgun's individual pellet damage, rather than a sniper-only exception.
@@ -508,6 +509,25 @@ restart/resume path before beginning dependent CLI/server integration.
   broader scene suite reached 100/101 tests; its remaining swept wall-hang failure is in the pre-existing dirty
   traversal lane. The scene ESLint command still reports dirty-lane diagnostics in `mahjong-table.ts`; browser
   firing interaction remains unverified and no new browser session was opened.
+
+## 2026-08-06 — Reticle-ring-scaled outward recoil
+
+- Replaced the fixed upward camera kick with a normalized vector from the reticle's resting centre dot to its live
+  position at the instant of firing. The shared damper now nudges camera, reticle aim, and camera-child weapon away
+  from that rest point in any direction; an exactly centred dot produces no directional kick.
+- Mapped the outer reticule ring's 27.6 CSS-pixel radius to 100 damage and set the base reference sniper impulse to
+  125% of that radius. The shared shot-jerk tuning is now 2×, making the effective sniper kick 250% of the ring;
+  pistol, shotgun, and machine-gun impulses use the same outward-distance algorithm scaled by their per-projectile
+  damage, while shotgun recoil remains one 16-damage impulse per trigger pull.
+- Focused camera-motion assertions passed in the latest server-owned bus snapshot, along with strict typecheck,
+  targeted ESLint, Prettier, production web build, and `git diff --check`. The latest full bus snapshot passed all
+  403 assertions; no new browser session was opened.
+- Added a 60 ms outward phase followed by a 1.5× shared return-velocity impulse for every damage-scaled shot. The
+  presentation stack now crosses back through the reticule rest point before the next machine-gun shot and overshoots
+  to the opposite side instead of hiding the outward jerk in same-frame recovery; this remains a common damper response,
+  not a weapon-specific rule.
+- Doubled the shared outward shot impulse for all weapons through `CAMERA_RECOIL_SHOT_MULTIPLIER = 2`; the existing
+  proportional return velocity scales with the same impulse instead of introducing a weapon-specific recovery path.
 
 ## 2026-08-06 — Table-side weapon staging
 
@@ -520,11 +540,11 @@ restart/resume path before beginning dependent CLI/server integration.
 ## 2026-08-06 — Sniper scope magnification shader
 
 - Added `apps/web/src/scene/sniper-scope.ts`, a post-processing lens shader that samples the rendered scene texture
-  inside the projected sniper glass and magnifies the source image by 4.6× with a feathered circular edge, subtle
+  inside the projected sniper glass and magnifies the source image by 5× with a feathered circular edge, subtle
   chromatic separation, and fine cyan scope marks.
 - Added a real camera-child scope tube, rings, glass disk, and projection anchor to the held sniper model. The lens
-  pass follows that anchor after viewmodel sway, recoil, reload, and reticule-relative aiming are applied; it does
-  not create a second camera or a divergent firing ray.
+  pass follows that anchor after viewmodel sway, recoil, reload, and reticule-relative aiming are applied; it uses
+  a separate render camera only for presentation and never creates a divergent firing ray.
 - Kept the scope tube open at both ends and placed the glass just beyond the rear rim; the default cylinder cap had
   rendered as a solid black panel over the lens.
 - The effect activates in the first-person seat view whenever the sniper is equipped and the player is crouched;
@@ -550,6 +570,11 @@ restart/resume path before beginning dependent CLI/server integration.
 - The centre reticle dot now fades to zero opacity for the duration of the authoritative weapon reload state, then
   fades back in when the reload completes. The outer circle remains visible, and sprinting continues to control
   the same centre dot.
+
+## 2026-08-06 — Caps Lock center-dot visibility
+
+- The browser shell now reads the keyboard's Caps Lock modifier state. The center reticle dot is hidden while Caps
+  Lock is off and shown while it is on; the outer reticle circle remains visible in both states.
 
 ## 2026-08-06 — Top-row HUD placement
 
@@ -647,16 +672,17 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   near ironsights can blur while the distant world stays comparatively sharp without an ADS-specific state.
 - Added focused regressions for near-depth monotonicity, zero blur on the focus plane, and reduced far-depth defocus.
 - The experiment was checkpointed at `534f04b` and then disabled after the existing Vite lane showed excessive whole-world
-  blur during zoom. The active renderer is back on the prior stock Bokeh depth response; no ADS-specific state was added.
+  blur during zoom. The active renderer is back on the prior stock Bokeh depth response; the physical experiment itself
+  does not add a separate ADS-specific shader state.
 
 ## 2026-08-06 — Presentation-driven projectile spread
 
 - Removed the seeded projectile cone from the pistol, machine gun, and sniper. Their shots now use the live reticule
   ray exactly; movement, breathing, posture, and prior damage-scaled recoil move the shared first-person presentation
   stack and therefore create the natural aim spread before the next shot.
-- Kept an inherent seeded pellet cone only for the shotgun. O₂ and hold-breath stability continue to widen or tighten
-  that shotgun cone without adding random spread to the other firearms.
-- Added a weapon regression covering the zero-cone ordinary guns and positive, O₂-scaled shotgun cone. The runtime also
+- Kept an inherent seeded pellet cone only for the shotgun. Its radius is a fixed weapon property and is independent
+  of O₂ or hold-breath state; those presentation effects move the cone's reticule-centered origin instead.
+- Added a weapon regression covering the zero-cone ordinary guns and fixed positive shotgun cone. The runtime also
   avoids consuming shot RNG when a weapon has no inherent spread.
 
 ## 2026-08-06 — Explicit ADS toggle and intermediate crouch posture
@@ -665,7 +691,49 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   longer exits ADS. Left Command remains the hold-breath/aim binding.
 - Crouching no longer changes the seat FOV or activates the sniper optic. It keeps the lower eye height but uses an
   intermediate camera-damper weapon pose between standing hip fire and full ADS. Explicit ADS owns the smooth 90° →
-  45° reticule-anchored zoom and the centered raised weapon pose.
+  45° reticule-anchored zoom and restores the original crouched sight pose exactly (`x: 0, y: -0.22, z: -0.54`) so
+  ironsights and the sniper optic stay aligned.
 - A directional movement double-tap clears the persistent right-mouse ADS toggle before sprinting. Focused camera-motion
   and sniper-scope regressions cover the new separation; browser interaction remains tied to the existing connected Vite
   tab and no additional browser session was opened.
+
+## 2026-08-06 — Supersampled sniper scope world feed
+
+- Replaced the scope's stretched player-viewport crop with a hidden secondary `PerspectiveCamera`. It copies the
+  presentation camera pose, aims through the live reticule ray, and uses a tangent-scaled 5× tighter FOV.
+- The scope render target is square, sized to the projected glass at 2× supersampling (256–2048 px), so the extra
+  render only covers the optic instead of duplicating the full viewport. The fragment shader reconstructs that feed
+  with Catmull–Rom bicubic sampling and a guarded lens-only branch.
+- The clean world pass now keeps the weapon bullet-hole root and decals while excluding weapon/UI visuals and sprites.
+  Scope marks are diagonal cyan X lines rather than horizontal/vertical plus marks.
+- Focused validation in this lane: strict `pnpm typecheck` passed; the centralized test bus and existing browser lane
+  still need to publish/read evidence for the changed shader/runtime state.
+
+## 2026-08-06 — Free wall-braced aim stabilisation
+
+- Added a capsule-side contact probe over the active physics boxes. It accepts the controller's small separation
+  margin, handles yaw-rotated boxes, and excludes floor/platform-only contact and sloped ramps.
+- Wall contact now feeds a separate shared presentation signal. While aiming down sights, the centralized camera
+  damper and camera-attached weapon use the same sway and breathing suppression as hold-breath, including at empty
+  O₂, without setting the paid holdingBreath state or spending reserve.
+- Published data-player-wall-contact and data-player-wall-braced for local diagnostics. Added focused contact,
+  O₂ stability, and camera regressions; full bus/type/lint/build evidence remains pending for this dirty state.
+
+## 2026-08-06 — Black procedural gun finish
+
+- Applied one shared near-black material to every procedural pistol, shotgun, machine-gun, and sniper body, barrel,
+  sight, accent, and camera-held or pickup model. Colored pickup pads, labels, muzzle flashes, tracers, and impact
+  effects remain as interaction feedback rather than part of the gun finish.
+
+## 2026-08-06 — Jump exits crouch
+
+- A successful first-person jump now automatically returns the player to standing. The transition is applied only
+  after the existing atomic jump O₂ check succeeds, so a rejected jump preserves the crouched posture and reserve.
+- The mount returns its current crouch state after a jump, keeping the mobile Crouch button synchronized with the
+  scene controller. Added a focused posture regression for accepted and rejected jumps.
+
+## 2026-08-06 — Zoom-only DoF intensity
+
+- Kept the default DoF multiplier at 12.5× while standing or crouching. Explicit zoom, including iron sights and the
+  sniper scope, now switches the shared Bokeh aperture/maxblur multiplier to 25× through the existing ADS state.
+- Added regressions proving that posture alone never raises the multiplier and that both postures use 25× while zoomed.

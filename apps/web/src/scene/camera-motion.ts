@@ -15,6 +15,8 @@ export interface CameraMotionUpdateInput {
   readonly aimingDownSights?: boolean;
   /** Whether the player is holding breath. */
   readonly holdingBreath?: boolean;
+  /** Whether wall contact is providing free aim and breathing support. */
+  readonly stabilizedByWall?: boolean;
 }
 
 export interface CameraWeaponShotInput {
@@ -118,14 +120,16 @@ export const CAMERA_VIEWMODEL_STANDING_OFFSET: CameraViewmodelOffset = {
 /** Intermediate placement used while crouching without entering ADS. */
 export const CAMERA_VIEWMODEL_CROUCHING_OFFSET: CameraViewmodelOffset = {
   x: 0.16,
-  y: -0.25,
-  z: -0.54,
+  y: -0.32,
+  z: -0.56,
 };
-/** Centered, fully raised placement used for explicit aim-down-sights mode. */
+/** Centered, fully raised placement used for explicit aim-down-sights mode.
+ * Keep this equal to the original crouched sight pose so existing ironsights
+ * and sniper optics remain exactly aligned. */
 export const CAMERA_VIEWMODEL_AIMING_OFFSET: CameraViewmodelOffset = {
   x: 0,
-  y: -0.08,
-  z: -0.5,
+  y: -0.22,
+  z: -0.54,
 };
 export const CAMERA_VIEWMODEL_POSTURE_DAMPING = 14;
 export const CAMERA_VIEWMODEL_AIM_DAMPING = 14;
@@ -153,14 +157,34 @@ export const CAMERA_LANDING_VELOCITY_THRESHOLD = 1;
 export const CAMERA_WEIGHT_IMPULSE_MAX = 7;
 /** Damage value used to normalize the four visual weapon profiles. */
 export const CAMERA_RECOIL_REFERENCE_DAMAGE = 100;
-/** Reticle displacement at which the directional recoil component saturates. */
-export const CAMERA_RECOIL_RETICLE_REFERENCE_PIXELS = 36;
-/** Baseline upward kick at reference damage, in radians. */
-export const CAMERA_RECOIL_BASE_PITCH = (0.8 * Math.PI) / 180;
-/** Maximum same-direction reticle-following kick at reference damage. */
-export const CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE = (1.6 * Math.PI) / 180;
-export const CAMERA_RECOIL_SPRING = 180;
-export const CAMERA_RECOIL_DAMPING = 24;
+/** The CSS radius of the outer reticle ring at the default 16 px root size. */
+export const CAMERA_RECOIL_RETICLE_RING_RADIUS_PIXELS = 27.6;
+/** A 100-damage shot carries the aim 25% beyond the outer-ring radius. */
+export const CAMERA_RECOIL_RETICLE_RING_OVERSHOOT = 1.25;
+/**
+ * Visible centre-dot pixels represented by one radian of camera recoil.
+ * This is the shared 180 px/radian conversion multiplied by the dot's 5× aim
+ * motion, so the damage scale is expressed in the same pixels the player sees.
+ */
+export const CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN = 180 * 5;
+/** Outward reticle-following kick at reference damage, in radians. */
+export const CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE =
+  (CAMERA_RECOIL_RETICLE_RING_RADIUS_PIXELS * CAMERA_RECOIL_RETICLE_RING_OVERSHOOT) /
+  CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN;
+/** Global shot-jerk tuning applied consistently to every weapon profile. */
+export const CAMERA_RECOIL_SHOT_MULTIPLIER = 2;
+/**
+ * Shared recoil spring. It is intentionally fast enough for a single kick to
+ * cross the reticle rest point in a few frames, including at automatic-fire
+ * cadence, without consulting a weapon's type or fire interval.
+ */
+export const CAMERA_RECOIL_SPRING = 1200;
+/**
+ * Underdamped recovery lets every non-zero impulse overshoot the rest point.
+ * The same second-order response is used for every present and future weapon;
+ * firing speed only determines how often new impulses enter this state.
+ */
+export const CAMERA_RECOIL_DAMPING = 34;
 export const CAMERA_RECOIL_MAX_ANGLE = (8 * Math.PI) / 180;
 
 const CAMERA_DIRECTION_MEMORY_SECONDS = 0.24;
@@ -185,22 +209,35 @@ export interface CameraWeaponSwitchInput {
 }
 
 /**
- * Resolve one damage-scaled shot kick. The baseline pitch is upward, while
- * the signed reticle term deliberately follows any existing off-centre aim.
+ * Resolve one damage-scaled shot kick. The vector from the reticle's rest
+ * point to its live centre dot supplies the direction, so the kick goes away
+ * from the rest point in any quadrant. A perfectly centred shot has no
+ * camera-direction impulse; the weapon's damage controls the outward distance.
  */
 export const resolveCameraWeaponShotImpulse = (
   shot: CameraWeaponShotInput,
 ): CameraWeaponShotImpulse => {
   const damageRatio =
     clamp(shot.damage, 0, CAMERA_RECOIL_REFERENCE_DAMAGE) / CAMERA_RECOIL_REFERENCE_DAMAGE;
-  const reticleX = clamp(shot.reticleOffset.x / CAMERA_RECOIL_RETICLE_REFERENCE_PIXELS, -1, 1);
-  const reticleY = clamp(shot.reticleOffset.y / CAMERA_RECOIL_RETICLE_REFERENCE_PIXELS, -1, 1);
+  const reticleX = Number.isFinite(shot.reticleOffset.x) ? shot.reticleOffset.x : 0;
+  const reticleY = Number.isFinite(shot.reticleOffset.y) ? shot.reticleOffset.y : 0;
+  const reticleDistance = Math.hypot(reticleX, reticleY);
+  if (reticleDistance <= Number.EPSILON || damageRatio <= 0) {
+    return { yaw: 0, pitch: 0 };
+  }
+  const kickAngle =
+    damageRatio * CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE * CAMERA_RECOIL_SHOT_MULTIPLIER;
   return {
-    yaw: damageRatio * reticleX * CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE,
-    pitch: damageRatio * (reticleY * CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE - CAMERA_RECOIL_BASE_PITCH),
+    yaw: (reticleX / reticleDistance) * kickAngle,
+    pitch: (reticleY / reticleDistance) * kickAngle,
   };
 };
 
+/**
+ * Integrate one axis of the shared underdamped recoil response. A shot adds a
+ * displacement immediately; the spring supplies the universal recovery and
+ * opposite-side overshoot. No weapon metadata is needed here.
+ */
 const integrateRecoilAxis = (
   offset: number,
   velocity: number,
@@ -403,6 +440,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     recoilPitch = 0;
     recoilPitchVelocity = 0;
     crouchAmount = 0;
+    aimAmount = 0;
     viewmodelSwitchElapsed = 0;
     viewmodelSwitchActive = false;
     viewmodelSwitchHasOutgoingWeapon = true;
@@ -422,6 +460,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
 
   const applyWeaponShotImpulse = (shot: CameraWeaponShotInput): void => {
     const impulse = resolveCameraWeaponShotImpulse(shot);
+    if (impulse.yaw === 0 && impulse.pitch === 0) {
+      return;
+    }
     recoilYaw = clamp(recoilYaw + impulse.yaw, -CAMERA_RECOIL_MAX_ANGLE, CAMERA_RECOIL_MAX_ANGLE);
     recoilPitch = clamp(
       recoilPitch + impulse.pitch,
@@ -488,7 +529,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     const gaitBob = Math.sin(bobPhase) * CAMERA_BOB_AMPLITUDE * bobAmount;
     const breathlessness = 1 - oxygenRatio;
     const breathingAmplitude = input.bobEnabled
-      ? input.holdingBreath === true && oxygenRatio > 0
+      ? (input.holdingBreath === true && oxygenRatio > 0) || input.stabilizedByWall === true
         ? 0
         : CAMERA_BREATHING_BASE_AMPLITUDE + CAMERA_BREATHING_MAX_AMPLITUDE * breathlessness
       : 0;
@@ -503,6 +544,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       oxygenRatio,
       aimingDownSights: input.aimingDownSights === true,
       holdingBreath: input.holdingBreath === true,
+      stabilizedByWall: input.stabilizedByWall === true,
     });
     aimSwayPhase += deltaSeconds * CAMERA_AIM_SWAY_FREQUENCY;
     const aimSwayX = input.bobEnabled ? Math.sin(aimSwayPhase) * stability.reticleSwayRadians : 0;

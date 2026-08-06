@@ -320,6 +320,7 @@ button[aria-pressed="true"] {
   transform: translate(var(--scene-reticule-dot-bob-x, 0px), var(--scene-reticule-dot-bob-y, 0px));
 }
 
+.scene-reticule.is-caps-lock-off span,
 .scene-reticule.is-sprinting span,
 .scene-reticule.is-reloading span {
   opacity: 0;

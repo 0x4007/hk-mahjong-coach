@@ -78,11 +78,14 @@ import {
   type CameraMotionUpdateInput,
 } from "./camera-motion.js";
 import { resolveO2Stability } from "./o2-stability.js";
+import { isPlayerTouchingWall } from "./wall-contact.js";
 import {
   applySniperScopeProjection,
   createSniperScopePass,
   resolveSniperScopeProjection,
+  resolveSniperScopeCameraFov,
   setSniperScopeSceneTexture,
+  shouldRenderSniperScopeObject,
   shouldEnableSniperScope,
 } from "./sniper-scope.js";
 
@@ -170,6 +173,12 @@ export const isMovementDoubleTap = (
     currentTime - previousTapAt <= MOVEMENT_DOUBLE_TAP_WINDOW_MS
   );
 };
+
+/** A successful jump always leaves the player standing, while a rejected jump preserves posture. */
+export const resolveCrouchedStateAfterJump = (
+  isCrouched: boolean,
+  jumpAccepted: boolean,
+): boolean => (jumpAccepted ? false : isCrouched);
 
 export const VISUAL_SCENE_STATE_VERSION = 1 as const;
 
@@ -759,7 +768,7 @@ export interface MahjongTableMount {
   readonly setMotionLookEnabled: (enabled: boolean) => void;
   readonly setTouchMovementVector: (forward: number, right: number, active: boolean) => void;
   readonly toggleCrouch: () => boolean;
-  readonly jump: () => void;
+  readonly jump: () => boolean;
   readonly fire: () => void;
   readonly reload: () => void;
   readonly interact: () => void;
@@ -1258,14 +1267,18 @@ const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
 const BOKEH_BASE_APERTURE = 0.00095;
 const BOKEH_BASE_MAX_BLUR = 0.003;
 const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
-/** Debug-only multiplier cap; crouching uses the full available range. */
+/** Debug-only multiplier cap; zoom mode uses the full available range. */
 export const DEBUG_BOKEH_STRENGTH_MAX = 25;
 export const STANDING_DOF_INTENSITY = 12.5;
-export const CROUCHING_DOF_INTENSITY = 25;
+export const ZOOMED_DOF_INTENSITY = 25;
 
-/** Resolve the default depth-of-field multiplier for the player's posture. */
-export const resolveDofIntensityForPosture = (isCrouched: boolean): number =>
-  isCrouched ? CROUCHING_DOF_INTENSITY : STANDING_DOF_INTENSITY;
+/**
+ * Resolve the default depth-of-field multiplier for the current view.
+ * Posture no longer changes the blur; explicit zoom (iron sights or a scope)
+ * uses the stronger 25× setting.
+ */
+export const resolveDofIntensityForPosture = (_isCrouched: boolean, isZoomed = false): number =>
+  isZoomed ? ZOOMED_DOF_INTENSITY : STANDING_DOF_INTENSITY;
 // Practical calibration points from the focus-lab pass: at the reference 4 mm
 // pupil, 6 m reads as effectively sharp and 2.5 m retains roughly one quarter
 // of the close-focus blur. Other pupil sizes scale this cutoff with dilation.
@@ -3808,6 +3821,7 @@ interface WeaponRuntime {
     oxygenRatio: number,
     aimingDownSights: boolean,
     holdingBreath: boolean,
+    stabilizedByWall: boolean,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
@@ -3826,6 +3840,9 @@ interface WeaponRuntime {
 
 const getWeaponAccent = (weapon: WeaponId): string =>
   `#${new THREE.Color(WEAPON_DEFINITIONS[weapon].color).getHexString()}`;
+
+/** Shared near-black finish for every procedural gun body and sight detail. */
+const WEAPON_BLACK = 0x050607;
 
 const addWeaponBox = (
   root: THREE.Group,
@@ -3948,9 +3965,9 @@ const createWeaponModel = (weapon: WeaponId, scale: number, held = false): Weapo
   root.name = `WeaponModel:${weapon}`;
   root.scale.setScalar(scale);
   root.userData = { weaponVisual: true, dofFocusTarget: true };
-  const bodyMaterial = createMaterial(definition.color, 0.28, 0.68);
-  const darkMaterial = createMaterial(COLORS.charcoal, 0.4, 0.58);
-  const accentMaterial = createAccentMaterial(definition.color, 0.26, 0.25, 0.6);
+  const bodyMaterial = createMaterial(WEAPON_BLACK, 0.28, 0.68);
+  const darkMaterial = createMaterial(WEAPON_BLACK, 0.4, 0.58);
+  const accentMaterial = createAccentMaterial(WEAPON_BLACK, 0.26, 0.25, 0.6);
   let muzzleZ: number;
   let scopeLensAnchor: THREE.Object3D | null = null;
   let scopeLensRadius = 0;
@@ -4613,12 +4630,7 @@ const createWeaponRuntime = (
       viewModel.muzzleFlash.visible = true;
       viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
     }
-    const spreadRadians = resolveWeaponSpreadRadians(
-      definition,
-      oxygenRatio,
-      aimingDownSights,
-      holdingBreath,
-    );
+    const spreadRadians = resolveWeaponSpreadRadians(definition);
     scene.updateMatrixWorld(true);
     if (spreadRadians > 0) {
       rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
@@ -4666,6 +4678,7 @@ const createWeaponRuntime = (
     nextOxygenRatio: number,
     nextAimingDownSights: boolean,
     nextHoldingBreath: boolean,
+    nextStabilizedByWall: boolean,
   ): void => {
     controlsActive = active;
     viewActive = visibleInView;
@@ -4729,6 +4742,7 @@ const createWeaponRuntime = (
       oxygenRatio,
       aimingDownSights,
       holdingBreath,
+      stabilizedByWall: nextStabilizedByWall,
     });
     const effectiveViewmodelTransition =
       viewmodelTransition.phase === "idle" &&
@@ -7769,6 +7783,12 @@ export const createMahjongTableScene = (
   scene.background = new THREE.Color(COLORS.sky);
   scene.fog = new THREE.Fog(COLORS.haze, 10, 34);
   const camera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
+  // This camera is deliberately not added to the scene graph. When the optic
+  // is active it copies the live player pose, rotates onto the reticule ray,
+  // and renders a true narrow-FOV world feed for the scope texture.
+  const sniperScopeCamera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
+  sniperScopeCamera.name = "SniperScopeCamera";
+  sniperScopeCamera.matrixAutoUpdate = false;
   // The first-person weapon models are camera children. Keep the camera in
   // the rendered scene graph so Three.js traverses those view-model meshes.
   scene.add(camera);
@@ -7857,9 +7877,16 @@ export const createMahjongTableScene = (
     magFilter: THREE.LinearFilter,
   });
   sniperScopeSceneTarget.texture.name = "SniperScopeWorldTexture";
+  sniperScopeSceneTarget.texture.generateMipmaps = false;
   setSniperScopeSceneTexture(sniperScopePass, sniperScopeSceneTarget.texture);
   composer.addPass(new OutputPass());
   const focusRaycaster = new THREE.Raycaster();
+  const sniperScopeCameraPosition = new THREE.Vector3();
+  const sniperScopeCameraScale = new THREE.Vector3();
+  const sniperScopeCameraQuaternion = new THREE.Quaternion();
+  const sniperScopeCameraForward = new THREE.Vector3();
+  const sniperScopeAimDirection = new THREE.Vector3();
+  const sniperScopeRotationDelta = new THREE.Quaternion();
   let reticlePosition = resolveReticlePosition(options.reticlePosition);
   const setFocusReticle = (position?: ReticlePosition): void => {
     const normalized = resolveReticlePosition(position);
@@ -8261,14 +8288,14 @@ export const createMahjongTableScene = (
   let eyeHeight = STANDING_EYE_HEIGHT;
   let firstPersonGroundY = 0;
   let isCrouched = false;
-  let lastDofPosture: boolean | null = null;
-  const syncDofIntensityForPosture = (): void => {
-    const crouchedView = activeView === "seat" && isCrouched;
-    if (crouchedView === lastDofPosture) {
+  let lastDofZoomed: boolean | null = null;
+  const syncDofIntensityForZoom = (): void => {
+    const zoomedView = activeView === "seat" && aimingDownSights;
+    if (zoomedView === lastDofZoomed) {
       return;
     }
-    lastDofPosture = crouchedView;
-    debugBokehStrength = resolveDofIntensityForPosture(crouchedView);
+    lastDofZoomed = zoomedView;
+    debugBokehStrength = resolveDofIntensityForPosture(isCrouched, zoomedView);
     persistDebugPreferences();
   };
   let jumpOffset = 0;
@@ -8284,6 +8311,8 @@ export const createMahjongTableScene = (
   let wallHangState: WallHangState | null = null;
   let wallClimbTransition: WallClimbTransition | null = null;
   let wallHangElapsed = 0;
+  let touchingWall = false;
+  let wallBracedAim = false;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
   const cameraMotion = createCameraMotionDamper();
@@ -8611,10 +8640,10 @@ export const createMahjongTableScene = (
     }
     return isCrouched;
   };
-  const jump = (): void => {
+  const jump = (): boolean => {
     if (activeView === "seat" && wallHangState !== null) {
       beginWallClimb();
-      return;
+      return isCrouched;
     }
     if (
       activeView === "seat" &&
@@ -8623,12 +8652,14 @@ export const createMahjongTableScene = (
       wallClimbTransition === null
     ) {
       if (!spendPlayerO2(O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
-        return;
+        return isCrouched;
       }
+      isCrouched = resolveCrouchedStateAfterJump(isCrouched, true);
       verticalVelocity = JUMP_SPEED;
       grounded = false;
       cameraMotion.applyJumpImpulse(JUMP_SPEED);
     }
+    return isCrouched;
   };
   const onWindowBlur = (): void => {
     swipePointerId = null;
@@ -9330,7 +9361,7 @@ export const createMahjongTableScene = (
     } finally {
       suppressDebugPreferencesPersistence = false;
     }
-    lastDofPosture = null;
+    lastDofZoomed = null;
     saveDebugPreferences();
   };
 
@@ -9606,19 +9637,51 @@ export const createMahjongTableScene = (
   resize();
 
   /**
-   * Render a clean world-only source for the scope. The main composer includes
-   * floating labels and the camera-child weapon, which otherwise dominate the
-   * tiny magnified sample and make the optic look like a UI loupe.
+   * Render a clean, high-detail world-only source for the scope. A hidden
+   * second camera aims through the live reticule at a narrow FOV, so the lens
+   * receives fresh geometry pixels instead of a stretched player-viewport
+   * crop. Bullet-hole decals remain in this pass; weapon/UI overlays do not.
    */
-  const renderSniperScopeWorld = (): void => {
-    const width = Math.max(renderer.domElement.width, 1);
-    const height = Math.max(renderer.domElement.height, 1);
+  const renderSniperScopeWorld = (projection: {
+    readonly magnification: number;
+    readonly sceneResolution: { readonly x: number; readonly y: number };
+  }): void => {
+    const width = Math.max(projection.sceneResolution.x, 1);
+    const height = Math.max(projection.sceneResolution.y, 1);
     if (sniperScopeSceneTarget.width !== width || sniperScopeSceneTarget.height !== height) {
       sniperScopeSceneTarget.setSize(width, height);
     }
+    const aimRay = getAimRay();
+    camera.matrixWorld.decompose(
+      sniperScopeCameraPosition,
+      sniperScopeCameraQuaternion,
+      sniperScopeCameraScale,
+    );
+    sniperScopeCameraForward.set(0, 0, -1).applyQuaternion(sniperScopeCameraQuaternion).normalize();
+    sniperScopeAimDirection.copy(aimRay.direction).normalize();
+    if (
+      sniperScopeCameraForward.lengthSq() > 0.0001 &&
+      sniperScopeAimDirection.lengthSq() > 0.0001
+    ) {
+      sniperScopeRotationDelta.setFromUnitVectors(
+        sniperScopeCameraForward,
+        sniperScopeAimDirection,
+      );
+      sniperScopeCameraQuaternion.premultiply(sniperScopeRotationDelta).normalize();
+    }
+    sniperScopeCamera.position.copy(sniperScopeCameraPosition);
+    sniperScopeCamera.quaternion.copy(sniperScopeCameraQuaternion);
+    sniperScopeCamera.scale.copy(sniperScopeCameraScale);
+    sniperScopeCamera.fov = resolveSniperScopeCameraFov(camera.fov, projection.magnification);
+    sniperScopeCamera.aspect = width / height;
+    sniperScopeCamera.zoom = 1;
+    sniperScopeCamera.clearViewOffset();
+    sniperScopeCamera.updateProjectionMatrix();
+    sniperScopeCamera.updateMatrix();
+    sniperScopeCamera.updateMatrixWorld(true);
     const hidden: Array<{ readonly object: THREE.Object3D; readonly visible: boolean }> = [];
     scene.traverse((object) => {
-      if (object.userData.weaponVisual === true || object instanceof THREE.Sprite) {
+      if (!shouldRenderSniperScopeObject(object.userData, object instanceof THREE.Sprite)) {
         hidden.push({ object, visible: object.visible });
         object.visible = false;
       }
@@ -9627,7 +9690,7 @@ export const createMahjongTableScene = (
     try {
       renderer.setRenderTarget(sniperScopeSceneTarget);
       renderer.clear();
-      renderer.render(scene, camera);
+      renderer.render(scene, sniperScopeCamera);
     } finally {
       renderer.setRenderTarget(previousTarget);
       for (let index = hidden.length - 1; index >= 0; index -= 1) {
@@ -9642,6 +9705,8 @@ export const createMahjongTableScene = (
   let animationFrame = 0;
   let disposed = false;
   container.dataset.wallTraversal = "none";
+  container.dataset.playerWallContact = "false";
+  container.dataset.playerWallBraced = "false";
   staticPhysicsBoxes = createStaticPhysicsBoxes(scene);
   const weaponReservedRects: readonly WeaponSpawnRect[] = PLAY_AREA_BOUNDS.map((bounds) => ({
     minX: bounds.minX,
@@ -9835,7 +9900,7 @@ export const createMahjongTableScene = (
     if (vitalsChanged || (playerVitals.shield < PLAYER_MAX_SHIELD && vitalsPublishElapsed >= 0.1)) {
       publishPlayerVitals();
     }
-    syncDofIntensityForPosture();
+    syncDofIntensityForZoom();
     const currentTimestamp = performance.now();
     if (previousAnimationTimestamp > 0) {
       const frameTime = Math.max(0.1, currentTimestamp - previousAnimationTimestamp);
@@ -9884,6 +9949,8 @@ export const createMahjongTableScene = (
     const firstPersonActive =
       firstPersonControls.enabled &&
       (firstPersonControls.isLocked || (isTouchDevice && activeView === "seat"));
+    touchingWall = false;
+    wallBracedAim = false;
     let knockImpactDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
     let knockCollisionCount = 0;
     if (firstPersonActive) {
@@ -10521,6 +10588,20 @@ export const createMahjongTableScene = (
         }
         baseCameraY = firstPersonGroundY + eyeHeight + jumpOffset;
       }
+      const wallContactPosition = physicsCharacterPosition ?? {
+        x: camera.position.x,
+        y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+        z: camera.position.z,
+      };
+      const wallContactBoxes =
+        dynamicPhysicsBoxes.length === 0
+          ? staticPhysicsBoxes
+          : [...staticPhysicsBoxes, ...dynamicPhysicsBoxes];
+      touchingWall = isPlayerTouchingWall(wallContactPosition, wallContactBoxes, {
+        radius: PLAYER_COLLIDER_RADIUS,
+        halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
+      });
+      wallBracedAim = touchingWall && aimingDownSights;
       if (jumpKeyHeld) {
         jump();
       }
@@ -10535,6 +10616,7 @@ export const createMahjongTableScene = (
         bobEnabled: debugCameraBobEnabled,
         aimingDownSights,
         holdingBreath: playerVitals.holdingBreath,
+        stabilizedByWall: wallBracedAim,
       });
     } else {
       exerciseIntensity = 0;
@@ -10572,6 +10654,8 @@ export const createMahjongTableScene = (
     }
     container.dataset.wallTraversal =
       wallClimbTransition !== null ? "climbing" : wallHangState !== null ? "hanging" : "none";
+    container.dataset.playerWallContact = touchingWall ? "true" : "false";
+    container.dataset.playerWallBraced = wallBracedAim ? "true" : "false";
     camera.updateMatrixWorld(true);
     weaponRuntime?.update(
       delta,
@@ -10584,6 +10668,7 @@ export const createMahjongTableScene = (
       playerVitals.o2 / PLAYER_MAX_O2,
       aimingDownSights,
       playerVitals.holdingBreath,
+      wallBracedAim,
     );
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
@@ -10607,7 +10692,7 @@ export const createMahjongTableScene = (
     applySniperScopeProjection(sniperScopePass, sniperScopeProjection);
     container.dataset.sniperScopeActive = sniperScopeProjection.enabled ? "true" : "false";
     if (sniperScopeProjection.enabled) {
-      renderSniperScopeWorld();
+      renderSniperScopeWorld(sniperScopeProjection);
     }
     // The focus lab is part of the same streamed world, so moving through it
     // must continue loading and retaining the surrounding development map.

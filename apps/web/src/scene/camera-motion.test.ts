@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   CAMERA_JUMP_LIFT_SCALE,
+  CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE,
+  CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN,
+  CAMERA_RECOIL_RETICLE_RING_OVERSHOOT,
+  CAMERA_RECOIL_RETICLE_RING_RADIUS_PIXELS,
+  CAMERA_RECOIL_DAMPING,
+  CAMERA_RECOIL_SHOT_MULTIPLIER,
+  CAMERA_RECOIL_SPRING,
   CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS,
   CAMERA_VIEWMODEL_SWITCH_RAISE_SECONDS,
   CAMERA_VIEWMODEL_AIMING_OFFSET,
@@ -109,6 +116,26 @@ describe("camera motion damper", () => {
     expect(peak).toBe(0);
   });
 
+  it("stops breathing and aim sway while braced against a wall at no O₂ cost", () => {
+    const damper = createCameraMotionDamper();
+    let headBobPeak = 0;
+    let aimSwayPeak = 0;
+
+    for (let index = 0; index < 180; index += 1) {
+      const frame = damper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        oxygenRatio: 0,
+        stabilizedByWall: true,
+      });
+      headBobPeak = Math.max(headBobPeak, Math.abs(frame.headBob));
+      aimSwayPeak = Math.max(aimSwayPeak, Math.hypot(frame.aimSwayX, frame.aimSwayY));
+    }
+
+    expect(headBobPeak).toBe(0);
+    expect(aimSwayPeak).toBe(0);
+  });
+
   it("can disable breathing and gait bob together", () => {
     const damper = createCameraMotionDamper();
 
@@ -189,12 +216,23 @@ describe("camera motion damper", () => {
     });
 
     expect(machineGun.yaw).toBeGreaterThan(0);
+    expect(machineGun.pitch).toBe(0);
     expect(pistol.yaw).toBeGreaterThan(machineGun.yaw);
     expect(sniper.yaw).toBeGreaterThan(pistol.yaw);
-    expect(Math.abs(sniper.pitch)).toBeGreaterThan(Math.abs(machineGun.pitch));
+    expect(sniper.yaw).toBeCloseTo(
+      CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE * CAMERA_RECOIL_SHOT_MULTIPLIER,
+      8,
+    );
+    expect(pistol.yaw / sniper.yaw).toBeCloseTo(0.28, 8);
+    expect(
+      CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE * CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN,
+    ).toBeCloseTo(
+      CAMERA_RECOIL_RETICLE_RING_RADIUS_PIXELS * CAMERA_RECOIL_RETICLE_RING_OVERSHOOT,
+      8,
+    );
   });
 
-  it("adds the shot kick in the signed direction of an already displaced reticle", () => {
+  it("kicks away from the rest point in the live reticle direction", () => {
     const centered = resolveCameraWeaponShotImpulse({
       damage: 100,
       reticleOffset: { x: 0, y: 0 },
@@ -208,11 +246,16 @@ describe("camera motion damper", () => {
       reticleOffset: { x: -36, y: -36 },
     });
 
-    expect(centered.pitch).toBeLessThan(0);
+    expect(centered).toEqual({ yaw: 0, pitch: 0 });
     expect(rightAndDown.yaw).toBeGreaterThan(0);
     expect(rightAndDown.pitch).toBeGreaterThan(0);
     expect(leftAndUp.yaw).toBeLessThan(0);
-    expect(leftAndUp.pitch).toBeLessThan(centered.pitch);
+    expect(leftAndUp.pitch).toBeLessThan(0);
+    expect(rightAndDown.yaw / rightAndDown.pitch).toBeCloseTo(1, 8);
+    expect(Math.hypot(rightAndDown.yaw, rightAndDown.pitch)).toBeCloseTo(
+      CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE * CAMERA_RECOIL_SHOT_MULTIPLIER,
+      8,
+    );
   });
 
   it("returns shot recoil through the same damper output and lets it settle", () => {
@@ -228,6 +271,54 @@ describe("camera motion damper", () => {
     }
     expect(Math.abs(settled.recoilYaw)).toBeLessThan(0.0001);
     expect(Math.abs(settled.recoilPitch)).toBeLessThan(0.0001);
+  });
+
+  it("returns every damage-scaled shot kick swiftly through the reticle rest point", () => {
+    for (const damage of [12, 28, 100]) {
+      const damper = createCameraMotionDamper();
+      damper.applyWeaponShotImpulse({ damage, reticleOffset: { x: 36, y: 0 } });
+      const initial = damper.update(idleInput);
+      expect(initial.recoilYaw).toBeGreaterThan(0);
+
+      let crossedRest = false;
+      let frame = initial;
+      for (let index = 0; index < 24; index += 1) {
+        frame = damper.update(idleInput);
+        crossedRest ||= frame.recoilYaw < 0;
+      }
+
+      expect(crossedRest).toBe(true);
+      expect(Math.abs(frame.recoilYaw)).toBeLessThan(initial.recoilYaw);
+      expect(CAMERA_RECOIL_DAMPING).toBeLessThan(2 * Math.sqrt(CAMERA_RECOIL_SPRING));
+    }
+  });
+
+  it("uses one underdamped recovery response for every shot strength", () => {
+    const damper = createCameraMotionDamper();
+    for (const damage of [12, 28, 100]) {
+      damper.reset();
+      damper.applyWeaponShotImpulse({ damage, reticleOffset: { x: 36, y: 0 } });
+      expect(damper.update(idleInput).recoilYaw).toBeGreaterThan(0);
+
+      let oppositePeak = 0;
+      for (let index = 0; index < 18; index += 1) {
+        oppositePeak = Math.min(oppositePeak, damper.update(idleInput).recoilYaw);
+      }
+      expect(oppositePeak).toBeLessThan(0);
+    }
+    expect(CAMERA_RECOIL_DAMPING).toBeLessThan(2 * Math.sqrt(CAMERA_RECOIL_SPRING));
+  });
+
+  it("crosses the rest point before the machine-gun cadence reaches its next shot", () => {
+    const damper = createCameraMotionDamper();
+    damper.applyWeaponShotImpulse({ damage: 12, reticleOffset: { x: 36, y: 0 } });
+
+    let frame = damper.update(idleInput);
+    for (let index = 1; index < 5; index += 1) {
+      frame = damper.update(idleInput);
+    }
+
+    expect(frame.recoilYaw).toBeLessThan(0);
   });
 
   it("resets roll, bob, and weight together", () => {
@@ -261,6 +352,17 @@ describe("camera motion damper", () => {
       aimSwayX: 0,
       aimSwayY: 0,
     });
+  });
+
+  it("resets an active ADS pose with the rest of the presentation state", () => {
+    const damper = createCameraMotionDamper();
+    for (let index = 0; index < 120; index += 1) {
+      damper.update({ ...idleInput, aimingDownSights: true });
+    }
+
+    damper.reset();
+
+    expect(damper.getOffsets().viewmodelOffset).toEqual(CAMERA_VIEWMODEL_STANDING_OFFSET);
   });
 
   it("keeps a crouched weapon between hip fire and explicit ADS", () => {
@@ -298,9 +400,12 @@ describe("camera motion damper", () => {
     expect(resolveCameraViewmodelOffset(2)).toEqual(CAMERA_VIEWMODEL_CROUCHING_OFFSET);
     const midpoint = resolveCameraViewmodelOffset(0.5);
     expect(midpoint.x).toBeCloseTo(0.24, 8);
-    expect(midpoint.y).toBeCloseTo(-0.335, 8);
-    expect(midpoint.z).toBeCloseTo(-0.56, 8);
-    expect(resolveCameraViewmodelOffset(0, 1)).toEqual(CAMERA_VIEWMODEL_AIMING_OFFSET);
+    expect(midpoint.y).toBeCloseTo(-0.37, 8);
+    expect(midpoint.z).toBeCloseTo(-0.57, 8);
+    const aiming = resolveCameraViewmodelOffset(0, 1);
+    expect(aiming.x).toBeCloseTo(CAMERA_VIEWMODEL_AIMING_OFFSET.x, 8);
+    expect(aiming.y).toBeCloseTo(CAMERA_VIEWMODEL_AIMING_OFFSET.y, 8);
+    expect(aiming.z).toBeCloseTo(CAMERA_VIEWMODEL_AIMING_OFFSET.z, 8);
   });
 
   it("drops the outgoing weapon, then raises the next weapon from below the frame", () => {
