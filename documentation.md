@@ -642,15 +642,16 @@ commands and are not included in the bus.
 The server bus runs unit tests only. Coverage, simulation, build, lint, typecheck, browser, and HMR checks remain
 explicit commands and are not silently run by the scheduler.
 
-## Physical near-field eye depth of field (checkpointed, currently disabled)
+## Physical near-field eye depth of field (experiment branch)
 
-The physical eye-CoC path is preserved in checkpoint commit `534f04b` for later calibration, but it is disabled in the
-current runtime because the first visual pass made the whole scene too soft during zoom. The active renderer uses the
-previous stock normalized Bokeh response while we reassess the blur scale and depth-buffer mapping. The physical
-experiment itself does not add a separate ADS-specific shader state.
+The experimental DoF path uses a thin-lens circle-of-confusion calculation for every depth-buffer sample. It keeps
+the existing reticule gaze distance and adaptive pupil, then applies the reciprocal object-distance term so any held
+viewmodel geometry becomes increasingly soft as it approaches the camera. Geometry near the focus plane remains
+sharp, and the viewmodel is excluded only from choosing the gaze target; it still participates in the normal depth
+pass. Camera FOV and the existing global posture-strength slider normalize the same response for every object, with
+no weapon-name or ADS-specific branch.
 
-## DoF intensity defaults
-
-The active stock Bokeh pass uses a 12.5× multiplier in normal first-person view. Standing and crouching share this
-default. The multiplier becomes 25× only while the shared explicit ADS state is active, covering both iron-sight zoom
-and the sniper scope; crouching by itself does not increase blur.
+This branch is rebased on the latest source checkpoint and intentionally re-enables the physical shader for isolated
+calibration. The source branch keeps the zoom-only intensity rule: 12.5× outside explicit ADS and 25× while aiming,
+covering both iron sights and the sniper scope; crouching alone does not increase blur. The physical experiment remains
+separate from that state decision and uses the same centralized depth response for every renderable object.

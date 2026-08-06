@@ -23,6 +23,9 @@ import {
   readVisualDebugPreferences,
   readVisualSceneState,
   resolveFocusAccommodationDamping,
+  resolveHumanEyeCircleOfConfusion,
+  resolveHumanEyeBokehProjectionScale,
+  resolveHumanEyeBokehStrengthScale,
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
@@ -137,7 +140,17 @@ describe("human-eye bokeh model", () => {
     expect(brightRoom.intensity).toBe(0);
     expect(indoorTile.maxBlur).toBeGreaterThan(brightRoom.maxBlur);
     expect(darkTile.maxBlur).toBeGreaterThan(indoorTile.maxBlur);
-    expect(darkTile.maxBlur).toBeLessThanOrEqual(0.01);
+    expect(darkTile.maxBlur).toBeLessThanOrEqual(0.1);
+    expect(brightRoom.aperture).toBeCloseTo(1 / 0.017, 6);
+  });
+
+  it("normalizes physical blur by camera projection and the shared strength slider", () => {
+    expect(resolveHumanEyeBokehProjectionScale(90)).toBeCloseTo(1, 8);
+    expect(resolveHumanEyeBokehProjectionScale(45)).toBeCloseTo(2.41421356, 6);
+    expect(resolveHumanEyeBokehProjectionScale(Number.NaN)).toBeCloseTo(1, 8);
+    expect(resolveHumanEyeBokehStrengthScale(12.5)).toBeCloseTo(1, 8);
+    expect(resolveHumanEyeBokehStrengthScale(25)).toBeCloseTo(2, 8);
+    expect(resolveHumanEyeBokehStrengthScale(0)).toBe(0);
   });
 
   it("uses a smooth practical cutoff for the focus-lab calibration", () => {
