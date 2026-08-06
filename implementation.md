@@ -150,7 +150,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   not alter movement physics or the authoritative game state.
 - The scene reticule now reads the same damped first-person roll and head-bob offsets as the camera. Rapid lateral
   direction changes therefore produce a matching lag, while the focus ray remains anchored to the configured
-  reticule position. The outer ring is inverted at -1x, while the center dot is tuned to a 5x total displacement.
+  reticule position. The outer ring is inverted at -1x and the center dot is tuned to a 5x total displacement.
+  The current experiment multiplies the underlying camera weight-shift targets by 2x; the reticule still reads
+  the raw shared camera output.
 - The first-person controller now uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule.
   The floor and table remain explicit colliders, while meaningful meshes under the environment, generated room,
   and gateway roots are converted to coarse world-space AABBs. Streamed city buildings, props, and skybridges use
@@ -254,6 +256,14 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Added the `pnpm hmr` development command for the visual-table agent loop. It updates the tracked scene
   module timestamp, which gives Vite one explicit scene HMR boundary after a multi-file feature edit;
   the existing session snapshot then restores the browser presentation state on remount.
+
+## 2026-08-06 — Reticule-anchored crouch zoom
+
+- Seat FOV changes now apply a normalized Three.js off-axis projection derived from the lower reticule
+  position (`y = 0.6`). The smooth 90° standing to 45° crouched transition therefore keeps the
+  reticule's world point fixed instead of pivoting around the viewport center.
+- Added focused projection tests for the zero standing offset, the crouched offset, and preservation
+  of the reticule ray's screen coordinate.
 
 ## 2026-08-05 — Movement simulation wall hang and climb
 

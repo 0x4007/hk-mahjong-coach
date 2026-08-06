@@ -155,7 +155,25 @@ describe("reticule-anchored seat zoom", () => {
     const offset = resolveReticleZoomViewOffset(45);
 
     expect(offset.x).toBeCloseTo(0, 8);
-    expect(offset.y).toBeCloseTo(-0.1414213562, 8);
+    expect(offset.y).toBeCloseTo(0.1414213562, 8);
+  });
+
+  it("keeps the lower reticule ray on the same world point while zooming", () => {
+    const camera = new THREE.PerspectiveCamera(90, 16 / 9, 0.05, 1200);
+    camera.lookAt(0, 0, -1);
+    camera.updateMatrixWorld(true);
+    const raycaster = new THREE.Raycaster();
+    const reticleNdc = new THREE.Vector2(0, -0.2);
+    raycaster.setFromCamera(reticleNdc, camera);
+    const point = raycaster.ray.origin.clone().addScaledVector(raycaster.ray.direction, 10);
+    const offset = resolveReticleZoomViewOffset(45);
+
+    camera.fov = 45;
+    camera.setViewOffset(1, 1, offset.x, offset.y, 1, 1);
+    camera.aspect = 16 / 9;
+    camera.updateProjectionMatrix();
+
+    expect(point.project(camera).y).toBeCloseTo(reticleNdc.y, 8);
   });
 });
 

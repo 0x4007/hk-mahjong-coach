@@ -1018,9 +1018,11 @@ export const resolveReticleZoomViewOffset = (
   const zoomScale = standingTangent / currentTangent;
   const reticleNdcX = (Number.isFinite(reticlePosition.x) ? reticlePosition.x : 0.5) * 2 - 1;
   const reticleNdcY = 1 - (Number.isFinite(reticlePosition.y) ? reticlePosition.y : 0.6) * 2;
+  const x = (reticleNdcX * (zoomScale - 1)) / 2;
+  const y = (reticleNdcY * (1 - zoomScale)) / 2;
   return {
-    x: (reticleNdcX * (1 - zoomScale)) / 2,
-    y: (-reticleNdcY * (1 - zoomScale)) / 2,
+    x: x === 0 ? 0 : x,
+    y: y === 0 ? 0 : y,
   };
 };
 // Double both launch and gravity to double the apex while keeping the same quick airtime.
@@ -1047,8 +1049,9 @@ const PLAYER_COLLIDER_CENTER_HEIGHT = PLAYER_COLLIDER_HALF_HEIGHT + PLAYER_COLLI
 const DOUBLE_TAP_WINDOW_MS = 300;
 const SWIPE_LOOK_SENSITIVITY = 0.00594;
 const TOUCH_SIDEWAYS_SPRINT_FRACTION = 0.5;
-const CAMERA_SHIFT_WALK = THREE.MathUtils.degToRad(0.9);
-const CAMERA_SHIFT_SPRINT = THREE.MathUtils.degToRad(1.8);
+const CAMERA_SHIFT_WEIGHT_MULTIPLIER = 2;
+const CAMERA_SHIFT_WALK = THREE.MathUtils.degToRad(0.9) * CAMERA_SHIFT_WEIGHT_MULTIPLIER;
+const CAMERA_SHIFT_SPRINT = THREE.MathUtils.degToRad(1.8) * CAMERA_SHIFT_WEIGHT_MULTIPLIER;
 const CAMERA_SHIFT_TARGET_DAMPING = 4;
 const CAMERA_SHIFT_DAMPING = 6;
 const CAMERA_BOB_AMPLITUDE = 0.025;

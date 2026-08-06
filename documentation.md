@@ -145,7 +145,8 @@
   reticule follows the same damped first-person roll and head-bob offsets as the camera, so rapid left/right weight
   shifts visibly lag in the aim marker while the focus ray remains anchored to the configured reticule position. The
   The outer ring follows that motion inverted at -1x; the center dot is tuned to a 5x total displacement without changing
-  the camera transform.
+  the camera transform. The current experiment multiplies the underlying camera weight-shift targets by 2x; the
+  reticule still reads the raw shared camera output.
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
   controller. The first collision slice supplies simplified static colliders for the world floor and table body;
   render meshes remain visual-only, and tile/furniture dynamics are intentionally not inferred from every mesh.
@@ -282,6 +283,14 @@
   The array is authoritative: omitting an entity removes it. Runtime validation rejects bad bounds and
   duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
   objects.
+
+## Reticule-anchored crouch zoom
+
+The seat camera keeps the existing smooth FOV transition: 90° while standing and 45° while crouched.
+Because the on-screen reticule is intentionally at 60% viewport height, the scene applies a matching
+off-axis `PerspectiveCamera` view offset as the FOV changes. The world point under the reticule remains
+in place during the zoom instead of shifting around the viewport center. The projection helper and its
+Three.js ray-preservation regression are covered by `apps/web/src/scene/mahjong-table.test.ts`.
 
 ## Wall hang and climb
 
