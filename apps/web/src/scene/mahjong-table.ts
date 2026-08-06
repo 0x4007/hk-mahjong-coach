@@ -1263,11 +1263,13 @@ const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
     1000 +
   HUMAN_EYE_FOCAL_LENGTH_MM / 1000;
 // The shader converts the physical circle of confusion (metres) into a
-// normalized screen radius by dividing by the eye focal length. The runtime
-// then applies camera-FOV and global posture-strength normalization; no weapon
-// or ADS branch changes this response.
-const BOKEH_COC_TO_BLUR_PER_STRENGTH = 1 / HUMAN_EYE_FOCAL_LENGTH_METERS;
-const BOKEH_BASE_MAX_BLUR = 0.05;
+// restrained screen radius. The full angular conversion is deliberately
+// reduced by one order of magnitude because the stock Bokeh pass already
+// gathers 41 samples and the sniper compositor can magnify the result. The
+// runtime still applies camera-FOV and global posture-strength normalization;
+// no weapon or ADS branch changes this response.
+const BOKEH_COC_TO_BLUR_PER_STRENGTH = 1 / (HUMAN_EYE_FOCAL_LENGTH_METERS * 10);
+const BOKEH_BASE_MAX_BLUR = 0.02;
 const BOKEH_FOCUS_FALLBACK_DISTANCE = 12;
 /** Debug-only multiplier cap; zoom mode uses the full available range. */
 export const DEBUG_BOKEH_STRENGTH_MAX = 25;

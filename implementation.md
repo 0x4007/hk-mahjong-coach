@@ -678,6 +678,9 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Recalibrated the same global shader in the isolated experiment lane: physical CoC now maps through the eye focal
   length, camera FOV, and the existing normalized posture-strength slider. Near viewmodel geometry can therefore blur
   strongly while a distant gaze target stays sharp; no weapon-name or sniper/ADS condition was added.
+- The first angular-scale calibration was visibly too strong: the full eye-focal-length mapping blurred the whole
+  scene, especially through the magnified sniper compositor. Reduced the shared mapping by 10× and the shared blur
+  cap to 0.02; this is still one global depth response and has no gun-specific condition.
 - Focused format, strict typecheck, and the web production build pass in this lane. Browser/HMR proof is pending because
   the only running Vite/browser lane belongs to the separate dirty checkout.
 
