@@ -13,7 +13,7 @@ import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
-  O2_NEUTRAL_JOG_SPEED_BLEND,
+  O2_TROT_SPEED_BLEND,
   O2_PROJECTILE_DAMAGE_FACTOR,
   O2_STAND_COST,
   O2_SPRINT_DRAIN_PER_SECOND,
@@ -121,15 +121,20 @@ describe("player vitals model", () => {
     expect(crouchWalking.oxygenRecoveryDelaySeconds).toBe(O2_CROUCH_WALK_RECOVERY_DELAY_SECONDS);
   });
 
-  it("keeps oxygen flat at the derived neutral jog speed", () => {
+  it("slowly regenerates oxygen at the default standing trot", () => {
     const depleted = applyPlayerO2Cost(createPlayerVitals(), 50);
     const jogging = tickPlayerVitals(depleted, 1, {
       movementMagnitude: 1,
-      locomotionBlend: O2_NEUTRAL_JOG_SPEED_BLEND,
+      locomotionBlend: O2_TROT_SPEED_BLEND,
       walking: true,
     });
+    const expectedRecovery =
+      O2_WALKING_RECOVERY_PER_SECOND * (1 - O2_TROT_SPEED_BLEND) -
+      O2_SPRINT_DRAIN_PER_SECOND * O2_TROT_SPEED_BLEND;
 
-    expect(jogging.o2).toBeCloseTo(depleted.o2, 8);
+    expect(O2_TROT_SPEED_BLEND).toBeCloseTo(0.5, 8);
+    expect(expectedRecovery).toBeGreaterThan(0);
+    expect(jogging.o2).toBeCloseTo(depleted.o2 + expectedRecovery, 8);
   });
 
   it("spends five percent oxygen on jumps and standing up", () => {

@@ -1,3 +1,5 @@
+import { PLAYER_TROT_LOCOMOTION_BLEND } from "./world-scale.js";
+
 /** The player's durable health pool. It does not regenerate during normal play. */
 export const PLAYER_MAX_HEALTH = 100;
 
@@ -25,12 +27,8 @@ export const O2_IDLE_RECOVERY_PER_SECOND = 12;
 /** Oxygen recovered per second while walking. */
 export const O2_WALKING_RECOVERY_PER_SECOND = 8;
 
-/**
- * Walking-to-sprinting blend where walking recovery and sprint drain cancel.
- * A value of 0 is the configured walk speed and 1 is full sprint.
- */
-export const O2_NEUTRAL_JOG_SPEED_BLEND =
-  O2_WALKING_RECOVERY_PER_SECOND / (O2_WALKING_RECOVERY_PER_SECOND + O2_SPRINT_DRAIN_PER_SECOND);
+/** Trot's position on the walk-to-sprint scale used by O₂ telemetry. */
+export const O2_TROT_SPEED_BLEND = PLAYER_TROT_LOCOMOTION_BLEND;
 
 /** Oxygen recovered per second while crouched and stationary. */
 export const O2_CROUCHED_RECOVERY_PER_SECOND = 10;
@@ -41,8 +39,8 @@ export const O2_JUMP_COST = PLAYER_MAX_O2 * 0.05;
 /**
  * Zero-cost launch blend for a mini hop when a full jump is unaffordable.
  *
- * This uses the same neutral-balance interpolation as the oxygen-neutral jog:
- * standing recovery offsets the full jump charge at the blend point.
+ * This uses a separate standing-recovery interpolation; it is not tied to
+ * the slower trot's O₂ recovery rate.
  */
 export const O2_MINI_HOP_SPEED_BLEND =
   O2_IDLE_RECOVERY_PER_SECOND / (O2_IDLE_RECOVERY_PER_SECOND + O2_JUMP_COST);

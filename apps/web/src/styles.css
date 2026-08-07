@@ -492,6 +492,19 @@ button[aria-pressed="true"] {
   background: #a7f4f6;
 }
 
+.scene-debug-panel button:disabled {
+  color: #70817f;
+  background: #142022;
+  border-color: rgb(255 255 255 / 10%);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.scene-debug-panel button:disabled:hover {
+  color: #70817f;
+  background: #142022;
+}
+
 .scene-debug-status {
   margin-left: auto;
   color: var(--accent-cyan);
@@ -631,6 +644,20 @@ button[aria-pressed="true"] {
 
 .scene-debug-check input {
   accent-color: var(--accent-cyan);
+}
+
+.scene-debug-area-toggles small {
+  color: #9cb2ae;
+  line-height: 1.45;
+  text-transform: none;
+}
+
+.scene-debug-area-toggles .scene-debug-check span {
+  margin-left: auto;
+  color: #9cb2ae;
+  font-size: 0.56rem;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
 }
 
 .scene-debug-checks {
@@ -1140,6 +1167,56 @@ button[aria-pressed="true"] {
   font-size: 0.56rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.scene-weapon-inspection {
+  display: grid;
+  gap: 0.42rem;
+  pointer-events: auto;
+  color: rgb(246 247 244 / 68%);
+  font-size: 0.58rem;
+}
+
+.scene-weapon-inspection summary {
+  color: var(--accent-cyan);
+  cursor: pointer;
+  font-size: 0.56rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.scene-weapon-inspection dl {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+}
+
+.scene-weapon-inspection dl > div {
+  display: grid;
+  grid-template-columns: minmax(5.4rem, 0.7fr) 1fr;
+  gap: 0.45rem;
+}
+
+.scene-weapon-inspection dt {
+  color: rgb(246 247 244 / 45%);
+  font-size: 0.5rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.scene-weapon-inspection dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: rgb(246 247 244 / 82%);
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-weapon-inspection p {
+  margin: 0;
+  color: rgb(246 247 244 / 62%);
+  font-size: 0.54rem;
+  line-height: 1.35;
 }
 
 .mobile-touch-controls {

@@ -1,5 +1,16 @@
 import * as RAPIER from "@dimforge/rapier3d-compat";
 
+import {
+  PLAYER_AUTOSTEP_HEIGHT,
+  PLAYER_AUTOSTEP_MAX_WIDTH,
+  PLAYER_CAPSULE_CENTER_HEIGHT,
+  PLAYER_CAPSULE_HALF_HEIGHT,
+  PLAYER_CAPSULE_RADIUS,
+  PLAYER_SNAP_TO_GROUND_DISTANCE,
+  PLAYER_SUPPORT_SNAP_HEIGHT,
+  WORLD_EPSILON,
+} from "./world-scale.js";
+
 export interface PhysicsVector {
   x: number;
   y: number;
@@ -57,11 +68,10 @@ export interface MahjongPhysicsRuntime {
 // restricted WebView). The scene traversal code consumes the same runtime
 // interface in both cases, so ledge/vault/wall ordering does not silently
 // disappear when the fallback is selected.
-const FALLBACK_CAPSULE_RADIUS = 0.26;
-const FALLBACK_CAPSULE_HALF_HEIGHT = 0.6;
-const FALLBACK_CAPSULE_CENTER_HEIGHT = FALLBACK_CAPSULE_HALF_HEIGHT + FALLBACK_CAPSULE_RADIUS;
-const FALLBACK_AUTOSTEP_HEIGHT = 0.28;
-const FALLBACK_EPSILON = 0.0005;
+const FALLBACK_CAPSULE_RADIUS = PLAYER_CAPSULE_RADIUS;
+const FALLBACK_CAPSULE_CENTER_HEIGHT = PLAYER_CAPSULE_CENTER_HEIGHT;
+const FALLBACK_AUTOSTEP_HEIGHT = PLAYER_AUTOSTEP_HEIGHT;
+const FALLBACK_EPSILON = WORLD_EPSILON;
 
 const fallbackVerticalOverlap = (centerY: number, box: PhysicsBox): boolean => {
   const bottom = centerY - FALLBACK_CAPSULE_CENTER_HEIGHT;
@@ -96,7 +106,7 @@ const fallbackSupportTop = (
     const topY = box.center.y + box.halfExtents.y;
     if (
       topY > feetY + FALLBACK_EPSILON ||
-      feetY - topY > 0.14 + FALLBACK_EPSILON ||
+      feetY - topY > PLAYER_SUPPORT_SNAP_HEIGHT + FALLBACK_EPSILON ||
       !fallbackHorizontalOverlap(centerX, centerZ, box)
     ) {
       continue;
@@ -222,7 +232,7 @@ export const createFallbackMahjongPhysics = (
       const support = fallbackSupportTop(next.x, next.y, next.z, activeBoxes);
       if (support !== null) {
         const supportedY = support.topY + FALLBACK_CAPSULE_CENTER_HEIGHT;
-        if (next.y <= supportedY + 0.14 + FALLBACK_EPSILON) {
+        if (next.y <= supportedY + PLAYER_SUPPORT_SNAP_HEIGHT + FALLBACK_EPSILON) {
           next = { ...next, y: supportedY };
           grounded = true;
           collisionBoxes.add(support.box);
@@ -356,10 +366,14 @@ export const createMahjongPhysics = async (
   const characterController = world.createCharacterController(0.01);
   characterController.setUp({ x: 0, y: 1, z: 0 });
   characterController.setSlideEnabled(true);
-  characterController.enableAutostep(0.28, 0.2, false);
-  characterController.enableSnapToGround(0.12);
+  characterController.enableAutostep(PLAYER_AUTOSTEP_HEIGHT, PLAYER_AUTOSTEP_MAX_WIDTH, false);
+  characterController.enableSnapToGround(PLAYER_SNAP_TO_GROUND_DISTANCE);
   const characterCollider = world.createCollider(
-    RAPIER.ColliderDesc.capsule(0.6, 0.26).setTranslation(0, 0.86, 0),
+    RAPIER.ColliderDesc.capsule(PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS).setTranslation(
+      0,
+      PLAYER_CAPSULE_CENTER_HEIGHT,
+      0,
+    ),
   );
   let dynamicsEnabled = false;
 

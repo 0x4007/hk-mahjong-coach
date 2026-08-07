@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CAMERA_BOB_AMPLITUDE,
+  CAMERA_BOB_LATERAL_AMPLITUDE,
+  CAMERA_GAIT_PLAYER_HEIGHT_METERS,
+  CAMERA_GAIT_AMOUNT_MAX,
+  CAMERA_GAIT_HIP_HEIGHT_RATIO,
   CAMERA_JUMP_LIFT_SCALE,
+  CAMERA_WEIGHT_PITCH_MAX,
   CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE,
   CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN,
   CAMERA_RECOIL_RETICLE_RING_OVERSHOOT,
@@ -18,6 +24,10 @@ import {
   CAMERA_VIEWMODEL_CROUCHING_OFFSET,
   CAMERA_VIEWMODEL_STANDING_OFFSET,
   createCameraMotionDamper,
+  resolveCameraGaitAngularFrequency,
+  resolveCameraGaitAmount,
+  resolveCameraGaitOffsets,
+  resolveCameraGaitStepFrequency,
   resolveCameraWeaponShotImpulse,
   resolveCameraViewmodelOffset,
   resolveCameraViewmodelTransition,
@@ -233,6 +243,98 @@ describe("camera motion damper", () => {
     expect(Math.abs(landingFrame.weightShift)).toBeGreaterThan(jumpFrame.weightShift);
   });
 
+  it("turns jump take-off and landing deceleration into a shared pitch response", () => {
+    const damper = createCameraMotionDamper();
+    damper.applyJumpImpulse(12);
+    const jumpFrame = damper.update(idleInput);
+
+    damper.reset();
+    damper.applyLandingImpulse({ downwardVelocity: 13.2, downwardAcceleration: 792 });
+    const landingFrame = damper.update(idleInput);
+
+    expect(jumpFrame.headBobPitch).toBeLessThan(0);
+    expect(landingFrame.headBobPitch).toBeGreaterThan(0);
+    expect(Math.abs(landingFrame.headBobPitch)).toBeGreaterThan(Math.abs(jumpFrame.headBobPitch));
+    expect(Math.abs(landingFrame.headBobPitch)).toBeLessThanOrEqual(CAMERA_WEIGHT_PITCH_MAX);
+  });
+
+  it("keeps gait bob on the lateral and depth axes", () => {
+    const damper = createCameraMotionDamper();
+    let lateralPeak = 0;
+    let depthPeak = 0;
+    for (let index = 0; index < 60; index += 1) {
+      const frame = damper.update({
+        ...idleInput,
+        movementMagnitude: 1,
+        movementSpeedRatio: 1,
+      });
+      lateralPeak = Math.max(lateralPeak, Math.abs(frame.headBobLateral));
+      depthPeak = Math.max(depthPeak, Math.abs(frame.headBobDepth));
+    }
+
+    expect(lateralPeak).toBeGreaterThan(0);
+    expect(depthPeak).toBeGreaterThan(0);
+  });
+
+  it("shapes running gait as a U instead of a sine/cosine orbit", () => {
+    const middle = resolveCameraGaitOffsets(0, 1);
+    const rightSide = resolveCameraGaitOffsets(Math.PI / 2, 1);
+    const leftSide = resolveCameraGaitOffsets((Math.PI * 3) / 2, 1);
+
+    expect(middle.headBob).toBeCloseTo(CAMERA_BOB_AMPLITUDE, 10);
+    expect(rightSide.headBob).toBeCloseTo(-CAMERA_BOB_AMPLITUDE, 10);
+    expect(leftSide.headBob).toBeCloseTo(-CAMERA_BOB_AMPLITUDE, 10);
+    expect(rightSide.headBobLateral).toBeCloseTo(CAMERA_BOB_LATERAL_AMPLITUDE, 10);
+    expect(leftSide.headBobLateral).toBeCloseTo(-CAMERA_BOB_LATERAL_AMPLITUDE, 10);
+  });
+
+  it("amplifies the shared gait as speed rises from walk through trot to sprint", () => {
+    const walk = resolveCameraGaitAmount(1, 1 / 3);
+    const trot = resolveCameraGaitAmount(1, 2 / 3);
+    const sprint = resolveCameraGaitAmount(1, 1);
+
+    expect(walk).toBeCloseTo(1 / 3, 10);
+    expect(trot).toBeCloseTo((2 / 3) * 1.3, 10);
+    expect(sprint).toBe(CAMERA_GAIT_AMOUNT_MAX);
+    expect(walk).toBeLessThan(trot);
+    expect(trot).toBeLessThan(sprint);
+  });
+
+  it("derives walking steps from the 185 cm player's 3.4 m/s gait speed", () => {
+    const walkSpeed = 3.4;
+    const stepFrequency = resolveCameraGaitStepFrequency(walkSpeed);
+
+    expect(CAMERA_GAIT_PLAYER_HEIGHT_METERS).toBe(1.85);
+    expect(CAMERA_GAIT_HIP_HEIGHT_RATIO).toBe(0.53);
+    expect(stepFrequency).toBeCloseTo(2.8618, 3);
+    expect(1 / stepFrequency).toBeCloseTo(0.3494, 3);
+    expect(resolveCameraGaitAngularFrequency(walkSpeed)).toBeCloseTo(Math.PI * stepFrequency, 10);
+    expect(resolveCameraGaitStepFrequency(0)).toBe(0);
+  });
+
+  it("damps the sprint gait back toward center after movement stops", () => {
+    const damper = createCameraMotionDamper();
+    let sprintPeak = 0;
+    for (let index = 0; index < 120; index += 1) {
+      const frame = damper.update({
+        ...idleInput,
+        movementMagnitude: 1,
+        movementSpeedRatio: 1,
+      });
+      sprintPeak = Math.max(sprintPeak, Math.hypot(frame.headBobLateral, frame.headBobDepth));
+    }
+
+    let stoppedFrame = damper.update(idleInput);
+    for (let index = 1; index < 60; index += 1) {
+      stoppedFrame = damper.update(idleInput);
+    }
+
+    expect(sprintPeak).toBeGreaterThan(0);
+    expect(Math.hypot(stoppedFrame.headBobLateral, stoppedFrame.headBobDepth)).toBeLessThan(
+      sprintPeak * 0.2,
+    );
+  });
+
   it("makes a harder deceleration dip further for the same fall speed", () => {
     const gentleStop = resolveLandingWeightImpulse({
       downwardVelocity: 8,
@@ -434,6 +536,9 @@ describe("camera motion damper", () => {
     expect(damper.getOffsets()).toEqual({
       roll: 0,
       headBob: 0,
+      headBobLateral: 0,
+      headBobDepth: 0,
+      headBobPitch: 0,
       weightShift: 0,
       verticalOffset: 0,
       recoilYaw: 0,

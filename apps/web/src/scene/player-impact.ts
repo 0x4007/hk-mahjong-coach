@@ -1,14 +1,13 @@
 import { PLAYER_MAX_HEALTH, PLAYER_MAX_SHIELD } from "./player-vitals.js";
+import { PLAYER_SPRINT_SPEED_METERS_PER_SECOND } from "./world-scale.js";
 
-/** Base first-person movement speed in metres per second. */
-export const PLAYER_MOVE_SPEED_METERS_PER_SECOND = 3.4;
-
-/** Sprint is three times the base movement speed. */
-export const PLAYER_SPRINT_MULTIPLIER = 3;
-
-/** The fastest normal player movement speed, used as the damage-free limit. */
-export const PLAYER_SPRINT_SPEED_METERS_PER_SECOND =
-  PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_SPRINT_MULTIPLIER;
+export {
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND,
+  PLAYER_SPRINT_MULTIPLIER,
+  PLAYER_SPRINT_SPEED_KILOMETERS_PER_HOUR,
+  PLAYER_SPRINT_SPEED_METERS_PER_SECOND,
+  PLAYER_WALK_SPEED_RATIO,
+} from "./world-scale.js";
 
 /** Approximate human terminal velocity in a spread-eagle fall. */
 export const HUMAN_TERMINAL_VELOCITY_KILOMETERS_PER_HOUR = 200;

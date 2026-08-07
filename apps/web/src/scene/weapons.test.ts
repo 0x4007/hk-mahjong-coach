@@ -25,6 +25,7 @@ import {
   WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO,
   WEAPON_BARREL_SMOKE_START_HEAT_RATIO,
   WEAPON_PICKUP_RANGE_METERS,
+  WEAPON_SPAWN_DENSITY_RADIUS_METERS,
   WEAPON_RELOAD_SKY_PITCH_RADIANS,
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
   WEAPON_TRACER_LIFETIME_SECONDS,
@@ -33,14 +34,37 @@ import {
   resolveWeaponBarrelHeatDamage,
   resolveWeaponBarrelHeatRatio,
   resolveWeaponBarrelSmokeRatio,
+  resolveWeaponGenerationStream,
+  resolveWeaponNameGenerationStream,
+  resolveGeneratedGunNameV1,
+  generateGunProfileV1,
+  generateGunProfileWithReceiptV1,
+  generateHeavyTurretGunProfileV1,
+  generateParametricGunCatalogV1,
+  generateParametricGunPickupsV1,
+  DEFAULT_PARAMETRIC_GUN_SMG_COUNT,
+  filterGunProfilesParetoV1,
+  resolveGunSpreadRadiansV1,
+  createGunPlaytestTelemetryV1,
+  recordGunPlaytestTelemetryEventV1,
+  validateGunTradeoffsV1,
+  resolveGunProfileV1,
+  createGunInstance,
+  createEmptyWeaponStateSnapshot,
+  DEFAULT_GUN_SLOT_COUNT,
+  findFirstFreeGunSlot,
+  insertGunIntoFirstFreeSlot,
+  clearGunInventorySlot,
+  resolveGunThrowVelocityV1,
+  GUN_PROFILES,
   type WeaponSpawnRect,
 } from "./weapons.js";
 
 describe("weapon definitions", () => {
   it("maps number-row weapon keys and reserves zero for an empty hand", () => {
     expect(resolveWeaponHotkey("Digit0")).toBeNull();
-    expect(resolveWeaponHotkey("Digit1")).toBe("pistol");
-    expect(resolveWeaponHotkey("Digit4")).toBe("sniper");
+    expect(resolveWeaponHotkey("Digit1")).toBe(0);
+    expect(resolveWeaponHotkey("Digit4")).toBe(3);
     expect(resolveWeaponHotkey("Digit5")).toBeUndefined();
     expect(resolveWeaponHotkey("Numpad0")).toBeUndefined();
   });
@@ -133,12 +157,335 @@ describe("weapon definitions", () => {
   });
 });
 
+describe("generic parametric gun profiles", () => {
+  it("uses the versioned generation stream and stable profile hashes", () => {
+    expect(resolveWeaponGenerationStream("room-a", "seed-7")).toBe(
+      "room-a|weapons|generation|v1|seed-7",
+    );
+    expect(resolveWeaponNameGenerationStream("room-a", "seed-7")).toBe(
+      "room-a|weapons|name|v1|seed-7",
+    );
+    const first = generateGunProfileV1("room-a", "seed-7");
+    const second = generateGunProfileV1("room-a", "seed-7");
+    const differentRoom = generateGunProfileV1("room-b", "seed-7");
+    const differentGun = generateGunProfileV1("room-a", "seed-8");
+    expect(first).toEqual(second);
+    expect(first.profileHash).toMatch(/^[0-9a-f]{8}$/u);
+    expect(first).not.toEqual(differentRoom);
+    expect(first).not.toEqual(differentGun);
+    expect(first.groupDamage).toBeCloseTo(first.damagePerProjectile * first.projectilesPerShot, 10);
+    expect(first.burstDamage).toBeCloseTo(first.groupDamage * first.burstSize, 10);
+    expect(first.inventoryDamage).toBeCloseTo(
+      first.groupDamage * (first.magazineSize + first.reserveAmmo),
+      10,
+    );
+    expect(first.cyclicRate).toBeCloseTo(1 / first.fireIntervalSeconds, 10);
+    expect(first.reloadIntervalSeconds).toBeGreaterThan(0);
+    expect(first.reloadWork).toBe(first.magazineDamage);
+    expect(first.ironSight.frontZ).toBeLessThan(first.ironSight.rearZ);
+    expect(first.displayName).toMatch(/^[A-Z][A-Za-z]+ [A-Z][A-Za-z]+ · [A-Z2-9]{6}$/u);
+    expect(first.displayName).toBe(second.displayName);
+    expect(first.displayName).not.toBe(differentRoom.displayName);
+    expect(first.displayName).not.toBe(differentGun.displayName);
+  });
+
+  it("uses the full magazine workload for round-feed reload and sustained DPS", () => {
+    const shotgun = GUN_PROFILES.shotgun;
+    expect(shotgun.reloadMode).toBe("round");
+    expect(shotgun.roundReloadSeconds).toBeCloseTo(
+      shotgun.roundInterval * shotgun.magazineSize,
+      10,
+    );
+    expect(shotgun.reloadSeconds).toBe(shotgun.roundReloadSeconds);
+    expect(shotgun.reloadIntervalSeconds).toBe(shotgun.roundInterval);
+    expect(shotgun.sustainedDamagePerSecond).toBeCloseTo(
+      shotgun.magazineDamage / (shotgun.timeToEmptyMagazineSeconds + shotgun.roundReloadSeconds),
+      10,
+    );
+  });
+
+  it("carries instance state without changing the resolved profile", () => {
+    const profile = GUN_PROFILES.pistol;
+    const instance = createGunInstance(profile, "drop-test-instance", {
+      loadedAmmo: 3,
+      reserveAmmo: 9,
+      temperatureC: 120,
+    });
+    expect(instance.instanceId).toBe("drop-test-instance");
+    expect(instance.profileHash).toBe(profile.profileHash);
+    expect(instance.primitives.profileId).toBe(profile.profileId);
+    expect(instance.primitives.generatorSeed).toBe(profile.generatorSeed);
+    expect(instance.generatorSeed).toBe(profile.generatorSeed);
+    expect(instance.loadedAmmo).toBe(3);
+    expect(instance.reserveAmmo).toBe(9);
+    expect(instance.temperatureC).toBe(120);
+    expect(instance.profile).toBe(profile);
+    expect(() =>
+      createGunInstance({ ...profile, groupDamage: profile.groupDamage + 1 }, "tampered-instance"),
+    ).toThrow(/Invalid resolved gun profile/u);
+  });
+
+  it("rejects invalid generated inputs before they can become instances", () => {
+    expect(() => generateGunProfileV1("room-a", "", { profileId: "bad" })).toThrow(
+      /generatorSeed/u,
+    );
+    const invalid = { ...GUN_PROFILES.pistol, massKg: Number.NaN };
+    expect(() => {
+      // The cast keeps this regression focused on runtime validation rather
+      // than the compile-time readonly profile contract.
+      return resolveGunProfileV1(invalid);
+    }).toThrow(/Invalid massKg/u);
+  });
+
+  it("emits a redacted receipt and resolves shared spread modifiers", () => {
+    const generated = generateGunProfileWithReceiptV1("room-a", "receipt-seed");
+    expect(generated.receipt.stream).toBe("room-a|weapons|generation|v1|receipt-seed");
+    expect(generated.receipt.nameStream).toBe("room-a|weapons|name|v1|receipt-seed");
+    expect(generated.receipt.displayName).toBe(generated.profile.displayName);
+    expect(generated.receipt.profileHash).toBe(generated.profile.profileHash);
+    expect(generated.receipt.archetype).toBe("general");
+    expect(generated.receipt.latent.feedStyle).toMatch(/^(clip|round|belt)$/u);
+    expect(validateGunTradeoffsV1(generated.profile)).toBe(true);
+    const hip = resolveGunSpreadRadiansV1(generated.profile, {
+      movementFactor: 0,
+      postureFactor: 1,
+    });
+    const moving = resolveGunSpreadRadiansV1(generated.profile, {
+      movementFactor: 1,
+      postureFactor: 1,
+      speedMetersPerSecond: 8,
+      heatRatio: 1,
+      unresolvedRecoil: 1,
+    });
+    expect(moving).toBeGreaterThanOrEqual(hip);
+    expect(resolveGunSpreadRadiansV1(generated.profile, { zoomed: true })).toBeLessThanOrEqual(
+      generated.profile.hipSpreadRadians,
+    );
+  });
+
+  it("generates a deterministic high-cadence single-projectile SMG envelope", () => {
+    const first = generateGunProfileWithReceiptV1("room-a", "smg-7", {
+      archetype: "submachine",
+    });
+    const second = generateGunProfileWithReceiptV1("room-a", "smg-7", {
+      archetype: "submachine",
+    });
+    expect(first).toEqual(second);
+    expect(first.receipt.archetype).toBe("submachine");
+    expect(first.receipt.stream).toBe("room-a|weapons|generation|v1|submachine|smg-7");
+    expect(first.receipt.nameStream).toBe("room-a|weapons|name|v1|submachine|smg-7");
+    expect(first.profile.feedStyle).toBe("clip");
+    expect(first.profile.projectilesPerShot).toBe(1);
+    expect(first.profile.fireIntervalSeconds).toBeLessThan(0.15);
+    expect(first.profile.magazineSize).toBeGreaterThanOrEqual(20);
+    expect(first.profile.reloadSeconds).toBeLessThan(5);
+    expect(validateGunTradeoffsV1(first.profile)).toBe(true);
+  });
+
+  it("names a reproducible catalog with stable codes and preserves explicit favorites", () => {
+    const first = generateParametricGunCatalogV1("barracks-room", 32);
+    const second = generateParametricGunCatalogV1("barracks-room", 32);
+    expect(first).toEqual(second);
+    expect(new Set(first.map(({ profile }) => profile.displayName)).size).toBe(first.length);
+    expect(first.every(({ profile, receipt }) => receipt.displayName === profile.displayName)).toBe(
+      true,
+    );
+    expect(first.filter(({ receipt }) => receipt.archetype === "submachine")).toHaveLength(
+      DEFAULT_PARAMETRIC_GUN_SMG_COUNT,
+    );
+    expect(
+      first.every(({ profile }) =>
+        /^[A-Z][A-Za-z]+ [A-Z][A-Za-z]+ · [A-Z2-9]{6}$/u.test(profile.displayName),
+      ),
+    ).toBe(true);
+    expect(first[0]?.profile.displayName).not.toBe(
+      generateParametricGunCatalogV1("other-room", 32)[0]?.profile.displayName,
+    );
+
+    const favorite = generateGunProfileWithReceiptV1("barracks-room", "catalog-001", {
+      displayName: "Quiet Ember",
+    });
+    expect(favorite.profile.displayName).toBe("Quiet Ember");
+    expect(favorite.receipt.displayName).toBe("Quiet Ember");
+    expect(
+      resolveGeneratedGunNameV1("barracks-room", "catalog-001", favorite.receipt.latent),
+    ).not.toBe("Quiet Ember");
+  });
+
+  it("creates generic pickup instances for every generated catalog profile", () => {
+    const pickups = generateParametricGunPickupsV1("barracks-room", { count: 24 });
+    expect(pickups).toHaveLength(24);
+    expect(new Set(pickups.map((pickup) => pickup.gunInstanceId)).size).toBe(24);
+    expect(new Set(pickups.map((pickup) => pickup.profileHash)).size).toBe(24);
+    expect(pickups.every((pickup) => pickup.profile.displayName.includes("·"))).toBe(true);
+  });
+
+  it("keeps Pareto candidates and exposes the heavy envelope through generic data", () => {
+    const profiles = [
+      generateGunProfileV1("room-a", "pareto-a"),
+      generateGunProfileV1("room-a", "pareto-b"),
+      generateGunProfileV1("room-a", "pareto-c"),
+    ];
+    const filtered = filterGunProfilesParetoV1(profiles);
+    expect(filtered.length).toBeGreaterThan(0);
+    expect(filtered.length).toBeLessThanOrEqual(profiles.length);
+    const heavy = generateHeavyTurretGunProfileV1("room-a", "heavy-a");
+    expect(heavy.feedStyle).toBe("belt");
+    expect(heavy.massKg).toBeGreaterThan(4);
+    expect(heavy.magazineSize).toBeGreaterThan(40);
+    expect(heavy.reloadSeconds).toBe(heavy.beltReloadSeconds);
+    expect(heavy.reloadIntervalSeconds).toBeCloseTo(
+      heavy.beltReloadSeconds / heavy.magazineSize,
+      10,
+    );
+    expect(validateGunTradeoffsV1(heavy)).toBe(true);
+  });
+
+  it("records immutable playtest events without exposing world state", () => {
+    const profile = GUN_PROFILES.pistol;
+    const initial = createGunPlaytestTelemetryV1(profile, "scenario-a");
+    const afterShot = recordGunPlaytestTelemetryEventV1(initial, {
+      type: "shotAccepted",
+      timestampSeconds: 0.4,
+      oxygenConsumed: profile.oxygenCostPerGroup,
+      recoilDisplacement: profile.recoilKick,
+      movementAimPenalty: profile.movementPenalty,
+      movementSpeedMetersPerSecond: 6,
+      distanceMeters: 12,
+      posture: "standing",
+    });
+    const afterHit = recordGunPlaytestTelemetryEventV1(afterShot, {
+      type: "hit",
+      timestampSeconds: 0.6,
+      damage: profile.groupDamage,
+      distanceMeters: 12,
+      heatRatio: 0.9,
+      posture: "standing",
+    });
+    const afterSecondShot = recordGunPlaytestTelemetryEventV1(afterHit, {
+      type: "shotAccepted",
+      timestampSeconds: 0.9,
+      projectileCount: 1,
+      movementSpeedMetersPerSecond: 2,
+      distanceMeters: 16,
+      posture: "crouched",
+    });
+    const afterSecondHit = recordGunPlaytestTelemetryEventV1(afterSecondShot, {
+      type: "hit",
+      timestampSeconds: 1.1,
+      damage: profile.groupDamage,
+      distanceMeters: 16,
+      heatRatio: 0.9,
+      posture: "crouched",
+    });
+    const afterTime = recordGunPlaytestTelemetryEventV1(afterSecondHit, {
+      type: "time",
+      deltaSeconds: 1,
+      heatRatio: 0.9,
+      thermalSmokeRate: 2,
+    });
+    expect(initial.acceptedShots).toBe(0);
+    expect(afterTime.acceptedShots).toBe(2);
+    expect(afterTime.hits).toBe(2);
+    expect(afterTime.hitRate).toBe(1);
+    expect(afterTime.hitRateByPosture.standing.shots).toBe(1);
+    expect(afterTime.hitRateByPosture.standing.hits).toBe(1);
+    expect(afterTime.hitRateByPosture.standing.hitRate).toBe(1);
+    expect(afterTime.hitRateByPosture.crouched.hitRate).toBe(1);
+    expect(afterTime.hitRateByDistance.medium.hitRate).toBe(1);
+    expect(afterTime.peakMovementSpeedMetersPerSecond).toBe(6);
+    expect(afterTime.hitIntervalsSeconds).toEqual([0.5]);
+    expect(afterTime.totalDamage).toBe(profile.groupDamage * 2);
+    expect(afterTime.engagementRangeMeters).toBe(14);
+    expect(afterTime.glowSeconds).toBeGreaterThan(0);
+    expect(afterTime.thermalSmokeRate).toBe(2);
+    expect(afterTime.reloadInterruptionRate).toBe(0);
+    const afterInterruptedReload = recordGunPlaytestTelemetryEventV1(afterTime, {
+      type: "reload",
+      durationSeconds: 0.3,
+      interrupted: true,
+    });
+    expect(afterInterruptedReload.reloadOperations).toBe(1);
+    expect(afterInterruptedReload.reloadInterruptions).toBe(1);
+    expect(afterInterruptedReload.reloadInterruptionRate).toBe(1);
+  });
+});
+
+describe("generic gun inventory slots", () => {
+  it("starts with two free generic slots and fills the first free slot", () => {
+    const empty = createEmptyWeaponStateSnapshot();
+    expect(empty.slots).toHaveLength(DEFAULT_GUN_SLOT_COUNT);
+    const slotIds = empty.slots.map(({ slotIndex, gunInstanceId }) => ({
+      slotIndex,
+      gunInstanceId,
+    }));
+    expect(findFirstFreeGunSlot(slotIds)).toBe(0);
+    const withFirst = insertGunIntoFirstFreeSlot(slotIds, "gun-a");
+    expect(withFirst?.map((slot) => slot.gunInstanceId)).toEqual(["gun-a", null]);
+    expect(findFirstFreeGunSlot(withFirst ?? [])).toBe(1);
+    const full = insertGunIntoFirstFreeSlot(withFirst ?? [], "gun-b");
+    expect(full?.map((slot) => slot.gunInstanceId)).toEqual(["gun-a", "gun-b"]);
+    expect(insertGunIntoFirstFreeSlot(full ?? [], "gun-c")).toBeNull();
+    expect(insertGunIntoFirstFreeSlot(full ?? [], "gun-a")).toBeNull();
+  });
+
+  it("drops only the selected instance and preserves other slots", () => {
+    const slots = [
+      { slotIndex: 0, gunInstanceId: "gun-a" },
+      { slotIndex: 1, gunInstanceId: "gun-b" },
+    ] as const;
+    expect(clearGunInventorySlot(slots, 0)).toEqual([
+      { slotIndex: 0, gunInstanceId: null },
+      { slotIndex: 1, gunInstanceId: "gun-b" },
+    ]);
+  });
+
+  it("adds a forward toss impulse without losing sprint or strafe momentum", () => {
+    expect(resolveGunThrowVelocityV1({ x: 0, y: 0, z: -1 }, { x: 4.2, y: 0.4, z: 1.1 }, 7)).toEqual(
+      { x: 4.2, y: 0.4, z: -5.9 },
+    );
+    expect(resolveGunThrowVelocityV1({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, 2)).toEqual({
+      x: 0,
+      y: 0,
+      z: -2,
+    });
+  });
+});
+
 describe("procedural weapon pickups", () => {
   const reservedRects: readonly WeaponSpawnRect[] = [{ minX: -25, maxX: 25, minZ: -25, maxZ: 25 }];
 
   it("uses an expanded walk-over pickup range", () => {
     expect(WEAPON_PICKUP_RANGE_METERS).toBe(3.5);
     expect(WEAPON_PICKUP_RANGE_METERS).toBeGreaterThan(2.05);
+  });
+
+  it("caps procedural outdoor density at one pickup per 50 m horizontal radius", () => {
+    expect(WEAPON_SPAWN_DENSITY_RADIUS_METERS).toBe(50);
+    const pickups = generateWeaponPickups("room-weapon-density", {
+      worldHalfSize: 125,
+      minimumDistance: 1,
+    });
+    const outdoor = pickups.filter((pickup) => pickup.nearTable !== true);
+    for (let leftIndex = 0; leftIndex < outdoor.length; leftIndex += 1) {
+      const left = outdoor[leftIndex];
+      if (left === undefined) continue;
+      for (let rightIndex = leftIndex + 1; rightIndex < outdoor.length; rightIndex += 1) {
+        const right = outdoor[rightIndex];
+        if (right === undefined) continue;
+        expect(
+          Math.hypot(left.position[0] - right.position[0], left.position[2] - right.position[2]),
+        ).toBeGreaterThanOrEqual(WEAPON_SPAWN_DENSITY_RADIUS_METERS);
+      }
+    }
+  });
+
+  it("omits impossible outdoor placements instead of breaking the density cap", () => {
+    const pickups = generateWeaponPickups("room-weapon-constrained", {
+      worldHalfSize: 12,
+      pickupCountPerWeapon: 8,
+    });
+    expect(pickups.every((pickup) => pickup.nearTable === true)).toBe(true);
   });
 
   it("is deterministic for a room seed and changes with the seed", () => {
@@ -157,6 +504,14 @@ describe("procedural weapon pickups", () => {
 
     expect(first).toEqual(second);
     expect(first).not.toEqual(different);
+    expect(new Set(first.map((pickup) => pickup.gunInstanceId)).size).toBe(first.length);
+    for (const pickup of first) {
+      expect(pickup.gun.instanceId).toBe(pickup.gunInstanceId);
+      expect(pickup.gun.profileHash).toBe(pickup.profileHash);
+      expect(pickup.gun.loadedAmmo).toBe(pickup.loadedAmmo);
+      expect(pickup.gun.reserveAmmo).toBe(pickup.reserveAmmo);
+      expect(pickup.gun.temperatureC).toBe(pickup.temperatureC);
+    }
   });
 
   it("includes a table-side set and an even outdoor spread", () => {
@@ -171,10 +526,10 @@ describe("procedural weapon pickups", () => {
     });
     expect(pickups).toHaveLength(9);
     expect(pickups[0]?.starter).toBe(true);
-    expect(pickups[0]?.weapon).toBe("pistol");
+    expect(pickups[0]?.profileId).toBe("pistol");
     const tableSidePickups = pickups.filter((pickup) => pickup.nearTable === true);
     expect(tableSidePickups).toHaveLength(4);
-    expect(tableSidePickups.map((pickup) => pickup.weapon)).toEqual([
+    expect(tableSidePickups.map((pickup) => pickup.profileId)).toEqual([
       "pistol",
       "shotgun",
       "machineGun",
@@ -184,7 +539,7 @@ describe("procedural weapon pickups", () => {
       expect(Math.hypot(pickup.position[0], pickup.position[2])).toBeLessThan(5);
     }
     for (const weapon of WEAPON_IDS) {
-      expect(pickups.filter((pickup) => pickup.weapon === weapon)).toHaveLength(
+      expect(pickups.filter((pickup) => pickup.profileId === weapon)).toHaveLength(
         weapon === "pistol" ? 3 : 2,
       );
     }

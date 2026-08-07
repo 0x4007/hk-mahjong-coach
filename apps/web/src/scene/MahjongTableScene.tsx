@@ -8,12 +8,15 @@ import {
   type MotionLookStatus,
   type PlayerVitalsState,
   type SceneView,
+  type VisualSceneAreaId,
   type WeaponStateSnapshot,
 } from "./mahjong-table.js";
 
 interface MahjongTableSceneProps {
   readonly debug?: boolean;
   readonly onExplorationAreaChange?: (area: string) => void;
+  readonly onVisualAreaChange?: (area: VisualSceneAreaId, enabled: boolean) => void;
+  readonly enabledAreas?: readonly VisualSceneAreaId[];
   readonly roomSeed?: string;
   readonly view: SceneView;
   readonly reticlePosition?: ReticlePosition;
@@ -28,6 +31,8 @@ interface MahjongTableSceneProps {
 export const MahjongTableScene = ({
   debug = false,
   onExplorationAreaChange,
+  onVisualAreaChange,
+  enabledAreas,
   roomSeed = DEFAULT_ROOM_SEED,
   view,
   reticlePosition,
@@ -85,6 +90,7 @@ export const MahjongTableScene = ({
         const mount = createMahjongTableScene(container, viewRef.current, {
           debug: debugRef.current,
           onExplorationAreaChange: (area) => onExplorationAreaChangeRef.current?.(area),
+          ...(onVisualAreaChange === undefined ? {} : { onVisualAreaChange }),
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
           onSprintingChange: (sprinting) => onSprintingChangeRef.current?.(sprinting),
           onSpeedChange: (speed) => onSpeedChangeRef.current?.(speed),
@@ -92,6 +98,7 @@ export const MahjongTableScene = ({
           onWeaponStateChange: (state) => onWeaponStateChangeRef.current?.(state),
           onReady: () => setSceneReady(true),
           roomSeed: roomSeedRef.current,
+          ...(enabledAreas === undefined ? {} : { enabledAreas }),
           ...(reticlePosition === undefined ? {} : { reticlePosition }),
         });
         appliedViewRef.current = viewRef.current;
@@ -108,7 +115,7 @@ export const MahjongTableScene = ({
     return () => {
       disposeScene();
     };
-  }, [roomSeed]);
+  }, [roomSeed, enabledAreas]);
 
   useEffect(() => {
     if (appliedViewRef.current === view) {

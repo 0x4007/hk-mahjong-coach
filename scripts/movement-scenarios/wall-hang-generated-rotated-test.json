@@ -1,0 +1,35 @@
+{
+  "name": "wall-hang-generated-rotated-test",
+  "description": "Catch and climb a rotated backdrop wall while retaining the lateral catch point.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 5,
+  "start": {
+    "position": [0.8, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 2, -4],
+      "halfExtents": [1.2, 2, 2],
+      "rotationY": 1.5707963267948966
+    }
+  ],
+  "frames": [
+    {
+      "duration": 0.3,
+      "forward": 1,
+      "sprint": true,
+      "jump": true,
+      "label": "jump-to-rotated-backdrop-wall"
+    },
+    { "duration": 1.2, "forward": 1, "label": "climb-at-caught-point" },
+    { "duration": 0.1, "forward": 0, "label": "confirm-top-control" }
+  ]
+}

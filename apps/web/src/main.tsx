@@ -13,6 +13,7 @@ import {
   DEFAULT_RETICLE_POSITION,
   MAHJONG_TABLE_HMR_EVENT,
   normalizeVisualRoomSeed,
+  readVisualDebugPreferences,
   RETICLE_DOT_MOTION_MULTIPLIER,
   RETICLE_RING_MOTION_MULTIPLIER,
 } from "./scene/mahjong-table.js";
@@ -23,7 +24,7 @@ import {
   SHIELD_RECHARGE_DELAY_SECONDS,
   createPlayerVitals,
 } from "./scene/player-vitals.js";
-import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
+import { createEmptyWeaponStateSnapshot } from "./scene/weapons.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
@@ -33,9 +34,14 @@ import type {
   VisualCameraPreset,
   VisualGlassMode,
   VisualQualityMode,
+  VisualSceneAreaId,
   VisualShadowQuality,
   VisualToneMapper,
   WeaponStateSnapshot,
+} from "./scene/mahjong-table.js";
+import {
+  DEFAULT_ENABLED_VISUAL_SCENE_AREAS,
+  VISUAL_SCENE_AREA_IDS,
 } from "./scene/mahjong-table.js";
 
 const DEBUG_PANEL_ENABLED =
@@ -49,9 +55,30 @@ const debugCameraPresets: readonly {
   { value: "table", label: "Table" },
   { value: "roomReveal", label: "Room reveal" },
   { value: "assetReview", label: "Asset review" },
-  { value: "focusCalibration", label: "Focus calibration" },
+  { value: "focusCalibration", label: "Focus test zone" },
   { value: "climbingGym", label: "Climbing gym" },
+  { value: "parametricBarracks", label: "Parametric barracks" },
+  { value: "targetRange", label: "Target range" },
 ];
+
+const debugSceneAreas: readonly {
+  readonly id: VisualSceneAreaId;
+  readonly label: string;
+}[] = [
+  { id: "focusCalibration", label: "Focus test zone" },
+  { id: "penthouse", label: "Mahjong penthouse" },
+  { id: "climbingGym", label: "Climbing gym" },
+  { id: "parametricBarracks", label: "Parametric barracks" },
+  { id: "targetRange", label: "Target range" },
+];
+
+const debugCameraPresetArea = (preset: VisualCameraPreset): VisualSceneAreaId => {
+  if (preset === "focusCalibration") return "focusCalibration";
+  if (preset === "climbingGym") return "climbingGym";
+  if (preset === "parametricBarracks") return "parametricBarracks";
+  if (preset === "targetRange") return "targetRange";
+  return "penthouse";
+};
 
 const debugToneMappers: readonly { readonly value: VisualToneMapper; readonly label: string }[] = [
   { value: "agx", label: "AgX" },
@@ -113,6 +140,7 @@ interface PersistedVisualDebugScene {
   readonly autoExposureEnabled: boolean;
   readonly cameraShiftEnabled: boolean;
   readonly cameraBobEnabled: boolean;
+  readonly enabledAreas?: Readonly<Record<VisualSceneAreaId, boolean>>;
 }
 
 interface PersistedVisualDebugState {
@@ -135,12 +163,29 @@ const isFiniteNumber = (value: unknown): value is number =>
 
 const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
 
+const isPersistedEnabledAreas = (
+  value: unknown,
+): value is Readonly<Record<VisualSceneAreaId, boolean>> =>
+  isRecord(value) && VISUAL_SCENE_AREA_IDS.every((area) => isBoolean(value[area]));
+
+const cloneEnabledAreas = (
+  areas: Readonly<Record<VisualSceneAreaId, boolean>>,
+): Record<VisualSceneAreaId, boolean> => ({
+  focusCalibration: areas.focusCalibration,
+  penthouse: areas.penthouse,
+  climbingGym: areas.climbingGym,
+  parametricBarracks: areas.parametricBarracks,
+  targetRange: areas.targetRange,
+});
+
 const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "table" ||
   value === "roomReveal" ||
   value === "assetReview" ||
   value === "focusCalibration" ||
-  value === "climbingGym";
+  value === "climbingGym" ||
+  value === "parametricBarracks" ||
+  value === "targetRange";
 
 const isVisualToneMapper = (value: unknown): value is VisualToneMapper =>
   value === "agx" || value === "neutral" || value === "cineon" || value === "linear";
@@ -231,7 +276,8 @@ const isPersistedVisualDebugScene = (value: unknown): value is PersistedVisualDe
     isBoolean(value.ambientOcclusionEnabled) &&
     isBoolean(value.autoExposureEnabled) &&
     isBoolean(value.cameraShiftEnabled) &&
-    isBoolean(value.cameraBobEnabled)
+    isBoolean(value.cameraBobEnabled) &&
+    (value.enabledAreas === undefined || isPersistedEnabledAreas(value.enabledAreas))
   );
 };
 
@@ -333,6 +379,7 @@ const buildPersistedVisualDebugScene = (
   autoExposureEnabled: snapshot.autoExposureEnabled,
   cameraShiftEnabled: snapshot.cameraShiftEnabled,
   cameraBobEnabled: snapshot.cameraBobEnabled,
+  enabledAreas: cloneEnabledAreas(snapshot.enabledAreas),
 });
 
 const readMotionLookPreference = (): boolean => {
@@ -370,6 +417,13 @@ const getVisualDebugPanelStateStorage = (): Storage | null => {
   } catch {
     return null;
   }
+};
+
+const readInitialEnabledAreas = (): Record<VisualSceneAreaId, boolean> => {
+  const persisted = readVisualDebugPreferences(getVisualDebugPanelStateStorage());
+  return persisted?.enabledAreas === undefined
+    ? cloneEnabledAreas(DEFAULT_ENABLED_VISUAL_SCENE_AREAS)
+    : cloneEnabledAreas(persisted.enabledAreas);
 };
 
 interface VisualDebugPanelProps {
@@ -593,12 +647,32 @@ const VisualDebugPanel = ({
     writeVisualDebugPanelExpanded(getVisualDebugPanelStateStorage(), expanded);
   };
   const openFocusCalibration = (): void => {
+    if (!snapshot.enabledAreas.focusCalibration) {
+      return;
+    }
     setCameraPreset("focusCalibration");
     mount.debug.teleportToFocusLab();
     setPanelExpanded(true);
   };
   const openClimbingGym = (): void => {
+    if (!snapshot.enabledAreas.climbingGym) {
+      return;
+    }
     setCameraPreset("climbingGym");
+    setPanelExpanded(true);
+  };
+  const openParametricBarracks = (): void => {
+    if (!snapshot.enabledAreas.parametricBarracks) {
+      return;
+    }
+    setCameraPreset("parametricBarracks");
+    setPanelExpanded(true);
+  };
+  const openTargetRange = (): void => {
+    if (!snapshot.enabledAreas.targetRange) {
+      return;
+    }
+    setCameraPreset("targetRange");
     setPanelExpanded(true);
   };
   const radiansToDegrees = (radians: number): number => (radians * 180) / Math.PI;
@@ -627,14 +701,60 @@ const VisualDebugPanel = ({
       <div hidden={!isExpanded} id="scene-debug-controls">
         <button
           className="scene-debug-focus-quick-action"
+          disabled={!snapshot.enabledAreas.focusCalibration}
           onClick={openFocusCalibration}
           type="button"
         >
-          Open focus calibration
+          Open focus test zone
         </button>
-        <button className="scene-debug-focus-quick-action" onClick={openClimbingGym} type="button">
+        <button
+          className="scene-debug-focus-quick-action"
+          disabled={!snapshot.enabledAreas.climbingGym}
+          onClick={openClimbingGym}
+          type="button"
+        >
           Open climbing gym
         </button>
+        <button
+          className="scene-debug-focus-quick-action"
+          disabled={!snapshot.enabledAreas.parametricBarracks}
+          onClick={openParametricBarracks}
+          type="button"
+        >
+          Open parametric barracks
+        </button>
+        <button
+          className="scene-debug-focus-quick-action"
+          disabled={!snapshot.enabledAreas.targetRange}
+          onClick={openTargetRange}
+          type="button"
+        >
+          Open target range
+        </button>
+        <fieldset className="scene-debug-area-toggles">
+          <legend>Loaded areas</legend>
+          <small>
+            Turn off unused spaces to unload their meshes and physics. The selection is saved in
+            debug settings and restored after reload.
+          </small>
+          {debugSceneAreas.map((area) => {
+            const enabled = snapshot.enabledAreas[area.id];
+            return (
+              <label className="scene-debug-check" key={area.id}>
+                <input
+                  checked={enabled}
+                  onChange={(event) =>
+                    applyDebugChange(() =>
+                      mount.debug.setAreaEnabled(area.id, event.currentTarget.checked),
+                    )
+                  }
+                  type="checkbox"
+                />
+                {area.label} <span>{enabled ? "loaded" : "unloaded"}</span>
+              </label>
+            );
+          })}
+        </fieldset>
         <fieldset className="scene-debug-room">
           <legend>Generated room</legend>
           <div className="scene-debug-room-meta">
@@ -770,7 +890,11 @@ const VisualDebugPanel = ({
             onChange={(event) => setCameraPreset(event.currentTarget.value as VisualCameraPreset)}
           >
             {debugCameraPresets.map((preset) => (
-              <option key={preset.value} value={preset.value}>
+              <option
+                disabled={!snapshot.enabledAreas[debugCameraPresetArea(preset.value)]}
+                key={preset.value}
+                value={preset.value}
+              >
                 {preset.label}
               </option>
             ))}
@@ -1007,6 +1131,8 @@ const getInitialRoomSeed = (): string =>
 const App = (): React.JSX.Element => {
   const [view, setView] = React.useState<SceneView>("seat");
   const [roomSeed, setRoomSeed] = React.useState(getInitialRoomSeed);
+  const [enabledAreas, setEnabledAreas] =
+    React.useState<Readonly<Record<VisualSceneAreaId, boolean>>>(readInitialEnabledAreas);
   const [roomVariant, setRoomVariant] = React.useState("Northlight");
   const [explorationArea, setExplorationArea] = React.useState("Penthouse");
   const [hmrSceneEpoch, setHmrSceneEpoch] = React.useState(0);
@@ -1044,6 +1170,13 @@ const App = (): React.JSX.Element => {
   const reticleBobbingFrame = React.useRef(0);
   const [persistedVisualStateReady, setPersistedVisualStateReady] = React.useState(
     !import.meta.env.DEV || DEBUG_PANEL_ENABLED,
+  );
+  const enabledAreaIds = React.useMemo(
+    () => VISUAL_SCENE_AREA_IDS.filter((area) => enabledAreas[area]),
+    [enabledAreas],
+  );
+  const enabledAreaKey = VISUAL_SCENE_AREA_IDS.map((area) => (enabledAreas[area] ? "1" : "0")).join(
+    "",
   );
 
   React.useEffect(() => {
@@ -1120,6 +1253,9 @@ const App = (): React.JSX.Element => {
       }
       if (persisted !== null) {
         persistedVisualDebugStateRef.current = persisted;
+        if (persisted.enabledAreas !== undefined) {
+          setEnabledAreas(cloneEnabledAreas(persisted.enabledAreas));
+        }
         if (!HAS_EXPLICIT_ROOM_QUERY && !hasUserRoomOverrideRef.current) {
           setRoomSeed(persisted.roomSeed);
         }
@@ -1423,6 +1559,14 @@ const App = (): React.JSX.Element => {
     setExplorationArea("Penthouse");
     setRoomSeed(normalizeVisualRoomSeed(seed));
   };
+  const handleVisualAreaChange = (area: VisualSceneAreaId, enabled: boolean): void => {
+    setEnabledAreas((previous) => {
+      if (previous[area] === enabled) {
+        return previous;
+      }
+      return { ...previous, [area]: enabled };
+    });
+  };
   const handleMobileActionPointerDown = (
     action: () => void,
     event: React.PointerEvent<HTMLButtonElement>,
@@ -1533,15 +1677,15 @@ const App = (): React.JSX.Element => {
         : isCrouched
           ? { label: "Crouched", tone: "crouched" }
           : { label: "Ready", tone: "ready" };
-  const activeWeaponDefinition =
-    weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
+  const activeSlotIndex = weaponState.activeSlotIndex;
   const activeWeaponSlot =
-    weaponState.activeWeapon === null
+    activeSlotIndex === null || activeSlotIndex < 0
       ? null
-      : (weaponState.inventory.find((slot) => slot.weapon === weaponState.activeWeapon) ?? null);
-  const nearbyWeaponDefinition =
-    weaponState.nearbyPickup === null ? null : WEAPON_DEFINITIONS[weaponState.nearbyPickup];
-  const hasOwnedWeapon = weaponState.inventory.some((slot) => slot.owned);
+      : (weaponState.slots[activeSlotIndex] ?? null);
+  const activeWeaponLabel = activeWeaponSlot?.displayName ?? null;
+  const nearbyWeaponPickup = weaponState.nearbyPickup;
+  const hasOwnedWeapon = weaponState.slots.some((slot) => slot.owned);
+  const inventoryFull = weaponState.slots.every((slot) => slot.owned);
 
   return (
     <main id="main" className="immersive-shell">
@@ -1556,10 +1700,12 @@ const App = (): React.JSX.Element => {
         >
           {persistedVisualStateReady ? (
             <MahjongTableScene
-              key={`scene-${hmrSceneEpoch}-${roomSeed}`}
+              key={`scene-${hmrSceneEpoch}-${roomSeed}-${enabledAreaKey}`}
               debug={DEBUG_PANEL_ENABLED}
+              enabledAreas={enabledAreaIds}
               reticlePosition={RETICLE_POSITION}
               onExplorationAreaChange={handleExplorationAreaChange}
+              onVisualAreaChange={handleVisualAreaChange}
               roomSeed={roomSeed}
               view={view}
               onMount={handleMount}
@@ -1810,31 +1956,40 @@ const App = (): React.JSX.Element => {
               </small>
             </div>
             <div className="scene-weapons-heading">
-              <span>{activeWeaponDefinition?.label ?? "No weapon"}</span>
+              <span>{activeWeaponLabel ?? "No weapon"}</span>
               <strong>
                 {activeWeaponSlot === null
                   ? "—"
-                  : `${activeWeaponSlot.ammoInMagazine} / ${activeWeaponSlot.reserveAmmo}`}
+                  : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
               </strong>
             </div>
-            {nearbyWeaponDefinition !== null ? (
+            {nearbyWeaponPickup !== null ? (
               <p className="scene-weapons-pickup">
-                Walk into or press <kbd>E</kbd> to equip {nearbyWeaponDefinition.label}
+                {inventoryFull && activeSlotIndex !== null
+                  ? "Walk over to ignore · press E to swap "
+                  : activeSlotIndex !== null
+                    ? "Walk over to store · press E to equip "
+                    : "Walk into or press E to equip "}
+                {nearbyWeaponPickup.displayName}
               </p>
             ) : null}
             <div className="scene-weapon-slots">
-              {weaponState.inventory.map((slot, index) => {
-                const definition = WEAPON_DEFINITIONS[slot.weapon];
+              {weaponState.slots.map((slot) => {
+                const shortLabel = slot.shortLabel ?? "—";
+                const isOwned = slot.owned;
+                const isActive = slot.slotIndex === activeSlotIndex;
                 return (
                   <span
-                    aria-label={`${definition.label}${slot.owned ? `, ${slot.ammoInMagazine} rounds` : ", not collected"}`}
+                    aria-label={`${slot.displayName ?? "Empty slot"}${
+                      isOwned ? `, ${String(slot.ammoInMagazine)} rounds` : ", not collected"
+                    }`}
                     className="scene-weapon-slot"
-                    data-active={slot.weapon === weaponState.activeWeapon ? "true" : "false"}
-                    data-owned={slot.owned ? "true" : "false"}
-                    key={slot.weapon}
+                    data-active={isActive ? "true" : "false"}
+                    data-owned={isOwned ? "true" : "false"}
+                    key={slot.slotIndex}
                   >
-                    <b>{index + 1}</b>
-                    <i>{definition.shortLabel}</i>
+                    <b>{slot.slotIndex + 1}</b>
+                    <i>{shortLabel}</i>
                   </span>
                 );
               })}
@@ -1842,12 +1997,65 @@ const App = (): React.JSX.Element => {
             <small>
               {weaponState.reloading
                 ? "Reloading…"
-                : activeWeaponDefinition === null
+                : activeWeaponSlot === null
                   ? hasOwnedWeapon
-                    ? "Q / 1–4 equip"
+                    ? "1–2 equip · Q throw"
                     : "Find a glowing pickup"
-                  : "Click fire · R reload · 0 holster · Q / 1–4 switch"}
+                  : "Click fire · R reload · 0 holster · Q throw"}
             </small>
+            {weaponState.profileInspection !== null ? (
+              <details
+                className="scene-weapon-inspection"
+                data-profile-hash={weaponState.profileInspection.profileHash}
+              >
+                <summary>Inspect generated profile</summary>
+                <dl>
+                  <div>
+                    <dt>Profile</dt>
+                    <dd>{weaponState.profileInspection.displayName}</dd>
+                  </div>
+                  <div>
+                    <dt>Hash / seed</dt>
+                    <dd>
+                      {weaponState.profileInspection.profileHash} ·{" "}
+                      {weaponState.profileInspection.generatorSeed}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Damage / sustained</dt>
+                    <dd>
+                      {weaponState.profileInspection.groupDamage.toFixed(1)} /{" "}
+                      {weaponState.profileInspection.sustainedDamagePerSecond.toFixed(1)} dps
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Spread hip / zoom</dt>
+                    <dd>
+                      {weaponState.profileInspection.hipSpreadRadians.toFixed(3)} /{" "}
+                      {weaponState.profileInspection.zoomSpreadRadians.toFixed(3)} rad
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Reload / O₂ per shot</dt>
+                    <dd>
+                      {weaponState.profileInspection.reloadSeconds.toFixed(2)} s /{" "}
+                      {weaponState.profileInspection.oxygenCostPerGroup.toFixed(1)}
+                    </dd>
+                  </div>
+                </dl>
+                {weaponState.telemetry !== null ? (
+                  <p>
+                    {weaponState.telemetry.acceptedShots} shots ·{" "}
+                    {weaponState.telemetry.hitRate.toFixed(0)}% hits ·{" "}
+                    {weaponState.telemetry.totalDamage.toFixed(0)} damage ·{" "}
+                    {weaponState.telemetry.oxygenConsumed.toFixed(1)} O₂ ·{" "}
+                    {weaponState.telemetry.peakMovementSpeedMetersPerSecond.toFixed(1)} m/s ·{" "}
+                    {(weaponState.telemetry.reloadInterruptionRate * 100).toFixed(0)}% reload
+                    interruptions
+                  </p>
+                ) : null}
+              </details>
+            ) : null}
           </div>
           {isMobile && (
             <div className="mobile-touch-controls" aria-label="Mobile movement controls">
@@ -1912,7 +2120,7 @@ const App = (): React.JSX.Element => {
             <p>
               {isMobile
                 ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk into / E equip · click fire · right-click toggle aim · R reload · Q / 1–4 switch · Shift crouch · Space jump · Esc releases pointer"}
+                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · R reload · 0 holster · 1–2 equip · Q throw · Shift crouch · Space jump · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

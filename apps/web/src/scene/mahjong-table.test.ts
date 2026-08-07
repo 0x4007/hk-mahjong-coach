@@ -3,15 +3,26 @@ import * as THREE from "three";
 
 import {
   clipExplorationRectAroundPenthouse,
+  CLIMBING_GYM_STANDING_EYE_HEIGHT,
+  CLIMBING_GYM_VAULT_HEIGHTS,
   collectScenePhysicsBoxes,
   createExplorationWorld,
+  EXPLORATION_CHUNK_SIZE,
+  EXPLORATION_CHUNKS_PER_SIDE,
   EXPLORATION_PENTHOUSE_BOUNDS,
+  EXPLORATION_WORLD_HALF_SIZE,
+  EXPLORATION_WORLD_SIZE_METERS,
   getVisualSceneStateStorageKey,
   LEDGE_CLIMB_EYE_HEIGHT_METERS,
+  PLAY_AREA_ORIGINS,
+  PLAY_AREA_SIZE_METERS,
   resolveLedgeClimbTargetCameraY,
   resolveLedgeGrabTarget,
   resolveLedgeClimbMomentum,
   resolveVaultTarget,
+  resolveVaultTraversalArcHeight,
+  resolveVaultTraversalDuration,
+  resolveWallClimbTarget,
   resolveWallHangTarget,
   resolveWallHangTargetDetails,
   WALL_HANG_MIN_TOP,
@@ -45,6 +56,16 @@ import {
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
+import {
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND,
+  PLAYER_SPRINT_MULTIPLIER,
+  PLAYER_SPRINT_SPEED_KILOMETERS_PER_HOUR,
+  PLAYER_SPRINT_SPEED_METERS_PER_SECOND,
+  PLAYER_TROT_MULTIPLIER,
+  PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR,
+  PLAYER_TROT_SPEED_METERS_PER_SECOND,
+  PLAYER_WALK_MULTIPLIER,
+} from "./world-scale.js";
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -75,14 +96,15 @@ class MemoryStorage implements Storage {
 }
 
 describe("player movement speed", () => {
-  it("keeps walking speed during reload and caps sprint at the derived trot", () => {
-    const walk = resolvePlayerMovementSpeedMultiplier({
+  it("defaults standing movement to the two-times-base trot and keeps crouch in walk mode", () => {
+    const defaultStanding = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
+      walking: false,
       sprinting: false,
       jogging: false,
       reloading: false,
     });
-    const walkingReload = resolvePlayerMovementSpeedMultiplier({
+    const standingReload = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
       sprinting: false,
       jogging: false,
@@ -92,6 +114,65 @@ describe("player movement speed", () => {
       crouching: false,
       sprinting: false,
       jogging: true,
+      reloading: false,
+    });
+
+    const crouch = resolvePlayerMovementSpeedMultiplier({
+      crouching: true,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+
+    expect(defaultStanding).toBe(trot);
+    expect(standingReload).toBe(trot);
+    expect(crouch).toBe(0.5);
+    expect(crouch).toBeLessThan(defaultStanding);
+  });
+
+  it("honors the hidden walking toggle while standing and over full sprint", () => {
+    const trot = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: false,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    const hiddenWalk = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: true,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    const hiddenWalkDuringSprint = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: true,
+      sprinting: true,
+      jogging: false,
+      reloading: false,
+    });
+    const crouched = resolvePlayerMovementSpeedMultiplier({
+      crouching: true,
+      walking: true,
+      sprinting: true,
+      jogging: false,
+      reloading: false,
+    });
+
+    expect(hiddenWalk).toBe(PLAYER_WALK_MULTIPLIER);
+    expect(hiddenWalk).toBe(1);
+    expect(hiddenWalk).toBeLessThan(trot);
+    expect(hiddenWalkDuringSprint).toBe(hiddenWalk);
+    expect(crouched).toBe(0.5);
+    expect(crouched).not.toBe(hiddenWalk);
+  });
+
+  it("keeps full sprint O₂-gated and caps it at trot during reload", () => {
+    const trot = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: false,
       reloading: false,
     });
     const sprint = resolvePlayerMovementSpeedMultiplier({
@@ -107,12 +188,35 @@ describe("player movement speed", () => {
       reloading: true,
     });
 
-    expect(walkingReload).toBe(walk);
     expect(trot).toBeLessThan(sprint);
     expect(sprintingReload).toBe(trot);
   });
 
-  it("keeps crouch speed ahead of the standing reload trot", () => {
+  it("keeps the two-times-base trot below the three-times-base sprint target", () => {
+    const trotMultiplier = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    expect(PLAYER_TROT_MULTIPLIER).toBe(2);
+    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBe(
+      PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_TROT_MULTIPLIER,
+    );
+    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBeCloseTo(6.8, 8);
+    expect(PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(24.48, 8);
+    expect(PLAYER_SPRINT_SPEED_METERS_PER_SECOND).toBe(
+      PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_SPRINT_MULTIPLIER,
+    );
+    expect(PLAYER_SPRINT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(36.72, 8);
+    expect(PLAYER_MOVE_SPEED_METERS_PER_SECOND * trotMultiplier).toBeCloseTo(
+      PLAYER_TROT_SPEED_METERS_PER_SECOND,
+      8,
+    );
+    expect(trotMultiplier).toBeLessThan(PLAYER_SPRINT_MULTIPLIER);
+  });
+
+  it("keeps the existing crouch walk speed during reload", () => {
     const crouch = resolvePlayerMovementSpeedMultiplier({
       crouching: true,
       sprinting: false,
@@ -127,7 +231,7 @@ describe("player movement speed", () => {
     });
 
     expect(crouch).toBe(0.5);
-    expect(crouch).toBeLessThan(standingReload);
+    expect(standingReload).toBeGreaterThan(crouch);
   });
 });
 
@@ -146,6 +250,13 @@ const sceneState: VisualSceneState = {
 const debugPreferences: VisualDebugPreferences = {
   version: 1,
   cameraPreset: "roomReveal",
+  enabledAreas: {
+    focusCalibration: true,
+    penthouse: false,
+    climbingGym: true,
+    parametricBarracks: false,
+    targetRange: true,
+  },
   fov: 82,
   exposure: 1.12,
   toneMapper: "neutral",
@@ -435,6 +546,15 @@ describe("visual debug preferences", () => {
       key,
       JSON.stringify({
         ...debugPreferences,
+        enabledAreas: { ...debugPreferences.enabledAreas, targetRange: "yes" },
+      }),
+    );
+    expect(readVisualDebugPreferences(storage)).toBeNull();
+
+    storage.setItem(
+      key,
+      JSON.stringify({
+        ...debugPreferences,
         cameraPreset: "bogus" as unknown as VisualDebugPreferences["cameraPreset"],
       }),
     );
@@ -477,18 +597,73 @@ describe("append-only exploration chunks", () => {
     const scene = new THREE.Scene();
     const world = createExplorationWorld(scene, "append-only-test");
 
-    expect(world.getLoadedChunkCount()).toBe(121);
+    expect(EXPLORATION_WORLD_SIZE_METERS).toBe(250);
+    expect(EXPLORATION_WORLD_HALF_SIZE).toBe(125);
+    expect(EXPLORATION_CHUNK_SIZE).toBe(50);
+    expect(EXPLORATION_CHUNKS_PER_SIDE).toBe(2);
+    expect(world.getLoadedChunkCount()).toBe(25);
     world.update(new THREE.Vector3(16, 0, 0));
     const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBe(121);
+    expect(expandedCount).toBe(25);
 
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);
     world.dispose();
   });
+
+  it("keeps every authored training pad inside the compact map bounds", () => {
+    const playAreaHalfSize = PLAY_AREA_SIZE_METERS / 2;
+    for (const origin of Object.values(PLAY_AREA_ORIGINS)) {
+      expect(origin.x - playAreaHalfSize).toBeGreaterThanOrEqual(-EXPLORATION_WORLD_HALF_SIZE);
+      expect(origin.x + playAreaHalfSize).toBeLessThanOrEqual(EXPLORATION_WORLD_HALF_SIZE);
+      expect(origin.z - playAreaHalfSize).toBeGreaterThanOrEqual(-EXPLORATION_WORLD_HALF_SIZE);
+      expect(origin.z + playAreaHalfSize).toBeLessThanOrEqual(EXPLORATION_WORLD_HALF_SIZE);
+    }
+  });
 });
 
 describe("ledge vaulting helpers", () => {
+  it("maps leg-height vaults to an instant transition and two metres to one second", () => {
+    expect(resolveVaultTraversalDuration(0.45)).toBeCloseTo(0.04, 6);
+    expect(resolveVaultTraversalDuration(2)).toBeCloseTo(1, 6);
+    expect(resolveVaultTraversalDuration(1)).toBeGreaterThan(0.04);
+    expect(resolveVaultTraversalDuration(1)).toBeLessThan(1);
+    expect(resolveVaultTraversalArcHeight(0.45)).toBeCloseTo(0.03, 6);
+    expect(resolveVaultTraversalArcHeight(2)).toBeCloseTo(0.24, 6);
+  });
+
+  it("keeps a procedural rotated box on the same local vault path", () => {
+    const target = resolveVaultTarget({ x: 0.8, y: 0.86, z: -0.5 }, { x: 0, y: 0, z: 0.75 }, 0, [
+      {
+        center: { x: 0, y: 0.5, z: 0 },
+        halfExtents: { x: 0.2, y: 0.5, z: 2 },
+        rotationY: Math.PI / 2,
+      },
+    ]);
+
+    expect(target).not.toBeNull();
+    expect(target?.y).toBeCloseTo(1.86, 6);
+    expect(target?.x).toBeCloseTo(0.8, 6);
+    expect(target?.z).toBeGreaterThanOrEqual(-2 + 0.06);
+    expect(target?.z).toBeLessThanOrEqual(2 - 0.06);
+  });
+
+  it("publishes the measured climbing-gym height row in ascending order", () => {
+    expect(CLIMBING_GYM_VAULT_HEIGHTS).toHaveLength(50);
+    expect(CLIMBING_GYM_VAULT_HEIGHTS[0]).toBeCloseTo(0.1, 6);
+    for (let index = 1; index < CLIMBING_GYM_VAULT_HEIGHTS.length; index += 1) {
+      const previous = CLIMBING_GYM_VAULT_HEIGHTS[index - 1];
+      const current = CLIMBING_GYM_VAULT_HEIGHTS[index];
+      if (previous === undefined || current === undefined) {
+        throw new Error(`Missing climbing-gym height at index ${String(index)}`);
+      }
+      expect(current - previous).toBeCloseTo(0.1, 6);
+    }
+    expect(CLIMBING_GYM_VAULT_HEIGHTS.at(-1)).toBeCloseTo(5, 6);
+    expect(CLIMBING_GYM_STANDING_EYE_HEIGHT).toBeCloseTo(1.75, 6);
+    expect(CLIMBING_GYM_VAULT_HEIGHTS.at(-1)).toBeGreaterThan(CLIMBING_GYM_STANDING_EYE_HEIGHT);
+  });
+
   it("returns a capsule-centre target for a low vault and keeps it on the platform", () => {
     const fromPosition: PhysicsVector = { x: 0, y: 0.86, z: -0.6 };
     const target = resolveVaultTarget(
@@ -555,11 +730,11 @@ describe("ledge vaulting helpers", () => {
   });
 
   it("captures at least sprint momentum at vault start", () => {
-    const moveSpeed = 3.4;
+    const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
     const momentum = resolveLedgeClimbMomentum(0.2, 0, 0, 0, true, moveSpeed);
     expect(
       Math.hypot(momentum.preservedForwardVelocity, momentum.preservedStrafeVelocity),
-    ).toBeCloseTo(moveSpeed * 3, 2);
+    ).toBeCloseTo(PLAYER_SPRINT_SPEED_METERS_PER_SECOND, 2);
   });
 
   it("falls back to stored velocity when input is still resolving", () => {
@@ -823,6 +998,48 @@ describe("wall hanging helper", () => {
     expect(resolution?.target.y).toBeCloseTo(2.7, 6);
     expect(resolution?.target.z).toBeCloseTo(-12, 6);
     expect(resolution?.wallFacePoint.x).toBeCloseTo(-70.25, 6);
+  });
+
+  it("keeps the caught point when climbing a long skinny wall", () => {
+    const wall: PhysicsBox = {
+      center: { x: 0, y: 2, z: -4 },
+      halfExtents: { x: 3, y: 2, z: 0.1 },
+    };
+    const resolution = resolveWallHangTargetDetails(
+      { x: 0.8, y: 2.7, z: -3.5 },
+      { x: 0, y: 0, z: -1 },
+      [wall],
+    );
+
+    expect(resolution).not.toBeNull();
+    const target = resolution === null ? null : resolveWallClimbTarget(resolution);
+    expect(target?.x).toBeCloseTo(0.8, 6);
+    // The wall is thinner than the capsule diameter, so there is no safe
+    // inset on its normal axis. The landing falls back to the wall centre;
+    // the caught tangent coordinate above is the behaviour under test.
+    expect(target?.z).toBeCloseTo(-4, 6);
+  });
+
+  it("resolves rotated generated walls in the same frame as their collider", () => {
+    const wall: PhysicsBox = {
+      center: { x: 0, y: 2, z: -4 },
+      halfExtents: { x: 0.2, y: 2, z: 2 },
+      rotationY: Math.PI / 2,
+    };
+    const resolution = resolveWallHangTargetDetails(
+      { x: 0.8, y: 2.7, z: -3.5 },
+      { x: 0, y: 0, z: -1 },
+      [wall],
+    );
+
+    expect(resolution).not.toBeNull();
+    expect(resolution?.target.z).toBeCloseTo(-3.53, 6);
+    const target = resolution === null ? null : resolveWallClimbTarget(resolution);
+    expect(target?.x).toBeCloseTo(0.8, 6);
+    // The rotated wall is thinner than the capsule diameter, so its normal
+    // coordinate correctly falls back to the only supported top point; the
+    // lateral catch coordinate must still remain at x=0.8.
+    expect(target?.z).toBeCloseTo(-4, 6);
   });
 });
 

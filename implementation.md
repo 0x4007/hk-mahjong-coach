@@ -17,6 +17,34 @@
 
 Milestone 5 — Persistence and replay repairs and acceptance.
 
+## 2026-08-07 — Hidden crouch walk-mode toggle
+
+- Crouching now synchronizes an internal, non-UI walking toggle across keyboard, touch, and traversal speed paths.
+  Crouched movement remains on its dedicated slower posture speed; after the player is upright, the toggle selects
+  the 1×-base walk speed (3.4 m/s). Accepted sprint transitions clear it before applying the 3× (10.2 m/s) sprint.
+  The toggle is intentionally absent from visual snapshots and HUD state.
+
+## 2026-08-07 — Two-times-base trot and slow O₂ recovery
+
+- Standing trot is now exactly 2× the 3.4 m/s base: 6.8 m/s (24.48 km/h). Its shared movement telemetry maps halfway
+  between walk and sprint, so a moving trot recovers O₂ slowly at about 2.33 points per second after any sprint delay.
+- Updated the world-scale, movement-speed, and player-vitals regressions. Sprint remains 3× base (10.2 m/s), crouched
+  movement remains half-speed, and the hidden walk toggle affects upright movement only until sprint clears it.
+- The final server-owned bus run `1786142660190-25084-d9eaaa01` recorded 456/457 passing assertions; all movement,
+  O₂, and world-scale assertions passed, with the one unrelated core-engine property failure preserved. Typecheck,
+  production build, smoke, targeted Prettier, and the explicit HMR request passed. No browser session was opened.
+
+## 2026-08-07 — Debug authored-area memory toggles
+
+- Added `Loaded areas` controls to the development debug panel for the Focus test zone, Mahjong penthouse,
+  climbing gym, parametric barracks, and target range.
+- Area changes remount the scene with disabled authored roots omitted from the render graph and static physics
+  collection. This releases their mesh/material resources during the replacement scene and prevents invisible
+  colliders from remaining active. Preset buttons and camera options are disabled while their area is unloaded.
+- The selected area map is included in both the persisted visual debug snapshot and local visual-debug settings, so
+  a reload reconstructs the same disabled areas. Existing settings/snapshots without the new optional field continue
+  to load with every area enabled.
+
 ## Completed
 
 - Read the complete implementation contract in `spec.md`.
@@ -126,9 +154,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The procedural backdrop now uses a local PMREM `RoomEnvironment`, six nearer rooftop masses with parapet
   caps, and a separated final drawn tile in the staged hand so the room, skyline depth, and teaching fixture
   read clearly without external assets.
-- The FPS play space and procedural backdrop now span five 100 m chunks per side (a 1 km × 1 km navigable world,
-  ±500 m from the origin) and apply a 2× per-chunk feature density multiplier across buildings, props, signs,
-  and utility posts. Weapon pickups use the same full-world bounds instead of a smaller legacy spawn square.
+- The FPS play space and procedural backdrop now span five 50 m chunks across each axis (a compact 250 m × 250 m
+  navigable world, ±125 m from the origin) and apply the existing 2× per-chunk feature-density multiplier across
+  buildings, props, signs, and utility posts. Weapon pickups use the same full-world bounds, and the target-range pad
+  is repositioned inside the compact boundary instead of being clipped by movement limits.
 - Mobile browsers keep the landscape guidance in shipping and expose motion look, touch swipe, joystick,
   crouch, and jump against the same composed initial camera.
 - Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper, fog,
@@ -165,15 +194,17 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   strips, floor inlays, tiles, and skyline detail stay out of the blocking set. A coarse AABB runtime is active while
   Rapier WASM loads and remains the fallback on failure, so it feeds the same ledge/vault/wall traversal state machine
   instead of falling back to unconstrained movement.
-- Parkour-feel movement now checks airborne ledges first and low vaults second. Both use a capsule-centre target on a
-  supported surface and animate onto it in a small vertical window, preserving the short Mirror's Edge-inspired climb
-  rather than snapping instantly.
+- Parkour-feel movement now uses one shared airborne vault resolver for authored and generated boxes. The legacy
+  ledge-grab transition is disabled; vaulting owns tops from 0.15 m through 2.0 m above the approach feet. It uses a
+  capsule-centre target on a supported surface and a continuous duration/arc mapping from 0.04 s at 0.45 m to 1.0 s
+  at 2.0 m, preserving the short Mirror's Edge-inspired climb rather than snapping instantly.
 - Tall-wall traversal is separate from the ledge path. A real side collision with a wall whose top clears the capsule
-  head can attach the capsule just outside the approached face; gravity and ordinary movement are suppressed while
-  hanging, and forward or Space starts a two-phase lift-and-cross transition. Wall detection runs only after ledge and
-  low-vault rejection. The resolver also considers streamed static obstacle boxes, while knocked dynamic props remain
-  ineligible. The climbing-gym preset starts close enough to the dedicated wall for a normal walk to reach it without
-  a sprint double-tap.
+  head can attach the capsule just outside the approached face; streamed rotated boxes are resolved in their local
+  horizontal frame. Gravity and ordinary movement are suppressed while hanging, and forward or Space starts the same
+  short smooth arc used by vaulting. The climb preserves the caught tangent coordinate and momentum instead of
+  recentering on a skinny wall. Wall detection runs only after ledge and low-vault rejection. The resolver also
+  considers streamed static obstacle boxes, while knocked dynamic props remain ineligible. The climbing-gym preset
+  starts close enough to the dedicated wall for a normal walk to reach it without a sprint double-tap.
 - The Bokeh/focus pass now follows the gaze ray and classifies tile, surface, and far-fallback targets. A tight
   five-ray neighborhood assists tile focus when the reticule falls into a narrow gap, without selecting an
   occluded tile. Accommodation uses separate near/far damping (about 0.4/0.65 seconds), and the blur envelope
@@ -201,9 +232,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   penthouse/table collision set remains at the origin. The focus room is a ground-level hallway at the east pad,
   and the Mirror's Edge-style climbing gym is centered on the west pad for repeatable edge-grab tuning.
 - The `Focus calibration` preset still starts first-person movement at the beginning of the hallway, but its former
-  elevated deck and ramp are disabled so the whole room uses the shared ground plane. The `Climbing gym` preset
-  now spawns into a fuller obstacle course at the dedicated west play area, and area HUD text now reports `Penthouse`,
-  `Looking focus room`, or `Climbing gym` while the player crosses the three squares.
+  elevated deck and ramp are disabled so the whole room uses the shared ground plane. The `Climbing gym` preset now
+  spawns beside the clear measured vault row at the dedicated west play area. The old authored runs, holds, columns,
+  rails, and hang wall are dormant in both rendering and collision, so only the test blocks can interrupt traversal.
 - Tile body, face-plane, and material resources are cached by size/tile identity, including concealed
   `InstancedMesh` resources. Shader readiness uses a cancellable timer and first-render fallback; it does not
   force a synchronous compile that can block software WebGL or leave Three.js' `compileAsync` polling a removed
@@ -292,8 +323,8 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   the capsule radius plus separation. `resolveWallHangTargetDetails` keeps the face normal and wall-top
   metadata for the simulator.
 - The movement CLI now uses explicit `none`, `wall-hanging`, and `wall-climbing` traversal states. A hang
-  suppresses gravity and ordinary movement until forward/jump input starts a staged climb; the capsule rises
-  clear of the wall before moving onto a validated top target, and grounded is set only after support is found.
+  suppresses gravity and ordinary movement until forward/jump input starts the vault-style climb arc; the capsule
+  moves to a validated top target, and grounded is set only after support is found.
 - `wallHang` is a frame-local transition event. JSON samples also expose `hanging`, `climbing`, and
   `traversalState`; diagnostics do not contaminate JSON stdout. The wall-hang scenario reaches the wall,
   emits one transition event, and continues climbing without the old one-frame grounded flip.
@@ -309,8 +340,8 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   diagnostics and is recorded as incomplete until that dirty lane is repaired.
 - The live browser controller now uses the same airborne near-top wall geometry after ledge handling. A valid
   jump collision, including a near-apex upward contact, enters a persistent face-attached state, suppresses gravity,
-  releases on backward input, and starts a two-phase lift/cross transition on forward or jump input after a short
-  visible settle beat. Wall entry is explicitly airborne-only, so a ground-level collision remains an ordinary
+  releases on backward input, and starts the short vault-style arc on forward or jump input after a short visible
+  settle beat. Wall entry is explicitly airborne-only, so a ground-level collision remains an ordinary
   collision even when the wall top is within the hand-height window. The final position is passed
   back through Rapier for support; the browser footer documents the `Climbing gym` debug route and controls. The gym
   starts on clear ground facing a dedicated training wall, and detection probes Rapier's corrected contact first,
@@ -324,6 +355,39 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The airborne-platform scenario covers a jump that contacts a high, thin platform through its underside and then
   climbs onto the top. The five-metre rejection scenario confirms that a normal jump cannot start a vertical wall
   climb from the base.
+
+## 2026-08-07 — Vault-style wall climb and rotated backdrop support
+
+- Added the `world-meters-v1` scale contract. One Three.js/Rapier world unit is one metre, and shared player capsule,
+  eye-height, autostep, snap, jump, gravity, and tolerance constants now feed the live controller, Rapier fallback,
+  and movement simulator. The physical standing eye height is fixed at 1.75 m and crouch eye height at 1.00 m; the
+  elevated table camera remains a presentation-only camera.
+- Wall-hang resolution now transforms each candidate `PhysicsBox` into its local horizontal frame before checking
+  the approached face, front reach, lateral overlap, and swept-contact recovery. This makes generated backdrop
+  buildings and bridges agree with their rotated Rapier cuboids instead of silently using a mismatched world AABB.
+- `resolveWallClimbTarget` is shared by the live scene and movement simulator. It keeps the tangent coordinate from
+  `wallFacePoint` and chooses the nearest supported top point along the wall normal; a long/skinny wall no longer
+  slides the player to its centre. A wall thinner than the capsule falls back only along its normal thickness, where
+  no fully inset capsule point exists.
+- The live wall climb now uses the vault `ClimbingTransition` shape: the same height-based smooth arc, preserved
+  approach momentum, and short landing boost. The old speed-based lift/cross phase no longer leaves the gun lowered
+  for the full wall height.
+- Added rotated-wall and skinny-wall resolver regressions plus
+  `scripts/movement-scenarios/wall-hang-generated-rotated-test.json`, which records a hang at x≈0.8 and completes
+  on the rotated top without losing that lateral catch point.
+- Added the measured climbing-gym vault row (`0.10 m` through `5.00 m` in `0.10 m` increments) and the
+  `scripts/movement-scenarios/vault-2m-test.json` timing regression.
+- Corrected the climbing-gym first-person preset to use the 1.75 m standing-eye reference instead of the elevated
+  seated mahjong table camera. The labeled 2.00 m block is now physically above the camera while preserving the
+  world-floor measurements used by vault resolution.
+
+## 2026-08-07 — Clear climbing-gym vault lane
+
+- Reduced the climbing gym runtime feature set to the side-by-side 0.10 m–5.00 m vault-test blocks. Legacy authored
+  runs, ledges, holds, columns, rails, and the hang wall are not rendered or added to the physics boxes, removing the
+  geometry that could overlap the measured bounds.
+- Kept one shared block definition for rendering and collision, so each visible height label corresponds to the exact
+  collider used by the vault resolver.
 
 ## Next action
 
@@ -347,7 +411,7 @@ restart/resume path before beginning dependent CLI/server integration.
 - Wired the model into the visual-table scene. Above-sprint-speed wall impacts and hard landings can deal damage;
   the mount exposes `applyDamage`, `getVitals`, and `resetVitals` for controlled debug/runtime use.
 - Impact damage now uses collision delta-v: requested horizontal velocity minus the physics-resolved velocity
-  at a wall, capped at the velocity carried into contact. Sprint speed (10.2 m/s, about 36.7 km/h) and below
+  at a wall, capped at the velocity carried into contact. Sprint speed (13.6 m/s, exactly 48.96 km/h) and below
   is harmless. Damage follows a kinetic-energy-shaped km/h curve and reaches the full 200 damage at the
   approximate 200 km/h human terminal velocity; the same curve is used for vertical landing delta-v.
 - The scene publishes health/shield state through typed React callbacks and `data-player-health`/
@@ -369,6 +433,34 @@ restart/resume path before beginning dependent CLI/server integration.
 - Focused validation passed: `pnpm exec vitest run apps/web/src/scene/camera-motion.test.ts`
   and the combined visual scene tests (38 tests). Full typecheck remains blocked by the pre-existing dirty-lane
   diagnostics recorded above.
+
+## 2026-08-07 — Multi-axis head bob and jump/landing acceleration
+
+- Extended the centralized `camera-motion.ts` output with local lateral and depth gait offsets plus a bounded
+  acceleration pitch. Jump take-off uses the launch impulse and landing pitch uses the actual fall velocity and
+  support-stop acceleration, so a harder landing is visibly deeper than a normal jump.
+- Replaced the sine/cosine running orbit with a footfall-shaped U: lateral stride remains sinusoidal, while
+  vertical gait follows a parabolic relationship to lateral stride. Breathing and jump/landing responses remain
+  additive instead of being folded into the stride shape.
+- Composed the offsets into the camera render matrix after physics resolves the base pose. The camera, held
+  viewmodel, reticule, and aim ray therefore stay linked without feeding presentation bob back into fallback
+  movement state.
+- Added focused regressions for jump/landing pitch direction, lateral/depth gait motion, and the U-shaped stride.
+  Typecheck, the production web build, and the server-owned full test bus pass (458/458 assertions).
+
+## 2026-08-07 — Speed-weighted sprint gait intensity
+
+- Added `resolveCameraGaitAmount()` to the centralized camera damper. It combines normalized movement magnitude,
+  speed ratio, and the existing crouch posture factor, then adds a 0.6 sprint-blend gain. The resulting gait amount
+  is 1/3 at walk, about 0.87 at trot, and 1.6 at full sprint, so sprinting carries the shared reticule, camera,
+  viewmodel, and aim-ray motion farther from center.
+- The existing gait damper still moves toward zero when movement magnitude falls, so acceleration and deceleration
+  are smooth rather than instant reticule jumps. Added regressions for walk/trot/sprint ordering and damped stop
+  recovery. In the final server-owned bus run `1786145360317-25084-ff3d4e4e`, all six camera-motion gait tests
+  passed and the complete 460/460 assertion snapshot passed.
+- Replaced the fixed gait phase-rate range with an Alexander-style step-frequency resolver. At the configured 1.85 m
+  player height and 3.4 m/s walk speed it yields a 1.188 m step, 0.349 s per step, and 2.862 steps/s; the phase
+  advances by `π` per alternating foot contact and stops advancing when movement stops.
 
 ## 2026-08-06 — Oxygen vital and exertion breathing
 
@@ -412,8 +504,9 @@ restart/resume path before beginning dependent CLI/server integration.
   5-point cost; an insufficient reserve leaves the action and state unchanged, while crouching remains free.
 - Sprinting now checks the drain for the current frame. When that slice cannot be paid, desktop, touch, and
   traversal movement fall back to a derived neutral jog instead of sprinting or stopping. The neutral blend is
-  `walkingRecovery / (walkingRecovery + sprintDrain) = 70.6%` between walk and sprint, about 80.4% of full sprint
-  speed, so the locomotion O₂ delta is zero at the configured +8/s walk and -3.33/s sprint rates.
+  `walkingRecovery / (walkingRecovery + sprintDrain) = 70.6%` between walk and sprint, about 77.9% of the 48.96 km/h
+  sprint (10.6 m/s, about 38.16 km/h), so the locomotion O₂ delta is zero at the configured +8/s walk and -3.33/s
+  sprint rates.
 - Hold-breath activation requires one affordable 1/60-second drain slice. It still drains at 15 points per second,
   auto-stops at zero, and remains locked until the reserve recovers above 25 points.
 
@@ -428,7 +521,7 @@ restart/resume path before beginning dependent CLI/server integration.
   Outdoor spawns avoid the authored play-area rectangles and coarse static obstacles, and each pickup has an
   emissive model, pad, ring, and label.
 - Added first-person weapon models, a procedural right forearm/palm/thumb view model, pickup/equip
-  interaction, number-key/Q switching, E interaction, R reload, mouse fire, mobile Fire/Equip/Reload
+  interaction, number-key slot selection, Q throw, E interaction, R reload, mouse fire, mobile Fire/Equip/Reload
   actions, deterministic tracer/impact effects, recoil, and a React weapon HUD. Shot raycasts exclude the
   streamed city hot path and fail closed to a tracer miss if a render subtree is malformed. Hits record
   typed `lastWeaponHit` metadata on the struck render object; enemy health and authoritative combat are
@@ -687,7 +780,7 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 ## 2026-08-06 — Directional movement double-tap sprint
 
 - Double-tap sprint now tracks each WASD and arrow movement key independently instead of treating only W as a
-  sprint trigger. A second non-repeating tap within the 300 ms window starts the existing 3× sprint in that
+  sprint trigger. A second non-repeating tap within the 300 ms window starts the 18 km/h sprint in that
   direction, while the active sprint still transfers across held movement directions and stops when movement ends.
 - Updated the first-person control hints and documentation to describe the directional double-tap behavior. Added a
   focused regression for all eight movement keys, cross-key isolation, key-repeat suppression, and the timing bounds.
@@ -1004,3 +1097,149 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   regression coverage and the visual-table oxygen documentation.
 - Validation: the server-owned test bus passed all 427 assertions, strict typecheck, targeted ESLint, Prettier,
   production build, `git diff --check`, and the explicit Vite HMR request. Browser interaction was not opened.
+
+## 2026-08-06 — Generic parametric gun instances
+
+- Added the versioned `v1` profile resolver and seeded generator. Derived payload, cadence, burst, magazine,
+  reload, handling, recoil, accuracy, heat, and telemetry values are calculated from one primitive profile and a
+  canonical profile hash. Generation uses the exact stream `<roomSeed>|weapons|generation|<formulaVersion>|<gunSeed>`.
+- Replaced runtime ownership by weapon-id with two generic `GunInventorySlot` records that reference mutable
+  `GunInstance` records. Pickup uses the first free slot and leaves a full inventory unchanged; drop spawns the same
+  instance with its profile hash, generator seed, ammo, and temperature intact.
+- Held and pickup geometry now derives from receiver, barrel, stock, optic, and sight-line dimensions. The runtime
+  has no pistol/shotgun/machine-gun/sniper geometry or inventory branches; named profiles remain fixture data only.
+- Fire, reload, pickup, and drop reject input during a switch transition. A valid drop clears reload and switch
+  presentation state, while the shared camera-motion path remains authoritative for the held model.
+- Dropped pickups now raycast against visible scene geometry and try deterministic angled fallback positions, keeping
+  a wall or prop from absorbing the instance immediately in front of the player.
+- Preserved barrel heat is applied when a dropped instance becomes a pickup and again when it is collected, so visual
+  temperature follows the generic instance state.
+- HUD snapshots expose generic slot and nearby-pickup metadata rather than concrete weapon definitions.
+- Added deterministic profile, instance, first-free-slot, full-inventory, and drop-preservation regressions.
+- Final dirty-state validation: the server-owned test bus passed 436/436 assertions, strict typecheck, production
+  build, modified-file Prettier, weapon-file ESLint, and `git diff --check`. Full repository lint remains blocked by
+  83 pre-existing diagnostics outside this feature. The production HTTP smoke test passed; no browser or connected HMR
+  session was available in this lane.
+
+## 2026-08-06 — Parametric profile receipts and playtest telemetry
+
+- Completed the v1 resolver with sustained damage, handling/zoom/heat/recovery spread factors, oxygen costs,
+  reload workload, reserve-pressure rate, and audio inputs derived from group damage and measured barrel length.
+- Resolved profiles are now re-derived and hash-checked before instance admission. Instances retain the canonical
+  primitive input. Round and belt reloads preserve the full-magazine workload in `reloadSeconds` while exposing a
+  derived per-round or segment interval for partial-capacity loading and interruption; sustained DPS uses that full
+  workload.
+- Generation keeps the canonical `<roomSeed>|weapons|generation|v1|<gunSeed>` stream and now emits a redacted latent
+  receipt. Payload and cadence share a bounded budget; global tradeoff validation and Pareto filtering preserve
+  multiple objective profiles without a single permanent balance score. A heavy-turret envelope is exposed as a
+  generic sampling utility and does not add a runtime weapon branch.
+- Added a pure immutable telemetry reducer for accepted shots, hit intervals/rate, damage, recoil/recovery,
+  posture/distance hit rates, movement speed/penalty, heat/glow/smoke, reload duration/interruption rate,
+  ammunition/O₂ use, range, misses, empty magazines, deaths, and optional power/control/clarity/fun ratings. The scene
+  runtime reports the active instance telemetry through the generic weapon snapshot.
+- The HUD now includes a collapsed profile-inspection panel showing the active profile hash/seed and derived
+  damage, spread, reload, oxygen, and telemetry values. Browser interaction remains unverified in this lane.
+
+## 2026-08-07 — Memorable generated names and weapon test campus
+
+- Added the separate versioned name stream `<roomSeed>|weapons|name|v1|<gunSeed>`. Generated profiles now derive a
+  memorable adjective/noun name plus a six-character stable code from latent tradeoffs and feed style. Explicit
+  `displayName` overrides remain authoritative, and the generation receipt records both streams and the final name.
+- Added a deterministic indexed catalog of 24 generated profiles per room seed (`catalog-001` through `catalog-024`) and
+  generic pickup creation for the catalog. The profile hash, formula version, room seed, and gun seed remain the
+  canonical favorite-gun identity; names are presentation metadata for playtest recall.
+- Added a walkable parametric barracks and four-distance target range to the development map. The debug panel can
+  teleport the first-person controller to either space; the default scene contains 24 generated catalog pickups plus
+  the existing 13 fixture pickup instances. Targets are ordinary visible meshes, so the existing fire, hit-mark,
+  reload, and telemetry path remains the acceptance surface.
+- Validation for this entry: the refreshed server-owned test-bus snapshot passed 438/438 assertions; `pnpm typecheck`,
+  `pnpm build`, `pnpm smoke`, `git diff --check`, weapon-module ESLint, and Prettier checks passed. The broader scene
+  ESLint command still reports the known dirty-lane baseline diagnostics outside this feature. No browser session was
+  opened in this lane.
+
+## 2026-08-07 — Ergonomic pickup, swap, and toss controls
+
+- Walk-over pickup now stores a gun in the first free slot and preserves the currently held gun. When both slots are
+  full, walk-over pickup is a no-op.
+- `E` remains an intentional action: it equips a nearby gun when a slot is available, or swaps the held gun with the
+  nearby pickup when the inventory is full. The displaced instance remains a pickup at the swap location and stays
+  protected from walk-over re-pickup until the player leaves its range; `E` can still swap back immediately.
+- `Q` now throws the active instance with a short gravity arc. The throw inherits world-space sprint, strafe, and jump
+  velocity; a stationary throw starts at a 1.05 m forward eject distance. Thrown instances are protected from
+  walk-over re-pickup until the player leaves the pickup radius, while `E` remains available immediately.
+- Added a pure `resolveGunThrowVelocityV1` regression for forward impulse plus preserved player momentum and updated
+  HUD, design, and control documentation.
+- Validation: the feature checks passed with `pnpm typecheck`, `pnpm build`, `pnpm smoke`, Prettier, `git diff --check`,
+  and the explicit Vite HMR request. The latest code-matched shared bus snapshot (before these documentation-only
+  edits) has 440 passing assertions and one unrelated wall-hanging failure from concurrent edits in
+  `mahjong-table.test.ts`; no weapon assertions failed. No browser session is opened in this lane.
+
+## 2026-08-07 — High-cadence submachine generation envelope
+
+- Added a deterministic generator-only `submachine` archetype. It produces
+  single-projectile, high-cadence, compact clip profiles with lighter geometry
+  and a small magazine-damage budget; the generic runtime still has no
+  archetype-specific weapon branch.
+- Twelve of the 24 default barracks catalog entries now use that envelope. The
+  archetype is recorded in the generation receipt and gets a separate seeded
+  generation/name stream suffix, so existing general stream identities remain
+  stable and favorites remain reproducible.
+- Validation: the code-matched server-owned bus snapshot recorded 441 passing
+  assertions and one unrelated core-engine property-test failure; all weapon
+  assertions passed. Strict typecheck, production build, smoke, targeted ESLint,
+  Prettier, `git diff --check`, and the explicit HMR request also passed. No
+  browser session was opened in this lane.
+
+## 2026-08-07 — Default trot movement and crouch walk mode
+
+- Standing movement now starts at the existing O₂-neutral trot instead of the
+  slower base walk speed. The shared movement-speed resolver remains the source
+  for keyboard, touch, reload, and traversal paths, so the normal trot keeps a
+  zero O₂ movement delta.
+- Crouching preserves the existing half-speed walk mode. Double-tap sprint now
+  requests a sprint exactly three times the 3.4 m/s base (10.2 m/s, 36.72 km/h),
+  checks the current frame's O₂ affordability, and falls back to the recalculated
+  neutral trot when the drain cannot be paid.
+- Added focused movement-speed regressions for the default trot, crouch walk,
+  three-times-base sprint target, and reload/sprint caps. The final server-owned bus run
+  recorded 453/454 passing assertions; every movement, vitals, impact, camera,
+  and world-scale assertion passed, while one unrelated core-engine property
+  assertion failed. The follow-up patch also clears an active sprint request
+  when crouch is enabled, so crouching explicitly enters walk mode. Strict
+  typecheck, production build, smoke, Prettier, `git diff --check`, and the
+  explicit Vite HMR request passed. The scene ESLint command still reports 31
+  known dirty-lane diagnostics outside this movement change. Browser
+  interaction was not opened in this lane.
+
+## 2026-08-07 — Outdoor gun spawn density cap
+
+- Procedural outdoor weapon pickups now enforce a 50 m horizontal separation, so each pickup's 50 m-radius circle
+  contains no other seeded outdoor gun. The existing `minimumDistance` option can request a wider spacing but cannot
+  lower this cap.
+- If a constrained world cannot fit another pickup at that spacing, generation omits that pickup instead of using an
+  invalid close fallback. The authored table-side starter set and 24-profile parametric barracks remain deliberate
+  test displays and are exempt from the outdoor density rule.
+- Added focused regressions for the 50 m cap and deterministic omission when no valid outdoor position exists.
+
+## 2026-08-07 — Five-times-base sprint target
+
+- Changed the shared sprint definition to exactly five times the 3.4 m/s base:
+  17 m/s (61.2 km/h). The O₂-neutral trot remains derived from the
+  walking-recovery/sprint-drain blend at 13 m/s (46.8 km/h).
+- Added regressions for the converted sprint speed and neutral-trot calculation.
+
+## 2026-08-07 — Four-times-base sprint target
+
+- Superseded the five-times-base tuning with a four-times-base sprint: 13.6 m/s
+  (48.96 km/h) from the shared 3.4 m/s base movement speed.
+- The O₂-neutral trot remains derived from the same walking-recovery/sprint-drain
+  blend and now resolves to 10.6 m/s (38.16 km/h). Updated the world-scale and
+  movement regressions plus the active documentation and impact-speed description.
+
+## 2026-08-07 — Three-times-base sprint target
+
+- Superseded the four-times-base tuning with a three-times-base sprint: 10.2 m/s
+  (36.72 km/h) from the shared 3.4 m/s base movement speed.
+- The O₂-neutral trot remains derived from the same walking-recovery/sprint-drain
+  blend and now resolves to 8.2 m/s (29.52 km/h). Updated the world-scale and
+  movement regressions plus the active documentation and impact-speed description.

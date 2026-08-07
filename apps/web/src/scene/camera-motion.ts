@@ -1,4 +1,8 @@
 import { O2_BRACED_STABILITY_FACTOR, resolveO2Stability } from "./o2-stability.js";
+import {
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND,
+  PLAYER_WALK_SPEED_RATIO,
+} from "./world-scale.js";
 
 export interface CameraMotionUpdateInput {
   readonly deltaSeconds: number;
@@ -41,8 +45,14 @@ export interface CameraLandingImpact {
 export interface CameraMotionOffsets {
   /** Presentation roll in radians. */
   readonly roll: number;
-  /** Continuous gait bob in metres. */
+  /** Continuous vertical gait and breathing bob in metres. */
   readonly headBob: number;
+  /** Local left/right gait displacement in metres. */
+  readonly headBobLateral: number;
+  /** Local forward/back gait displacement in metres. */
+  readonly headBobDepth: number;
+  /** Short-lived pitch response to take-off and landing acceleration. */
+  readonly headBobPitch: number;
   /** Short-lived vertical weight response in metres. */
   readonly weightShift: number;
   /** The complete vertical camera offset in metres. */
@@ -110,9 +120,24 @@ export const CAMERA_SHIFT_SPRINT = ((1.8 * Math.PI) / 180) * CAMERA_SHIFT_WEIGHT
 export const CAMERA_SHIFT_TARGET_DAMPING = 4;
 export const CAMERA_SHIFT_DAMPING = 6;
 export const CAMERA_BOB_AMPLITUDE = 0.025;
+export const CAMERA_BOB_LATERAL_AMPLITUDE = 0.012;
+export const CAMERA_BOB_DEPTH_AMPLITUDE = 0.008;
+/** Extra gait amplitude applied across the walk-to-sprint speed blend. */
+export const CAMERA_SPRINT_GAIT_GAIN = 0.6;
+/** Maximum gait amount at full standing sprint. */
+export const CAMERA_GAIT_AMOUNT_MAX = 1 + CAMERA_SPRINT_GAIT_GAIN;
 export const CAMERA_BOB_DAMPING = 12;
-export const CAMERA_BOB_MIN_FREQUENCY = 8.5;
-export const CAMERA_BOB_MAX_FREQUENCY = 14;
+/** Player height used by the gait model supplied by the first-person scale. */
+export const CAMERA_GAIT_PLAYER_HEIGHT_METERS = 1.85;
+/** Alexander's hip-height approximation for a standing human. */
+export const CAMERA_GAIT_HIP_HEIGHT_RATIO = 0.53;
+export const CAMERA_GAIT_HIP_HEIGHT_METERS =
+  CAMERA_GAIT_PLAYER_HEIGHT_METERS * CAMERA_GAIT_HIP_HEIGHT_RATIO;
+/** Real-world gravity for gait similarity; this is separate from game gravity. */
+export const CAMERA_GAIT_GRAVITY_METERS_PER_SECOND_SQUARED = 9.81;
+export const CAMERA_GAIT_FORMULA_COEFFICIENT = 0.25;
+export const CAMERA_GAIT_STRIDE_SPEED_EXPONENT = 1.67;
+export const CAMERA_GAIT_STRIDE_HIP_EXPONENT = 1.17;
 export const CAMERA_BREATHING_BASE_AMPLITUDE = 0.004;
 export const CAMERA_BREATHING_MAX_AMPLITUDE = 0.045;
 export const CAMERA_BREATHING_MIN_FREQUENCY = 0.9;
@@ -163,6 +188,11 @@ export const CAMERA_LANDING_VELOCITY_SCALE = 0.15;
 export const CAMERA_LANDING_ACCELERATION_SCALE = 0.002;
 export const CAMERA_LANDING_VELOCITY_THRESHOLD = 1;
 export const CAMERA_WEIGHT_IMPULSE_MAX = 7;
+/** Converts the spring's weight velocity into a short acceleration pitch. */
+export const CAMERA_WEIGHT_PITCH_VELOCITY_SCALE = 0.015;
+/** Keeps the pitch response visible after the impulse starts settling. */
+export const CAMERA_WEIGHT_PITCH_POSITION_SCALE = 0.2;
+export const CAMERA_WEIGHT_PITCH_MAX = 0.14;
 /** Damage value used to normalize the four visual weapon profiles. */
 export const CAMERA_RECOIL_REFERENCE_DAMAGE = 100;
 /** The CSS radius of the outer reticle ring at the default 16 px root size. */
@@ -210,6 +240,76 @@ const clamp = (value: number, min: number, max: number): number =>
 
 const damp = (current: number, target: number, damping: number, deltaSeconds: number): number =>
   current + (target - current) * (1 - Math.exp(-damping * deltaSeconds));
+
+/**
+ * Estimate human step cadence from speed with Alexander's dynamic-similarity
+ * relation. The relation returns a same-foot stride, so dividing by two gives
+ * the distance between alternating foot contacts. This keeps the presentation
+ * rhythm tied to metres travelled rather than to an arbitrary frame frequency.
+ */
+export const resolveCameraGaitStepFrequency = (speedMetersPerSecond: number): number => {
+  const speed = Number.isFinite(speedMetersPerSecond) ? Math.max(0, speedMetersPerSecond) : 0;
+  if (speed <= Number.EPSILON) {
+    return 0;
+  }
+  const strideLength =
+    ((speed /
+      (CAMERA_GAIT_FORMULA_COEFFICIENT *
+        Math.sqrt(CAMERA_GAIT_GRAVITY_METERS_PER_SECOND_SQUARED))) *
+      CAMERA_GAIT_HIP_HEIGHT_METERS ** CAMERA_GAIT_STRIDE_HIP_EXPONENT) **
+    (1 / CAMERA_GAIT_STRIDE_SPEED_EXPONENT);
+  return speed / (strideLength / 2);
+};
+
+/** Convert alternating-foot cadence into the U-gait phase's angular rate. */
+export const resolveCameraGaitAngularFrequency = (speedMetersPerSecond: number): number =>
+  Math.PI * resolveCameraGaitStepFrequency(speedMetersPerSecond);
+
+/**
+ * Resolve the shared gait intensity from the controller's normalized movement
+ * values. The speed ratio supplies both the ordinary gait amount and a
+ * sprint-only amplification, while movement magnitude fades the response as
+ * input is released. Keeping this calculation here makes the camera, weapon
+ * viewmodel, reticle, and aim ray consume one damped intensity.
+ */
+export const resolveCameraGaitAmount = (
+  movementMagnitude: number,
+  movementSpeedRatio: number,
+  crouching = false,
+): number => {
+  const magnitude = clamp(movementMagnitude, 0, 1);
+  const speedRatio = clamp(movementSpeedRatio, 0, 1);
+  const sprintBlend = clamp(
+    (speedRatio - PLAYER_WALK_SPEED_RATIO) / (1 - PLAYER_WALK_SPEED_RATIO),
+    0,
+    1,
+  );
+  const postureFactor = crouching ? 0.7 : 1;
+  return clamp(
+    magnitude * speedRatio * postureFactor * (1 + CAMERA_SPRINT_GAIT_GAIN * sprintBlend),
+    0,
+    CAMERA_GAIT_AMOUNT_MAX,
+  );
+};
+
+/**
+ * Resolve one running stride as a reticle-space U instead of a circular orbit.
+ * The lateral stride is sinusoidal; the vertical path is a parabola of that
+ * stride, so the camera dips through the middle and rises at both sides.
+ */
+export const resolveCameraGaitOffsets = (
+  phase: number,
+  amount: number,
+): Pick<CameraMotionOffsets, "headBob" | "headBobLateral" | "headBobDepth"> => {
+  const safePhase = Number.isFinite(phase) ? phase : 0;
+  const safeAmount = clamp(amount, 0, CAMERA_GAIT_AMOUNT_MAX);
+  const stride = Math.sin(safePhase);
+  return {
+    headBob: (1 - 2 * stride ** 2) * CAMERA_BOB_AMPLITUDE * safeAmount,
+    headBobLateral: stride * CAMERA_BOB_LATERAL_AMPLITUDE * safeAmount,
+    headBobDepth: Math.sin(safePhase * 2) * CAMERA_BOB_DEPTH_AMPLITUDE * safeAmount,
+  };
+};
 
 export interface CameraWeaponShotImpulse {
   readonly yaw: number;
@@ -383,6 +483,9 @@ export const resolveCameraViewmodelTransition = (
 const createDefaultOffsets = (): CameraMotionOffsets => ({
   roll: 0,
   headBob: 0,
+  headBobLateral: 0,
+  headBobDepth: 0,
+  headBobPitch: 0,
   weightShift: 0,
   verticalOffset: 0,
   recoilYaw: 0,
@@ -442,6 +545,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     offsets = {
       ...offsets,
       headBob: 0,
+      headBobLateral: 0,
+      headBobDepth: 0,
+      headBobPitch: 0,
       verticalOffset: weightShift,
       aimSwayX: 0,
       aimSwayY: 0,
@@ -542,7 +648,11 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     if (input.shiftEnabled && Math.abs(lateralInput) > MIN_LATERAL_INPUT) {
       const lateralDirection = Math.sign(lateralInput);
       if (lateralDirection !== lastLateralDirection) {
-        const sprintStrength = clamp((movementSpeedRatio - 1 / 3) / (1 - 1 / 3), 0, 1);
+        const sprintStrength = clamp(
+          (movementSpeedRatio - PLAYER_WALK_SPEED_RATIO) / (1 - PLAYER_WALK_SPEED_RATIO),
+          0,
+          1,
+        );
         shiftTarget =
           -lateralDirection *
           (CAMERA_SHIFT_WALK + (CAMERA_SHIFT_SPRINT - CAMERA_SHIFT_WALK) * sprintStrength);
@@ -562,14 +672,17 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     shiftRoll = damp(shiftRoll, shiftTarget, CAMERA_SHIFT_DAMPING, deltaSeconds);
 
     const bobTarget = input.bobEnabled
-      ? movementMagnitude * movementSpeedRatio * (input.crouching ? 0.7 : 1)
+      ? resolveCameraGaitAmount(movementMagnitude, movementSpeedRatio, input.crouching)
       : 0;
     bobAmount = damp(bobAmount, bobTarget, CAMERA_BOB_DAMPING, deltaSeconds);
-    bobPhase +=
-      deltaSeconds *
-      (CAMERA_BOB_MIN_FREQUENCY +
-        (CAMERA_BOB_MAX_FREQUENCY - CAMERA_BOB_MIN_FREQUENCY) * movementSpeedRatio);
-    const gaitBob = Math.sin(bobPhase) * CAMERA_BOB_AMPLITUDE * bobAmount;
+    const gaitAngularFrequency =
+      input.bobEnabled && movementMagnitude > Number.EPSILON
+        ? resolveCameraGaitAngularFrequency(
+            (movementSpeedRatio / PLAYER_WALK_SPEED_RATIO) * PLAYER_MOVE_SPEED_METERS_PER_SECOND,
+          )
+        : 0;
+    bobPhase += deltaSeconds * gaitAngularFrequency;
+    const gait = resolveCameraGaitOffsets(bobPhase, bobAmount);
     const breathlessness = 1 - oxygenRatio;
     const holdingBreath = input.holdingBreath === true && oxygenRatio > 0;
     const effectiveBreathlessness = holdingBreath ? 0 : breathlessness;
@@ -587,7 +700,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         (CAMERA_BREATHING_MAX_FREQUENCY - CAMERA_BREATHING_MIN_FREQUENCY) *
           effectiveBreathlessness);
     const breathingBob = Math.sin(breathingPhase) * breathingAmplitude;
-    const headBob = gaitBob + breathingBob;
+    const headBob = gait.headBob + breathingBob;
 
     const stability = resolveO2Stability({
       oxygenRatio,
@@ -605,6 +718,14 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     weightVelocity *= Math.exp(-CAMERA_WEIGHT_DAMPING * deltaSeconds);
     weightShift += weightVelocity * deltaSeconds;
     weightShift = clamp(weightShift, -0.45, 0.22);
+    const headBobPitch = clamp(
+      -(
+        weightVelocity * CAMERA_WEIGHT_PITCH_VELOCITY_SCALE +
+        weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
+      ),
+      -CAMERA_WEIGHT_PITCH_MAX,
+      CAMERA_WEIGHT_PITCH_MAX,
+    );
 
     let pendingRecoveryCount = 0;
     let recoveryYawVelocity = 0;
@@ -680,6 +801,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     offsets = {
       roll: shiftRoll,
       headBob,
+      headBobLateral: gait.headBobLateral,
+      headBobDepth: gait.headBobDepth,
+      headBobPitch,
       weightShift,
       verticalOffset: headBob + weightShift,
       recoilYaw,

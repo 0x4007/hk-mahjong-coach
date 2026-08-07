@@ -162,21 +162,26 @@
   decorative strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle
   a physics body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does
   not change its collision layout.
-- When airborne and moving into a nearby top edge, first-person movement checks ledge grab first, then low vault. A
-  valid target is kept on the supported surface, biased a short distance forward, and the controller eases the camera
-  and capsule over a brief climb arc rather than snapping dead-center. Ledge grabs retain their collision gate; low
-  vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier does not have to
-  report a separate contact first.
+- When airborne and moving into a nearby top edge, first-person movement uses one shared local-box vault resolver. The
+  legacy ledge-grab transition is disabled; vaulting owns tops from 0.15 m through 2.0 m above the approach feet for
+  authored and generated boxes alike. A valid target is kept on the supported surface, biased a short distance
+  forward, and the controller eases the camera and capsule over a continuous climb-over arc rather than snapping
+  dead-center. Duration maps from 0.04 s at leg height (0.45 m) to 1.0 s at 2.0 m, with the arc height using the same
+  height mapping. Vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier
+  does not have to report a separate contact first.
 - Tall walls use a separate traversal state. When horizontal movement is blocked by a real contact, a wall must be
   above the refined ledge-height window relative to the player's current feet, overlap the player's lateral reach,
-  and be within 0.5 m of the capsule front.
-  Wall-hang detection runs only after both ledge and low-vault checks have rejected the contact.
+  and be within 0.5 m of the capsule front. The resolver tests the approached face in each box's local horizontal
+  frame, so streamed rotated backdrop buildings use the same face and top that Rapier uses. Wall-hang detection runs
+  only after both ledge and low-vault checks have rejected the contact.
   The capsule is placed 0.27 m outside the approached face (radius plus separation), remains attached with gravity
-  suppressed, and climbs when forward or Space is pressed. The wall target scan includes streamed static boxes but
-  excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal so low
-  vault/ledge movement is not reclassified as a wall hang. The `?debug=1` climbing-gym preset places the player near
-  its tall wall; hold W and press Space while approaching to catch the upper face, release movement to hang, then
-  hold W or press Space to climb.
+  suppressed, and climbs when forward or Space is pressed. The top target keeps the tangent coordinate where the
+  player caught the wall; it does not slide to a skinny wall's centre. The wall target scan includes streamed static
+  boxes but excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal
+  so low vault/ledge movement is not reclassified as a wall hang. The live climb uses the same short smooth arc,
+  preserved momentum, and landing boost as vaulting, so the gun returns after the brief traversal instead of a long
+  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W and press Space while
+  approaching to catch the upper face, release movement to hang, then hold W or press Space to climb.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -191,12 +196,15 @@
 - Normal development mode reads that endpoint before constructing the 3D scene. This avoids a fresh-origin
   default-fog frame on a tunnel and keeps debug mode as the write path; the read is cache-busted, no-store,
   and bounded so a stalled tunnel still falls back to the normal scene.
-- The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
-  Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
-  jump apex. Double-tapping any WASD or arrow movement key engages a 3× sprint that remains active while any
-  movement key is held, so W→A/D/S direction transfers preserve sprint speed. If the player is crouched, that
-  same sprint request first performs the normal stand transition and then starts sprinting; the stand still costs
-  5 O₂, and an unaffordable transition leaves the player crouched.
+- The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.00 m eye height.
+  Standing movement starts at the 2×-base trot (6.8 m/s, 24.48 km/h) and slowly regenerates O₂. Shift keeps the
+  existing half-speed crouch movement and enables an internal walk-mode toggle; that toggle applies only after the
+  player is upright, where WASD/arrow input uses the 1×-base walk speed (3.4 m/s). Sprint clears the hidden toggle.
+  Space keeps the same quick airtime while doubling the jump apex. Double-tapping any WASD
+  or arrow movement key
+  engages the faster 3× sprint (10.2 m/s, 36.72 km/h) that remains active while any movement key is held, so W→A/D/S direction
+  transfers preserve sprint speed. A sprint request from crouch first performs the normal stand transition; the stand
+  still costs 5 O₂, and an unaffordable transition leaves the player crouched.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
@@ -234,6 +242,11 @@
   including the all-skyline and per-layer visibility switches. The panel's expanded/collapsed disclosure state
   is persisted separately in the same local storage so HMR and page reloads keep the chosen layout;
   `Reset debug defaults` restores the device-appropriate scene defaults and rewrites those preferences.
+- The debug panel's `Loaded areas` fieldset controls the Focus test zone, Mahjong penthouse, climbing gym,
+  parametric barracks, and target range independently. Turning an area off rebuilds the scene without that
+  authored root or its static colliders, so the area is unloaded rather than merely hidden. The selection is saved
+  in visual-debug settings and restored on reload. Re-enable the checkbox to construct the area again; its camera
+  quick action and preset remain disabled while it is unloaded.
 - The development map is divided into three independent ground-level play areas: the penthouse at the origin, the
   looking focus room 60 m east, and the climbing gym 60 m west. Each area is marked as a 50 m x 50 m square with a
   10 m open gap to its neighbor. Generated city buildings, props, windows, bridges, and beacons are rejected from
@@ -241,9 +254,9 @@
 - The `Focus calibration` debug preset now opens the looking focus room on the shared ground plane. The hallway still
   marks each metre from `0` through `2H` and places the close, halfway, hyperfocal, and double-hyperfocal targets,
   but the former elevated deck/ramp is no longer part of the navigation path.
-- The `Climbing gym` debug preset opens the west play area, where an expanded obstacle course now layers
-  compact ledges, support columns, and varying-height cross-beams for repeatable Mirror's Edge-style movement and
-  edge-grab tuning without sharing collision space with the penthouse or focus room.
+- The `Climbing gym` debug preset opens the west play area, which is intentionally reduced to one clear row of
+  measured vault-test blocks. The former authored runs, holds, columns, rails, and hang wall are neither rendered nor
+  collidable, so they cannot intersect or interrupt the block measurements.
 - The debug panel header is an accessible disclosure control. It opens by default on desktop and starts
   collapsed for coarse-pointer/mobile devices, preserving a compact scene view; expanding it reveals the
   same scrollable controls without changing their runtime state.
@@ -257,10 +270,11 @@
   regenerates a prior coordinate. Base geometry/materials remain shared and repeated forms use `InstancedMesh`,
   keeping the append-only world bounded by the explicit play-space limits. The streamed areas are South courtyard,
   West tea garden, East practice court, and North skybridge; the debug HUD reports the active area and loaded count.
-- The FPS play space uses five 100 m chunks from the origin in each direction, for a 1,000 m × 1,000 m navigable
-  world. The procedural backdrop doubles the per-chunk feature density for buildings, props, signs, and utility
-  posts, and weapon pickups use the same full-world bounds. Existing authored-area, world-bound, and focus-ramp
-  exclusion checks still guard every generated placement.
+- The FPS play space uses five 50 m chunks across each axis, for a compact 250 m × 250 m navigable world (±125 m from
+  the origin). The procedural backdrop keeps its seeded per-chunk feature-density multiplier for buildings, props,
+  signs, and utility posts, and weapon pickups use the same full-world bounds. The target range sits at the compact
+  map's southern training pad so every authored area remains reachable. Existing authored-area, world-bound, and
+  focus-ramp exclusion checks still guard every generated placement.
 - For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
   directory, then run:
 
@@ -304,11 +318,19 @@ off-axis `PerspectiveCamera` view offset as the FOV changes. The world point und
 in place during the zoom instead of shifting around the viewport center. The projection helper and its
 Three.js ray-preservation regression are covered by `apps/web/src/scene/mahjong-table.test.ts`.
 
+## World scale
+
+The first-person world uses the versioned `world-meters-v1` measurement contract: one Three.js/Rapier world unit is
+exactly one metre. Player capsule dimensions, the 1.75 m standing eye height, the 1.00 m crouch eye height, autostep,
+ground snap, jump speed, gravity, and collision tolerances come from `apps/web/src/scene/world-scale.ts`. Live Rapier,
+fallback physics, the movement simulator, and the debug camera consume the same values. The seated mahjong table camera
+is a presentation camera and is explicitly kept separate from the player's physical eye height.
+
 ## Wall hang and climb
 
-The movement CLI (`pnpm test:movement:sim`) models wall traversal after ledge and vault checks. A wall is
-eligible only when the player is airborne, its approached axis-aligned face is in front of the capsule, within
-0.5 m of the capsule front surface, laterally overlapped, above the ordinary ledge threshold, and no more than
+The movement CLI (`pnpm test:movement:sim`) models wall traversal after the shared vault check. A wall is
+eligible only when the player is airborne, its approached local face is in front of the capsule, within 0.5 m of the
+capsule front surface, laterally overlapped, above the ordinary ledge threshold, and no more than
 0.6 m above the capsule top. A thin platform underside may be just inside that same hand window; swept contact is
 snapped back to the near face instead of letting a jump pass through the edge. Wall entry is also gated by an
 airborne jump traversal state, so a ground-level run into any wall remains a normal collision; a five-metre wall is
@@ -317,41 +339,64 @@ The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01
 not embed the player in the collider. The helper scans all boxes and chooses the closest valid candidate.
 
 The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
-are suppressed. Forward or jump starts a climb that first raises the capsule until its bottom clears the wall top,
-then moves onto a collision-free top target. It becomes grounded only after that target has support. Samples emit
-`wallHang` only on the entry frame and expose `hanging`, `climbing`, and `traversalState` for later frames. JSON
-mode writes only the summary to stdout; the current Rapier package warning is emitted on stderr.
+are suppressed. Forward or jump starts the same vault-style short climb arc used by the browser controller, keeping
+the caught tangent coordinate and preserved momentum before a supported landing query. Samples emit `wallHang` only
+on the entry frame and expose `hanging`, `climbing`, and `traversalState` for later frames. JSON mode writes only the
+summary to stdout; the current Rapier package warning is emitted on stderr. The rotated-backdrop regression is
+`pnpm test:movement:sim scripts/movement-scenarios/wall-hang-generated-rotated-test.json --json`.
 
 The same traversal state is active in the live first-person browser controller. Open the `Climbing gym`
-debug preset from `?debug=1`; it starts on clear ground facing a dedicated tall training wall. Click the scene to
-capture pointer lock, hold `W`, and press `Space` while approaching so the jump reaches the wall's upper face (or
-use the touch joystick and Jump action). The capsule attaches to the near face without gravity, remains hanging
-while forward is released, and starts a staged climb when forward is pressed again or `Space`/the mobile Jump
-action is used. A ground-level collision with the base of a wall does not attach, even when its top is within the
-height window; the player must be airborne and near the top. A brief
-settle beat prevents the approach input from making the hang invisible; holding forward continues into the climb
-after that beat.
-Backward input releases the hang. The climb lifts above the obstacle before crossing onto its top and asks Rapier
-for the final supported position instead of marking the player grounded in midair.
+debug preset from `?debug=1`; it starts on clear ground facing the measured block row. Click the scene to capture
+pointer lock, hold `W`, and press `Space` while approaching a selected block (or use the touch joystick and Jump
+action). The capsule attaches to a valid airborne edge without gravity, remains hanging while forward is released,
+and starts a vault-style climb when forward is pressed again or `Space`/the mobile Jump action is used. The row
+includes blocks from 0.10 m through 5.00 m in 0.10 m increments, each with a height label. The gym uses a 1.75 m
+standing-eye reference (separate from the elevated mahjong table camera), so the 2.00 m block is visibly above the
+player's head; blocks above 2.00 m are high-obstacle stress tests beyond the current vault window. The CLI regression for
+the full-height timing is
+`pnpm test:movement:sim scripts/movement-scenarios/vault-2m-test.json --json`.
+Backward input releases the hang. The climb follows the vault arc and asks Rapier for the final supported position
+instead of marking the player grounded in midair.
 
 ## Centralized camera motion and landing weight
 
 First-person presentation motion lives in `apps/web/src/scene/camera-motion.ts`. The scene sends one
-input frame to that damper after physics resolves the base camera position. Lateral weight shift, gait
-bob, jump lift, and landing response are combined into one vertical/roll output, and the reticule uses
-the same output for aim feedback.
+input frame to that damper after physics resolves the base camera position. Lateral weight shift, three-axis
+footfall-shaped gait bob, jump lift, and landing response are combined into one camera/viewmodel output. The reticule and
+aim ray consume the same lateral, vertical, and acceleration-pitch response.
+
+The running stride uses a smooth lateral sine with a parabolic vertical relationship, producing a U-shaped path
+instead of a circular orbit. Breathing and jump/landing responses remain additive.
+
+Gait intensity uses the normalized movement magnitude and speed ratio. The formula is
+`magnitude × speedRatio × (1 + 0.6 × sprintBlend)`, where `sprintBlend` maps the walk ratio (1/3) to the
+full sprint ratio (1). This keeps walk at 0.33×, raises trot to about 0.87×, and reaches 1.6× at sprint;
+the existing 12/s damper returns that amplitude toward zero when movement stops. Crouching applies the existing
+0.7 posture factor. Because this is a camera-motion input, the stronger sprint response reaches the camera,
+held viewmodel, reticule, and aim ray together.
+
+The gait phase is now measured from speed instead of a fixed oscillator. For the 1.85 m player at the 3.4 m/s
+walk speed, the Alexander-style calculation uses a 0.9805 m hip height and produces a 2.376 m same-foot stride,
+or a 1.188 m alternating step. That is 2.862 steps/second (0.349 s per step); the U phase advances at `π ×
+stepsPerSecond`, so each vertical dip corresponds to one foot contact. Other speeds recompute the stride from the
+same relation. The phase stops advancing when movement magnitude is zero.
 
 Jump lift is driven by the launch velocity. Landing dip is driven by the instantaneous downward velocity
 and the support-stop acceleration (`velocity / frame delta`), so a building fall produces a deeper response
-than a normal jump and a harder stop at the same velocity dips further. The spring is capped to keep the
-camera readable; Rapier or the deterministic fallback remains authoritative for the player position.
+than a normal jump and a harder stop at the same velocity dips further. Take-off pitches up and landing
+deceleration pitches down through the same bounded spring. Gait lateral/depth offsets are composed into the
+render matrix only, so Rapier or the deterministic fallback remains authoritative for the player position.
 Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
 ## Oxygen vital and breathing response
 
 The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
 `apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
-Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking keeps the reserve flat and does not recharge it while movement is active. A full jump and each transition from crouch to standing costs 5 points, so roughly 20
+Standing idle restores 12 points per second. The normal standing trot is exactly twice the 3.4 m/s base (6.8 m/s,
+24.48 km/h), maps halfway between walk and sprint, and recovers about 2.33 O₂ points per second while moving.
+Crouch walking keeps the reserve flat and does not recharge it while movement is active. Sprinting drains 3.33 points
+per second (about 30 seconds from full). A full jump and each transition from
+crouch to standing costs 5 points, so roughly 20
 consecutive full jumps empty the reserve.
 
 Sprint recovery waits 1.5 seconds, recovery after crouch walking waits 0.5 seconds, and jump recovery waits 0.25
@@ -362,11 +407,11 @@ HUD bar.
 O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. If the reserve
 cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
 balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
-The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. Sprinting is allowed only when the current
-frame's drain is affordable. When it is not (including at 0%), the controller falls back to a neutral jog rather
-than stopping movement. The neutral blend is derived from the configured walking recovery (+8/s) and sprint drain
-(-3.33/s): `8 / (8 + 3.33) = 70.6%` of the walk-to-sprint interval, or about `80.4%` of full sprint speed. At
-that speed, movement keeps O₂ at a 0-point-per-second delta (subject to the existing recovery delay after sprinting).
+The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. The normal standing
+speed is the 2×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
+frame's drain is affordable. When it is not (including at 0%), the controller stays at the same 2×-base trot rather
+than stopping movement. The trot's midpoint walk-to-sprint blend combines the configured walking recovery (+8/s) and
+sprint drain (-3.33/s) into about +2.33 O₂/s while moving (subject to the existing recovery delay after sprinting).
 Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
 stops when the reserve reaches zero.
 
@@ -473,7 +518,7 @@ regressions.
 
 The scene applies damage from collision delta-v rather than raw travel speed. A wall impact compares the
 requested horizontal velocity with the velocity Rapier resolves after contact; penetration correction cannot
-create more delta-v than the player carried into the wall. Sprint speed (10.2 m/s, about 36.7 km/h) and below
+create more delta-v than the player carried into the wall. Sprint speed (10.2 m/s, exactly 36.72 km/h) and below
 is always harmless. Above that limit, a kinetic-energy-shaped km/h curve scales damage, reaching 200 damage
 at an approximate 200 km/h human terminal velocity. Landing damage uses the same curve on the downward
 velocity lost at impact, so a ledge fall whose downward speed stays at sprint speed or below does no damage.
@@ -491,15 +536,22 @@ Each normalized room seed produces one starter pistol in the penthouse and a det
 of pistol, shotgun, machine gun, and sniper pickups. The penthouse also stages one visible pickup of each type
 around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
 physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
+Procedural outdoor placements are density-capped at one pickup in each pickup's 50 m horizontal-radius circle:
+candidate positions must be at least 50 m apart, and a constrained world omits a requested pickup rather than
+placing it closer.
+The table-side starter set and the 24-profile parametric barracks are authored test displays and remain exempt from
+this outdoor-world cap.
 
-The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
-gun, and E equips the nearest pickup while stopped; number keys or Q switch
-owned weapons, 0 holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
+The browser mount owns the presentation combat state: walking through 3.5 m of a pickup stores the nearest gun in the
+first free slot and only equips it when the player's hands are empty; E intentionally equips the nearest pickup, or
+swaps it with the held gun when the two slots are full. A full inventory makes walk-over pickup a no-op. Number keys
+select owned slots, Q throws the active instance forward while inheriting the player's current movement velocity, 0
+holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
 Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. All four procedural gun
 models use a shared near-black finish across their bodies, barrels, sights, and accent details. Each weapon has a
 distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
 projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
-recoil, ammo, reload state, and a four-slot HUD make the loop visible. Shot raycasts stay on authored
+recoil, ammo, reload state, and a two-slot HUD make the loop visible. Shot raycasts stay on authored
 scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss. Hitscan shots
 have no weapon-specific distance cap: they continue to the first render surface, while a miss tracer uses only the
 camera's finite far plane to keep its presentation geometry finite.
@@ -643,10 +695,10 @@ authority; it only keeps the viewmodel out of the way during parkour movement. C
 
 ## Reload movement
 
-Reloading caps the speed the player was requesting at the existing oxygen-neutral “trot” rather than forcing every
-movement input to that speed. Walking therefore stays at walk speed; a sprint request is reduced to trot for the
-reload sequence and then resumes full sprint only when the next O₂ drain slice is affordable. If the reserve cannot
-pay that slice, movement falls back to the neutral jog. Crouch speed remains the higher-priority posture limit.
+Reloading caps a full-sprint request at the existing 2×-base “trot”. Normal standing movement already uses that trot,
+and crouch movement keeps its slower walk speed. Full sprint resumes only when the next O₂ drain slice is affordable;
+if the reserve cannot pay that slice, movement stays at the 2×-base trot. Crouch speed remains the higher-priority
+posture limit.
 
 When development debug mode is enabled (`?debug=1`), the browser shows a small bottom-left `SPD` readout in metres
 per second. It consumes the scene's damped horizontal velocity and is throttled to about 10 updates per second; on
@@ -806,3 +858,70 @@ aim sway, head bob, roll, recoil, recovery, and the camera-attached viewmodel th
 path. This prevents the weapon sights from drifting away from the reticule when O₂ is low. The machine gun and other
 ordinary weapons still use the deterministic live ray with no random projectile cone; only the shotgun has inherent
 seeded pellet spread.
+
+## Generic parametric gun inventory
+
+Gun profiles are resolved from `GunPrimitivesV1` by the pure `v1` resolver. The resolver exposes canonical group,
+burst, magazine, inventory, cadence, reload, handling, recoil, movement, and heat inputs, then hashes the resolved
+profile. Generated profiles use the deterministic stream
+`<roomSeed>|weapons|generation|<formulaVersion>|<gunSeed>` and carry the formula version, profile hash, and generator
+seed into playtest state.
+
+The runtime stores `GunInstance` records in a two-slot generic inventory. A slot contains only a slot index and a gun
+instance ID; the instance carries its resolved profile, loaded and reserve ammunition, and temperature. Number keys
+select slots, `0` holsters, and `Q` throws the active instance. A thrown pickup inherits the player's sprint, strafe,
+and jump velocity, follows a short gravity arc, and ejects at least 1 m forward when stationary. It cannot be
+walk-over-collected again until the player leaves its pickup radius. A gun displaced by a full-inventory `E` swap uses
+the same walk-over protection, while `E` can still swap back immediately. The exact instance ID, profile hash, generator
+seed, ammunition, and temperature remain intact. The drop position raycasts against visible scene geometry and tries
+deterministic angled fallbacks so a wall does not absorb the pickup. Walk-over pickup inserts into the first free slot
+without displacing the held gun; an explicit `E` equips a nearby pickup, or swaps it with the held gun when both slots
+are full. Fire, reload, pickup, and drop are unavailable during a switch transition, and dropping clears
+reload/switch presentation state. A dropped gun's current temperature is also applied to both the pickup barrel and
+the held model when it changes hands.
+
+The browser HUD consumes only `WeaponStateSnapshot` slot records and the generic nearby-pickup snapshot. It does not
+look up a concrete weapon ID to decide inventory or firing behavior. Fixture names remain available for the armory
+chart and seeded visual test placements, but they are ordinary profile data rather than runtime branches.
+
+The v1 profile resolver also publishes sustained damage, shared live-reticule spread modifiers for zoom/movement/
+posture/heat/recovery, oxygen and reload workload, reserve-pressure rate, and a derived audio profile. Generated
+profiles retain the exact versioned generation stream and expose a redacted latent receipt. Bounded tradeoff checks and
+Pareto filtering keep several useful damage/accuracy/mobility/reload choices instead of collapsing them into one score;
+the heavy-turret envelope is only a generic sampling utility.
+
+Resolved profiles are re-derived and hash-checked before `GunInstance` creation, and each instance retains the exact
+primitive input alongside its resolved profile. Round and belt feeding keep the full-magazine reload workload in
+`reloadSeconds` while using a derived per-round or segment interval for partial-capacity loading and interruption.
+Sustained damage uses the full reload workload for both feed styles.
+
+`GunPlaytestTelemetryV1` is an immutable reducer used by the runtime and local harness. It records first-shot timing,
+hit intervals and rate, posture/distance hit-rate summaries, damage/DPS, recoil/recovery, movement speed and aim
+penalty, heat/glow/smoke, reload duration and interruption rate, ammunition/O₂ use, engagement range, misses, empty
+magazines, deaths, and optional power/control/clarity/fun ratings.
+The loadout HUD's profile inspection disclosure renders the active profile hash/seed and a compact subset of these
+derived values.
+
+Generated profiles also receive a deterministic memorable name such as
+`True Ember · K7M4Q2`. The adjective comes from the strongest latent tradeoff,
+the noun reflects the feed style, and the six-character code comes from the
+separate name stream `<roomSeed>|weapons|name|v1|<gunSeed>`. Submachine variants
+append `|submachine` before the gun seed. Names are safe presentation metadata
+and are included in the generation receipt; the profile hash, room seed, gun
+seed, and formula version remain the canonical identity to record when a tester
+reports a favorite. Passing `displayName` to the generator keeps an explicit
+tester label unchanged.
+
+The development scene stages 24 generated profiles (`catalog-001` through
+`catalog-024`) in a walkable parametric barracks for each room seed. The debug
+panel has direct `Parametric barracks` and `Target range` presets. The target
+range provides four labeled live-fire distances (8 m, 16 m, 24 m, and 32 m), so
+testers can equip a named profile, use the same reticule/fire/reload path, and
+compare the resulting hit marks and telemetry. The existing 13 fixture pickup
+instances (four table-side and nine outdoor) remain in the same generic pickup
+runtime, for 37 visible pickup instances in the default scene.
+
+Twelve of the 24 generated catalog entries use a deterministic submachine
+envelope: compact clip feed, one projectile per trigger pull, high cadence,
+moderate spread, and light handling. The archetype is a generator sampling
+choice only; the runtime still consumes generic resolved profiles.
