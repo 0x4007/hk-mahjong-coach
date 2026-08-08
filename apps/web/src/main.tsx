@@ -44,8 +44,9 @@ import {
   VISUAL_SCENE_AREA_IDS,
 } from "./scene/mahjong-table.js";
 
-const DEBUG_PANEL_ENABLED =
-  import.meta.env.DEV && new URLSearchParams(window.location.search).has("debug");
+// The checkpoint server serves a production bundle on a local port. Keep the
+// explicit query opt-in usable there as well as in Vite development mode.
+const DEBUG_PANEL_ENABLED = new URLSearchParams(window.location.search).has("debug");
 const VISUAL_QUALITY_MODE_STORAGE_KEY = "hk-mahjong-coach:visual-quality-mode:v1";
 
 const debugCameraPresets: readonly {
