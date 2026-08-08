@@ -575,6 +575,9 @@ damages the player's shield/health at contact range, accepts weapon-ray damage, 
 short delay. This target is local presentation state for gun testing; it is not authoritative game, replay, or multiplayer
 state. The parametric-guns movement, traversal, acceleration, and wall/vault physics remain the active movement path.
 
+The world fog pass is disabled. Existing debug preference snapshots that contain a fog value are normalized to zero and
+cannot re-enable fog.
+
 The fixed roster is covered by `apps/web/src/scene/weapons.test.ts`, including six-key mapping, reload formulas,
 spread, pickup placement, audio profiles, Celsius cooling, and smoke-pool clearing. Browser rendering and audio acceptance
 remain pending because this checkpoint does not open a second browser session.

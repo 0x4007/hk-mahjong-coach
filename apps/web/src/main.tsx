@@ -582,9 +582,6 @@ const VisualDebugPanel = ({
   const setToneMapper = (toneMapper: VisualToneMapper): void => {
     applyDebugChange(() => mount.debug.setToneMapper(toneMapper));
   };
-  const setFogDensity = (density: number): void => {
-    applyDebugChange(() => mount.debug.setFogDensity(density));
-  };
   const setSunDirection = (yaw: number, elevation: number): void => {
     applyDebugChange(() => mount.debug.setSunDirection(yaw, elevation));
   };
@@ -934,17 +931,6 @@ const VisualDebugPanel = ({
               </option>
             ))}
           </select>
-        </label>
-        <label>
-          Fog density <output>{snapshot.fogDensity.toFixed(3)}</output>
-          <input
-            max="0.04"
-            min="0"
-            onChange={(event) => setFogDensity(Number(event.currentTarget.value))}
-            step="0.001"
-            type="range"
-            value={snapshot.fogDensity}
-          />
         </label>
         <fieldset>
           <legend>Sun rig</legend>

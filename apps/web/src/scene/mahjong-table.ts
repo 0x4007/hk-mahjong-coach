@@ -10155,7 +10155,9 @@ export const createMahjongTableScene = (
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
-  scene.fog = new THREE.Fog(COLORS.haze, 10, 34);
+  // Keep the world fully clear. The legacy debug preference is still read for
+  // snapshot compatibility, but it can no longer attach a fog pass.
+  scene.fog = null;
   const camera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
   // This camera is deliberately not added to the scene graph. When the optic
   // is active it copies the live player pose, rotates onto the reticule ray,
@@ -10349,7 +10351,7 @@ export const createMahjongTableScene = (
   let cyanMaterialBaseIntensity = new Map<THREE.MeshStandardMaterial, number>();
   let activeDebugPreset: VisualCameraPreset | null = null;
   let debugFovOverride: number | null = null;
-  let debugFogDensity = 0.028;
+  let debugFogDensity = 0;
   let debugSunYaw = -0.59;
   let debugSunElevation = 0.86;
   let debugSunIntensity = 2.2;
@@ -11858,17 +11860,9 @@ export const createMahjongTableScene = (
     persistDebugPreferences();
   };
 
-  const setDebugFogDensity = (density: number): void => {
-    debugFogDensity = THREE.MathUtils.clamp(density, 0, 0.04);
-    if (debugFogDensity === 0) {
-      scene.fog = null;
-      persistDebugPreferences();
-      return;
-    }
-    const nextFog = scene.fog instanceof THREE.Fog ? scene.fog : new THREE.Fog(COLORS.haze, 10, 34);
-    scene.fog = nextFog;
-    nextFog.far = THREE.MathUtils.clamp(46 - debugFogDensity * 666.6667, 14, 44);
-    nextFog.near = THREE.MathUtils.clamp(nextFog.far * 0.3, 4, 12);
+  const setDebugFogDensity = (_density: number): void => {
+    debugFogDensity = 0;
+    scene.fog = null;
     persistDebugPreferences();
   };
 
@@ -12078,7 +12072,7 @@ export const createMahjongTableScene = (
     fov: DEBUG_STANDING_FOV,
     exposure: 1.02,
     toneMapper: "agx",
-    fogDensity: 0.028,
+    fogDensity: 0,
     sunYaw: -0.59,
     sunElevation: 0.86,
     sunIntensity: 2.2,

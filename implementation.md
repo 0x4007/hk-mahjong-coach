@@ -21,6 +21,8 @@
   no-op and is not advertised in the HUD.
 - A deterministic red simulant is spawned at a safe distance, charges the player, takes hits from the weapon ray, deals
   close-range damage, and respawns after defeat. This is a local presentation target, not authoritative game state.
+- Scene fog is disabled in the renderer and the legacy persisted fog preference is forced to zero, so saved debug
+  settings cannot restore the effect.
 - The checkpoint test-bus run recorded 463/468 passing assertions. The five failures were the pre-existing core-engine
   and simulation property cases that also fail in the occupied parametric-guns lane; all weapon and scene focused
   assertions passed. The final powder/thermal smoke split was applied after that snapshot; the follow-up strict
