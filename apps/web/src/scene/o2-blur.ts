@@ -12,10 +12,11 @@ export const O2_BLUR_VERTEX_SHADER = /* glsl */ `
 `;
 
 /**
- * A nine-tap Gaussian-shaped blur and black radial vignette. The blur uniform
- * is in physical pixels, so the scene can keep its requested one-pixel normal
- * view and two-pixel zoom maximum on standard and high density displays. The
- * vignette is applied in scene-linear space before OutputPass.
+ * A nine-tap Gaussian-shaped blur and colour-configurable radial vignette.
+ * The O₂ pass supplies black; damage passes supply blue or red. The blur
+ * uniform is in physical pixels, so the scene can keep its requested one-pixel
+ * normal view and two-pixel zoom maximum on standard and high density displays.
+ * The vignette is applied in scene-linear space before OutputPass.
  */
 export const O2_BLUR_FRAGMENT_SHADER = /* glsl */ `
   uniform sampler2D tDiffuse;
@@ -23,6 +24,7 @@ export const O2_BLUR_FRAGMENT_SHADER = /* glsl */ `
   uniform vec2 uVignetteCenter;
   uniform float uBlurPixels;
   uniform float uVignetteStrength;
+  uniform vec3 uVignetteColor;
 
   varying vec2 vUv;
 
@@ -66,39 +68,44 @@ export const O2_BLUR_FRAGMENT_SHADER = /* glsl */ `
       0.0,
       1.0
     );
-    color.rgb = mix(color.rgb, vec3(0.0), vignetteBlend);
+    color.rgb = mix(color.rgb, uVignetteColor, vignetteBlend);
     gl_FragColor = color;
   }
 `;
 
+export type DamageVignetteKind = "shield" | "health";
+
+/** One point of lost shield or health contributes one percentage point of opacity. */
+export const DAMAGE_VIGNETTE_OPACITY_PER_POINT = 0.01;
+
+/** Each hit fades independently so closely spaced hits remain visibly layered. */
+export const DAMAGE_VIGNETTE_PULSE_DURATION_SECONDS = 0.5;
+
+const DAMAGE_VIGNETTE_COLORS: Readonly<Record<DamageVignetteKind, number>> = {
+  shield: 0x168fff,
+  health: 0xf04444,
+};
+
 const getUniforms = (pass: ShaderPass): Record<string, { value?: unknown } | undefined> =>
   pass.uniforms;
 
-/** Create the pass once and update its size and radius as the viewport changes. */
-export const createO2BlurPass = (): ShaderPass =>
+const createVignettePass = (name: string, color: THREE.Color, strength: number): ShaderPass =>
   new ShaderPass({
-    name: "O2FatigueBlur",
+    name,
     uniforms: {
       tDiffuse: { value: null },
       uResolution: { value: new THREE.Vector2(1, 1) },
       // The default matches the reticule's 50% horizontal / 60% top offset.
       uVignetteCenter: { value: new THREE.Vector2(0.5, 0.4) },
       uBlurPixels: { value: 0 },
-      uVignetteStrength: { value: 0 },
+      uVignetteStrength: { value: Number.isFinite(strength) ? Math.max(0, strength) : 0 },
+      uVignetteColor: { value: color },
     },
     vertexShader: O2_BLUR_VERTEX_SHADER,
     fragmentShader: O2_BLUR_FRAGMENT_SHADER,
   });
 
-export const setO2BlurPassSize = (pass: ShaderPass, width: number, height: number): void => {
-  const resolution = getUniforms(pass).uResolution?.value;
-  if (resolution instanceof THREE.Vector2) {
-    resolution.set(Math.max(1, width), Math.max(1, height));
-  }
-};
-
-/** Keep the vignette origin aligned with the live reticule in screen UV space. */
-export const setO2BlurPassCenter = (pass: ShaderPass, x: number, y: number): void => {
+const setVignettePassCenter = (pass: ShaderPass, x: number, y: number): void => {
   const center = getUniforms(pass).uVignetteCenter?.value;
   if (center instanceof THREE.Vector2) {
     center.set(
@@ -108,7 +115,14 @@ export const setO2BlurPassCenter = (pass: ShaderPass, x: number, y: number): voi
   }
 };
 
-export const setO2BlurPassPixels = (pass: ShaderPass, blurPixels: number): void => {
+const setVignettePassSize = (pass: ShaderPass, width: number, height: number): void => {
+  const resolution = getUniforms(pass).uResolution?.value;
+  if (resolution instanceof THREE.Vector2) {
+    resolution.set(Math.max(1, width), Math.max(1, height));
+  }
+};
+
+const setVignettePassPixels = (pass: ShaderPass, blurPixels: number): void => {
   const uniforms = getUniforms(pass);
   const normalizedPixels = Number.isFinite(blurPixels) ? Math.max(0, blurPixels) : 0;
   if (typeof uniforms.uBlurPixels?.value === "number") {
@@ -117,9 +131,67 @@ export const setO2BlurPassPixels = (pass: ShaderPass, blurPixels: number): void 
   pass.enabled = normalizedPixels > 0.001;
 };
 
-export const setO2BlurPassVignette = (pass: ShaderPass, strength: number): void => {
+const setVignettePassStrength = (pass: ShaderPass, strength: number): void => {
   const uniform = getUniforms(pass).uVignetteStrength;
   if (typeof uniform?.value === "number") {
     uniform.value = Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0;
   }
 };
+
+/** Create the pass once and update its size and radius as the viewport changes. */
+export const createO2BlurPass = (): ShaderPass => {
+  const pass = createVignettePass("O2FatigueBlur", new THREE.Color(0x000000), 0);
+  pass.enabled = false;
+  return pass;
+};
+
+export const setO2BlurPassSize = (pass: ShaderPass, width: number, height: number): void => {
+  setVignettePassSize(pass, width, height);
+};
+
+/** Keep the vignette origin aligned with the live reticule in screen UV space. */
+export const setO2BlurPassCenter = (pass: ShaderPass, x: number, y: number): void => {
+  setVignettePassCenter(pass, x, y);
+};
+
+export const setO2BlurPassPixels = (pass: ShaderPass, blurPixels: number): void => {
+  setVignettePassPixels(pass, blurPixels);
+};
+
+export const setO2BlurPassVignette = (pass: ShaderPass, strength: number): void => {
+  setVignettePassStrength(pass, strength);
+};
+
+/** Convert the vitals delta for one hit into the requested vignette opacity. */
+export const resolveDamageVignetteOpacityFromDelta = (delta: number): number => {
+  if (!Number.isFinite(delta) || delta <= 0) {
+    return 0;
+  }
+  return Math.min(1, delta * DAMAGE_VIGNETTE_OPACITY_PER_POINT);
+};
+
+/** Fade one damage layer without changing the opacity assigned to later hits. */
+export const resolveDamageVignettePulseOpacity = (
+  initialOpacity: number,
+  elapsedSeconds: number,
+): number => {
+  const opacity = Number.isFinite(initialOpacity) ? Math.min(1, Math.max(0, initialOpacity)) : 0;
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const remaining = Math.max(0, 1 - elapsed / DAMAGE_VIGNETTE_PULSE_DURATION_SECONDS);
+  return opacity * remaining;
+};
+
+/** Create a radial damage layer using the same reticule-centred geometry as O₂. */
+export const createDamageVignettePass = (
+  kind: DamageVignetteKind,
+  damageDelta: number,
+): ShaderPass =>
+  createVignettePass(
+    kind === "shield" ? "ShieldDamageVignette" : "HealthDamageVignette",
+    new THREE.Color(DAMAGE_VIGNETTE_COLORS[kind]),
+    resolveDamageVignetteOpacityFromDelta(damageDelta),
+  );
+
+export const setDamageVignettePassSize = setVignettePassSize;
+export const setDamageVignettePassCenter = setVignettePassCenter;
+export const setDamageVignettePassStrength = setVignettePassStrength;

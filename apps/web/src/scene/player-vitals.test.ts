@@ -19,6 +19,7 @@ import {
   O2_PROJECTILE_DAMAGE_FACTOR,
   O2_STAND_COST,
   O2_SPRINT_DRAIN_PER_SECOND,
+  O2_SPRINT_DURATION_SECONDS,
   O2_SPRINT_RECOVERY_DELAY_SECONDS,
   O2_WALKING_RECOVERY_PER_SECOND,
   SHIELD_RECHARGE_DELAY_SECONDS,
@@ -317,6 +318,24 @@ describe("player vitals model", () => {
       8,
     );
     expect(full.o2).toBe(PLAYER_MAX_O2);
+  });
+
+  it("recovers while the failed sprint fallback keeps moving at trot", () => {
+    const exhausted = tickPlayerVitals(createPlayerVitals(), O2_SPRINT_DURATION_SECONDS, {
+      exerciseIntensity: 1,
+      movementMagnitude: 1,
+      locomotionBlend: 1,
+      sprinting: true,
+    });
+    const trot = tickPlayerVitals(exhausted, O2_SPRINT_RECOVERY_DELAY_SECONDS + 1, {
+      exerciseIntensity: 0.5,
+      movementMagnitude: 1,
+      locomotionBlend: O2_TROT_SPEED_BLEND,
+      walking: true,
+    });
+
+    expect(exhausted.o2).toBe(0);
+    expect(trot.o2).toBeGreaterThan(exhausted.o2);
   });
 
   it("ignores invalid or empty damage without resetting the recharge clock", () => {

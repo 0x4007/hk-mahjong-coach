@@ -39,6 +39,7 @@ import {
   resolveHumanEyePupilDiameter,
   resolveCrouchedStateAfterJump,
   resolveCrouchedStateAfterSprint,
+  resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
   resolveJumpLaunchSpeed,
   resolveReticleZoomViewOffset,
@@ -97,6 +98,12 @@ class MemoryStorage implements Storage {
 }
 
 describe("player movement speed", () => {
+  it("ends the sprint request when its O₂ slice is unaffordable", () => {
+    expect(resolveSprintRequestAfterO2Check(true, false)).toBe(false);
+    expect(resolveSprintRequestAfterO2Check(true, true)).toBe(true);
+    expect(resolveSprintRequestAfterO2Check(false, false)).toBe(false);
+  });
+
   it("defaults standing movement to the 1.5-times-base trot and keeps crouch in walk mode", () => {
     const defaultStanding = resolvePlayerMovementSpeedMultiplier({
       crouching: false,

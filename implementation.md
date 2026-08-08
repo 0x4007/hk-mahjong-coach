@@ -17,6 +17,14 @@
 
 Milestone 5 — Persistence and replay repairs and acceptance.
 
+## 2026-08-08 — O₂ sprint failure returns to recoverable trot
+
+- An O₂-unaffordable sprint now clears the persistent sprint request instead of retrying on every frame as soon as one
+  drain slice becomes available. The player remains at the configured trot, so the existing sprint recovery delay can
+  finish and the reserve can replenish while movement continues.
+- A fresh movement double-tap starts sprinting again after the fallback; reload-gated sprint requests keep their existing
+  reload behavior. Added focused movement and player-vitals regressions for the failed-sprint transition and trot recovery.
+
 ## 2026-08-08 — Sprint interrupts reload
 
 - Accepted sprint requests now call the weapon runtime's explicit reload interruption path. Clip reloads stop before their
@@ -58,8 +66,29 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   roll magnitude at a 60 m/s² reference acceleration, so it is intentionally simple and easy to tune.
 - The input now also receives one bounded front/back impulse when physics resolves a horizontal wall stop. Requested
   and resolved horizontal velocity are compared, limited to the speed the player carried, projected onto camera-forward,
-  and sent through the same damper; repeated contact frames do not retrigger the impact. Side-impact roll remains a
-  later extension, while camera, viewmodel, reticule, and aim ray stay on the centralized output.
+  and sent through the same damper; repeated contact frames do not retrigger the impact. At this checkpoint, the
+  side-impact component was still deferred, while camera, viewmodel, reticule, and aim ray stayed on the centralized
+  output.
+
+## 2026-08-08 — Local acceleration vector
+
+- Replaced the camera damper's separate forward-acceleration input with one typed local horizontal acceleration vector.
+  The controller derives right and forward components from the actual damped velocity changes before physics resolves
+  the requested move.
+- The shared damper maps the vector's forward component to pitch and its right component to inertial roll. The legacy
+  direction-change sprint roll path is removed; acceleration is now the sole horizontal roll source, preserving the
+  accepted response scale without additive double-rolling on strafe reversals.
+- Wall delta-v now contributes both local components at contact onset. A side-on stop can therefore roll the view while
+  a head-on stop pitches it down, and camera, viewmodel, reticule, and aim ray continue to consume the composed output.
+  Vertical jump and landing impulses remain explicit for the next traversal integration pass.
+
+## 2026-08-08 — Airborne reticule gait suppression
+
+- The shared camera damper now receives the physics-resolved grounded state and suppresses footfall gait output
+  while the player is airborne or in a vault/wall traversal. This removes running-style vertical, lateral, and depth
+  impulses from the reticule while preserving jump lift, landing response, breathing, aim sway, and acceleration.
+- Added a camera-motion regression that keeps gait on supported ground, removes it in the air, and confirms the jump
+  weight response remains active.
 
 ## 2026-08-07 — Two-times-base trot and slow O₂ recovery
 
@@ -425,6 +454,18 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   geometry that could overlap the measured bounds.
 - Kept one shared block definition for rendering and collision, so each visible height label corresponds to the exact
   collider used by the vault resolver.
+
+## 2026-08-08 — Height-matched traversal weapon lowering
+
+- The centralized camera-motion damper now receives the resolved vault or wall-climb duration and advances the gun
+  faster-starting 2x curve over the full interval instead of using the fixed 0.18 s weapon-switch timing; it reaches
+  the target only at the end of the climb, so there is no mid-traversal bottom clamp.
+- Vaults use a shallow 20% of the normal lower pose. Wall climbs scale from a shallow minimum to the full pose at
+  a four-metre block, using the block's full collider height rather than only the remaining vertical arc.
+- Wall hanging alone leaves the gun raised; the lower phase starts when the climb arc starts and raises from the
+  exact pose reached at release. Firing, reload, pickup, and drop remain locked until the shared raise phase is idle;
+  weapon switching keeps its existing full lower/raise behavior.
+- Added camera-motion regressions for duration matching, shallow vault lowering, and full four-metre wall-climb lowering.
 
 ## Next action
 
@@ -1280,3 +1321,18 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - The O₂-neutral trot remains derived from the same walking-recovery/sprint-drain
   blend and now resolves to 8.2 m/s (29.52 km/h). Updated the world-scale and
   movement regressions plus the active documentation and impact-speed description.
+
+## 2026-08-08 — Layered shield and health damage vignettes
+
+- Reused the O₂ post-processing vignette shader, reticule-centred UV origin, aspect-correct radial falloff, and
+  scene-linear placement before `OutputPass` for incoming damage feedback.
+- Each shield or health delta creates its own short-lived pass. One lost point maps to `0.01` initial opacity; shield
+  damage is blue and health damage is red. Independent layers fade over `0.5` seconds, so rapid hits composite
+  naturally instead of replacing the previous strike.
+- Overflow damage creates both layers when shields and health decrease in the same event. Vignette layers clear on
+  vitals reset and dispose cleanly with the scene. The active layer count is exposed as
+  `data-player-damage-vignette-layers` for local diagnostics.
+- Validation: strict typecheck, production web build, targeted ESLint, Prettier, and `git diff --check` pass. The
+  latest server-owned bus snapshot (`1786149860791-25084-75af1ee4`) passed 471/472 assertions, including all three
+  damage-vignette tests; the one failure is the unrelated `packages/test-fixtures` core-engine property test.
+  Browser interaction is not opened in this lane.

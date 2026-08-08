@@ -117,15 +117,24 @@ import {
   resolveCameraViewmodelTransition,
   type CameraViewmodelOffset,
   type CameraViewmodelTransition,
+  type CameraLocalAcceleration,
   type CameraMotionOffsets,
   type CameraMotionUpdateInput,
 } from "./camera-motion.js";
 import {
+  createDamageVignettePass,
   createO2BlurPass,
+  DAMAGE_VIGNETTE_PULSE_DURATION_SECONDS,
+  resolveDamageVignetteOpacityFromDelta,
+  resolveDamageVignettePulseOpacity,
+  setDamageVignettePassCenter,
+  setDamageVignettePassSize,
+  setDamageVignettePassStrength,
   setO2BlurPassCenter,
   setO2BlurPassPixels,
   setO2BlurPassSize,
   setO2BlurPassVignette,
+  type DamageVignetteKind,
 } from "./o2-blur.js";
 import { isPlayerTouchingWall } from "./wall-contact.js";
 import {
@@ -244,6 +253,12 @@ export const resolveCrouchedStateAfterSprint = (
   isCrouched: boolean,
   sprintAccepted: boolean,
 ): boolean => (sprintAccepted ? false : isCrouched);
+
+/** An O₂-unaffordable sprint falls back to trot until a new sprint starts. */
+export const resolveSprintRequestAfterO2Check = (
+  sprintRequested: boolean,
+  sprintAccepted: boolean,
+): boolean => sprintRequested && sprintAccepted;
 
 /** Only an accepted sprint request may interrupt an active reload. */
 export const shouldInterruptReloadForSprint = (
@@ -1030,6 +1045,7 @@ interface ClimbingTransition {
   arcHeight: number;
   elapsed: number;
   phase: "vault" | "landingBoost";
+  traversalHeightMeters: number;
   startX: number;
   startY: number;
   startZ: number;
@@ -6185,8 +6201,8 @@ const createWeaponRuntime = (
     viewActive = visibleInView;
     latestAimRay = aimRay;
     latestSpreadContext = spreadContext;
-    // Traversal state arrives from the shared camera damper before firing or
-    // reload input is processed for this frame.
+    // Traversal and weapon switches both keep weapon handling locked until the
+    // shared camera-damper transition returns to its idle pose.
     viewmodelTransitionActive = viewmodelTransition.phase !== "idle";
     coolWeaponBarrels(deltaSeconds);
     fireCooldownSeconds = Math.max(0, fireCooldownSeconds - deltaSeconds);
@@ -10013,7 +10029,69 @@ export const createMahjongTableScene = (
   // Keep the O₂ blur and dithered black radial vignette in scene-linear space
   // before OutputPass. The display transform remains last in the chain.
   composer.addPass(o2BlurPass);
-  composer.addPass(new OutputPass());
+  const outputPass = new OutputPass();
+  composer.addPass(outputPass);
+  interface DamageVignettePulse {
+    readonly pass: ReturnType<typeof createDamageVignettePass>;
+    readonly initialOpacity: number;
+    elapsedSeconds: number;
+  }
+  const damageVignettePulses: DamageVignettePulse[] = [];
+  const syncDamageVignettePassSizes = (width: number, height: number): void => {
+    for (const pulse of damageVignettePulses) {
+      setDamageVignettePassSize(pulse.pass, width, height);
+    }
+  };
+  const publishDamageVignetteLayerCount = (): void => {
+    container.dataset.playerDamageVignetteLayers = String(damageVignettePulses.length);
+  };
+  const addDamageVignette = (kind: DamageVignetteKind, damageDelta: number): void => {
+    const initialOpacity = resolveDamageVignetteOpacityFromDelta(damageDelta);
+    if (initialOpacity <= 0) {
+      return;
+    }
+    const pass = createDamageVignettePass(kind, damageDelta);
+    setDamageVignettePassSize(pass, renderer.domElement.width, renderer.domElement.height);
+    const outputIndex = composer.passes.indexOf(outputPass);
+    composer.insertPass(pass, outputIndex >= 0 ? outputIndex : composer.passes.length);
+    damageVignettePulses.push({ pass, initialOpacity, elapsedSeconds: 0 });
+    publishDamageVignetteLayerCount();
+  };
+  const clearDamageVignettePulses = (): void => {
+    for (const pulse of damageVignettePulses) {
+      composer.removePass(pulse.pass);
+      pulse.pass.dispose();
+    }
+    damageVignettePulses.length = 0;
+    publishDamageVignetteLayerCount();
+  };
+  const updateDamageVignettePulses = (
+    deltaSeconds: number,
+    centerX: number,
+    centerY: number,
+  ): void => {
+    const delta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    for (let index = damageVignettePulses.length - 1; index >= 0; index -= 1) {
+      const pulse = damageVignettePulses[index];
+      if (pulse === undefined) {
+        continue;
+      }
+      pulse.elapsedSeconds += delta;
+      if (pulse.elapsedSeconds >= DAMAGE_VIGNETTE_PULSE_DURATION_SECONDS) {
+        composer.removePass(pulse.pass);
+        pulse.pass.dispose();
+        damageVignettePulses.splice(index, 1);
+        continue;
+      }
+      setDamageVignettePassCenter(pulse.pass, centerX, centerY);
+      setDamageVignettePassStrength(
+        pulse.pass,
+        resolveDamageVignettePulseOpacity(pulse.initialOpacity, pulse.elapsedSeconds),
+      );
+    }
+    publishDamageVignetteLayerCount();
+  };
+  publishDamageVignetteLayerCount();
   const focusRaycaster = new THREE.Raycaster();
   const sniperScopeCameraPosition = new THREE.Vector3();
   const sniperScopeCameraScale = new THREE.Vector3();
@@ -10536,6 +10614,8 @@ export const createMahjongTableScene = (
     const result = applyPlayerDamage(playerVitals, damage);
     if (result.damage > 0) {
       playerVitals = result.state;
+      addDamageVignette("shield", result.shieldDamage);
+      addDamageVignette("health", result.healthDamage);
       publishPlayerVitals(true);
       if (result.killed) {
         weaponRuntime?.recordDeath();
@@ -10557,6 +10637,8 @@ export const createMahjongTableScene = (
       return;
     }
     playerVitals = result.state;
+    addDamageVignette("shield", result.shieldDamage);
+    addDamageVignette("health", result.healthDamage);
     publishPlayerVitals(true);
     if (result.killed) {
       weaponRuntime?.recordDeath();
@@ -10610,6 +10692,7 @@ export const createMahjongTableScene = (
     setAiming(aimInput.aimingDownSights, aimInput.holdingBreath);
   };
   const resetVitalsState = (): PlayerVitalsState => {
+    clearDamageVignettePulses();
     playerVitals = resetPlayerVitals();
     vitalsPublishElapsed = 0;
     publishPlayerVitals(true);
@@ -10701,6 +10784,7 @@ export const createMahjongTableScene = (
       arcHeight: resolveVaultTraversalArcHeight(climbHeight),
       elapsed: 0,
       phase: "vault",
+      traversalHeightMeters: wall.box.halfExtents.y * 2,
       startX: wall.target.x,
       startY: wall.target.y,
       startZ: wall.target.z,
@@ -11539,7 +11623,7 @@ export const createMahjongTableScene = (
   const setDebugCameraShiftEnabled = (enabled: boolean): void => {
     debugCameraShiftEnabled = enabled;
     if (!enabled) {
-      cameraMotion.clearShift();
+      cameraMotion.clearAcceleration();
     }
     persistDebugPreferences();
   };
@@ -11589,6 +11673,7 @@ export const createMahjongTableScene = (
     const height = Math.max(renderer.domElement.clientHeight, 1);
     composer.setSize(width, height);
     setO2BlurPassSize(o2BlurPass, width * pixelRatio, height * pixelRatio);
+    syncDamageVignettePassSizes(width * pixelRatio, height * pixelRatio);
     gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
     persistDebugPreferences();
   };
@@ -12058,6 +12143,7 @@ export const createMahjongTableScene = (
     renderer.setSize(width, height, false);
     composer.setSize(width, height);
     setO2BlurPassSize(o2BlurPass, renderer.domElement.width, renderer.domElement.height);
+    syncDamageVignettePassSizes(renderer.domElement.width, renderer.domElement.height);
     gtaoPass.setSize(Math.max(1, Math.floor(width * 0.5)), Math.max(1, Math.floor(height * 0.5)));
   };
   let resizeFrame = 0;
@@ -12474,6 +12560,10 @@ export const createMahjongTableScene = (
               playerVitals,
               O2_SPRINT_DRAIN_PER_SECOND * delta * movementMagnitude,
             );
+          if (fastMovementRequested && !sprintingMovement && !reloadingMovement) {
+            isSprinting = resolveSprintRequestAfterO2Check(isSprinting, sprintingMovement);
+            transition.preserveSprinting = false;
+          }
           joggingMovement = fastMovementRequested && !sprintingMovement;
           const preservedSpeedCap = sprintingMovement
             ? preservedSpeed
@@ -12514,6 +12604,9 @@ export const createMahjongTableScene = (
           fastMovementRequested &&
           !reloadingMovement &&
           canAffordPlayerO2Cost(playerVitals, O2_SPRINT_DRAIN_PER_SECOND * delta * touchMagnitude);
+        if (fastMovementRequested && !sprintingMovement && !reloadingMovement) {
+          isSprinting = resolveSprintRequestAfterO2Check(isSprinting, sprintingMovement);
+        }
         const touchSpeedMultiplier = crouching
           ? CROUCH_SPEED_MULTIPLIER
           : isWalkingMode
@@ -12552,6 +12645,9 @@ export const createMahjongTableScene = (
             playerVitals,
             O2_SPRINT_DRAIN_PER_SECOND * delta * movementMagnitude,
           );
+        if (fastMovementRequested && !sprintingMovement && !reloadingMovement) {
+          isSprinting = resolveSprintRequestAfterO2Check(isSprinting, sprintingMovement);
+        }
         joggingMovement = fastMovementRequested && !sprintingMovement;
         const speedMultiplier = resolvePlayerMovementSpeedMultiplier({
           crouching,
@@ -12576,7 +12672,7 @@ export const createMahjongTableScene = (
       const isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
       const desiredForward = isWallTraversalActive ? 0 : forward * inputScale * currentMoveSpeed;
       const desiredStrafe = isWallTraversalActive ? 0 : right * inputScale * currentMoveSpeed;
-      let forwardAcceleration = 0;
+      let localAcceleration: CameraLocalAcceleration = { right: 0, forward: 0 };
       const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
       const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
       movementMagnitudeActivity = movementMagnitude;
@@ -12606,10 +12702,14 @@ export const createMahjongTableScene = (
         wallImpactActive = false;
       } else {
         const previousForwardVelocity = forwardVelocity;
+        const previousStrafeVelocity = strafeVelocity;
         forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
         strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
-        forwardAcceleration =
-          (forwardVelocity - previousForwardVelocity) / Math.max(delta, 1 / 120);
+        const accelerationDelta = Math.max(delta, 1 / 120);
+        localAcceleration = {
+          right: (strafeVelocity - previousStrafeVelocity) / accelerationDelta,
+          forward: (forwardVelocity - previousForwardVelocity) / accelerationDelta,
+        };
       }
       const movementStart = camera.position.clone();
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(forwardVelocity) > 0.001) {
@@ -12764,14 +12864,27 @@ export const createMahjongTableScene = (
             const horizontalImpact =
               boundedVelocityChangeMagnitude > CAMERA_WALL_IMPACT_SPEED_THRESHOLD;
             if (horizontalImpact && !wallImpactActive && velocityChangeScale > 0) {
+              cameraMotionRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+              cameraMotionRight.y = 0;
               cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
               cameraMotionForward.y = 0;
-              if (cameraMotionForward.lengthSq() > 0.0001) {
+              if (
+                cameraMotionRight.lengthSq() > 0.0001 &&
+                cameraMotionForward.lengthSq() > 0.0001
+              ) {
+                cameraMotionRight.normalize();
                 cameraMotionForward.normalize();
+                const accelerationDelta = Math.max(delta, 1 / 120);
+                const rightVelocityChange =
+                  velocityChange.x * velocityChangeScale * cameraMotionRight.x +
+                  velocityChange.z * velocityChangeScale * cameraMotionRight.z;
                 const forwardVelocityChange =
                   velocityChange.x * velocityChangeScale * cameraMotionForward.x +
                   velocityChange.z * velocityChangeScale * cameraMotionForward.z;
-                forwardAcceleration += forwardVelocityChange / Math.max(delta, 1 / 120);
+                localAcceleration = {
+                  right: localAcceleration.right + rightVelocityChange / accelerationDelta,
+                  forward: localAcceleration.forward + forwardVelocityChange / accelerationDelta,
+                };
               }
             }
             wallImpactActive = horizontalImpact;
@@ -12928,6 +13041,7 @@ export const createMahjongTableScene = (
               arcHeight: resolveVaultTraversalArcHeight(climbHeight),
               elapsed: 0,
               phase: "vault",
+              traversalHeightMeters: climbHeight,
               startX: climbStartX,
               startY: climbStartY,
               startZ: climbStartZ,
@@ -13145,10 +13259,23 @@ export const createMahjongTableScene = (
       if (jumpKeyHeld) {
         jump();
       }
+      const activeTraversal =
+        ledgeClimbTransition !== null && ledgeClimbTransition.phase === "vault"
+          ? {
+              kind: "vault" as const,
+              duration: ledgeClimbTransition.duration,
+              height: ledgeClimbTransition.traversalHeightMeters,
+            }
+          : wallClimbTransition !== null && wallClimbTransition.phase === "vault"
+            ? {
+                kind: "wall-climb" as const,
+                duration: wallClimbTransition.duration,
+                height: wallClimbTransition.traversalHeightMeters,
+              }
+            : null;
       applyFirstPersonCameraMotion(baseCameraY, {
         deltaSeconds: delta,
-        lateralInput: debugCameraShiftEnabled ? right : 0,
-        forwardAcceleration: debugCameraShiftEnabled ? forwardAcceleration : 0,
+        localAcceleration: debugCameraShiftEnabled ? localAcceleration : { right: 0, forward: 0 },
         movementMagnitude,
         movementSpeedRatio,
         oxygenRatio: playerVitals.o2 / PLAYER_MAX_O2,
@@ -13158,8 +13285,17 @@ export const createMahjongTableScene = (
         aimingDownSights,
         holdingBreath: playerVitals.holdingBreath,
         stabilizedByWall: wallBracedAim,
-        traversalActive:
-          ledgeClimbTransition !== null || wallHangState !== null || wallClimbTransition !== null,
+        grounded,
+        traversalActive: activeTraversal !== null,
+        ...(activeTraversal?.duration === undefined
+          ? {}
+          : { traversalDurationSeconds: activeTraversal.duration }),
+        ...(activeTraversal === null
+          ? {}
+          : {
+              traversalKind: activeTraversal.kind,
+              traversalHeightMeters: activeTraversal.height,
+            }),
       });
     } else {
       exerciseIntensity = 0;
@@ -13237,6 +13373,11 @@ export const createMahjongTableScene = (
       cameraMotionOffsets.screenBlurPixels * renderer.getPixelRatio(),
     );
     setO2BlurPassVignette(o2BlurPass, cameraMotionOffsets.screenVignetteStrength);
+    updateDamageVignettePulses(
+      delta,
+      (reticlePresentation.aimNdc.x + 1) * 0.5,
+      (reticlePresentation.aimNdc.y + 1) * 0.5,
+    );
     container.dataset.o2VisionBlur = cameraMotionOffsets.screenBlurPixels.toFixed(3);
     container.dataset.o2VisionVignette = cameraMotionOffsets.screenVignetteStrength.toFixed(3);
     container.dataset.o2VisionContrast = cameraMotionOffsets.screenContrastMultiplier.toFixed(3);
@@ -13508,6 +13649,7 @@ export const createMahjongTableScene = (
       bokehPass.dispose();
       sniperScopePass.dispose();
       o2BlurPass.dispose();
+      clearDamageVignettePulses();
       sniperScopeSceneTarget.dispose();
       composer.dispose();
       architectureResources.teacherTexture.dispose();

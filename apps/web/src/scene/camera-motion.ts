@@ -1,12 +1,22 @@
 import { O2_BRACED_STABILITY_FACTOR, resolveO2Stability } from "./o2-stability.js";
 import { PLAYER_MOVE_SPEED_METERS_PER_SECOND, PLAYER_WALK_SPEED_RATIO } from "./world-scale.js";
 
+/**
+ * Horizontal acceleration expressed in the player's local frame.
+ *
+ * `right` is positive toward screen-right and `forward` is positive toward
+ * the view direction. Keeping both components together lets collision and
+ * locomotion code submit one physical signal to the presentation damper.
+ */
+export interface CameraLocalAcceleration {
+  readonly right: number;
+  readonly forward: number;
+}
+
 export interface CameraMotionUpdateInput {
   readonly deltaSeconds: number;
-  /** Horizontal input, where positive values mean movement to the right. */
-  readonly lateralInput: number;
-  /** Forward acceleration, where positive values mean accelerating toward the view direction. */
-  readonly forwardAcceleration?: number;
+  /** Actual horizontal acceleration in the player's local frame. */
+  readonly localAcceleration: CameraLocalAcceleration;
   readonly movementMagnitude: number;
   readonly movementSpeedRatio: number;
   /** Current oxygen ratio, where 1 is rested and 0 is out of breath. */
@@ -20,8 +30,16 @@ export interface CameraMotionUpdateInput {
   readonly holdingBreath?: boolean;
   /** Whether wall contact is providing free aim and breathing support. */
   readonly stabilizedByWall?: boolean;
-  /** Whether a ledge/vault/wall traversal is currently moving the player. */
+  /** Whether the physics-resolved player support is on the ground. */
+  readonly grounded?: boolean;
+  /** Whether an active vault or wall-climb arc is currently moving the player. */
   readonly traversalActive?: boolean;
+  /** The resolved movement duration for the active vault or wall climb. */
+  readonly traversalDurationSeconds?: number;
+  /** The active traversal kind, used to choose the held-gun lower amount. */
+  readonly traversalKind?: CameraTraversalKind;
+  /** Height of the traversed obstacle in metres for wall-climb scaling. */
+  readonly traversalHeightMeters?: number;
 }
 
 export interface CameraWeaponShotInput {
@@ -87,6 +105,8 @@ export interface CameraViewmodelOffset {
 
 export type CameraViewmodelTransitionPhase = "idle" | "lowering" | "raising";
 
+export type CameraTraversalKind = "vault" | "wall-climb";
+
 export interface CameraViewmodelTransition {
   readonly phase: CameraViewmodelTransitionPhase;
   /** Progress through the active phase, from 0 to 1. */
@@ -107,20 +127,20 @@ export interface CameraMotionDamper {
   readonly applyLandingImpulse: (impact: CameraLandingImpact) => void;
   readonly applyWeaponShotImpulse: (shot: CameraWeaponShotInput) => void;
   readonly applyWeaponSwitchImpulse: (input: CameraWeaponSwitchInput) => void;
-  readonly clearShift: () => void;
+  readonly clearAcceleration: () => void;
   readonly clearBob: () => void;
   readonly reset: () => void;
   readonly getOffsets: () => CameraMotionOffsets;
 }
 
-export const CAMERA_SHIFT_WEIGHT_MULTIPLIER = 2;
-export const CAMERA_SHIFT_WALK = ((0.9 * Math.PI) / 180) * CAMERA_SHIFT_WEIGHT_MULTIPLIER;
-export const CAMERA_SHIFT_SPRINT = ((1.8 * Math.PI) / 180) * CAMERA_SHIFT_WEIGHT_MULTIPLIER;
-export const CAMERA_SHIFT_TARGET_DAMPING = 4;
-export const CAMERA_SHIFT_DAMPING = 6;
-/** Forward acceleration that reaches the same maximum response as a full sprint roll. */
+/** Horizontal acceleration that reaches the same maximum response as a full sprint roll. */
 export const CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED = 60;
-export const CAMERA_ACCELERATION_PITCH_MAX = CAMERA_SHIFT_SPRINT;
+/** Preserve the accepted full-sprint response while using acceleration as the sole roll source. */
+export const CAMERA_ACCELERATION_MAX_RESPONSE = (3.6 * Math.PI) / 180;
+export const CAMERA_ACCELERATION_ROLL_MAX = CAMERA_ACCELERATION_MAX_RESPONSE;
+export const CAMERA_ACCELERATION_PITCH_MAX = CAMERA_ACCELERATION_MAX_RESPONSE;
+export const CAMERA_ACCELERATION_TARGET_DAMPING = 4;
+export const CAMERA_ACCELERATION_DAMPING = 6;
 export const CAMERA_BOB_AMPLITUDE = 0.025;
 export const CAMERA_BOB_LATERAL_AMPLITUDE = 0.012;
 export const CAMERA_BOB_DEPTH_AMPLITUDE = 0.008;
@@ -176,6 +196,67 @@ export const CAMERA_VIEWMODEL_SWITCH_DROP_Y = -1.18;
 export const CAMERA_VIEWMODEL_SWITCH_DROP_Z = 0.08;
 export const CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS = (-72 * Math.PI) / 180;
 export const CAMERA_VIEWMODEL_SWITCH_ROLL_RADIANS = 0.24;
+/** Vaults keep the gun just below its normal pose instead of hiding it. */
+export const CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE = 0.2;
+/** A four-metre wall climb reaches the fully lowered pose. */
+export const CAMERA_VIEWMODEL_TRAVERSAL_FULL_LOWER_HEIGHT_METERS = 4;
+/** The traversal lowering curve starts at twice the linear response. */
+export const CAMERA_VIEWMODEL_TRAVERSAL_LOWER_SPEED_MULTIPLIER = 2;
+
+/**
+ * Resolve how far the held gun should lower for one traversal.
+ *
+ * Low vaults use a deliberately shallow fixed amount so the gun can read as
+ * resting on the obstacle. Wall climbs scale with the obstacle height and
+ * reach the full switch pose at four metres.
+ */
+export const resolveCameraTraversalLoweringScale = (
+  kind: CameraTraversalKind | undefined,
+  heightMeters: number | undefined,
+): number => {
+  if (kind === "vault") {
+    return CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE;
+  }
+  if (kind !== "wall-climb") {
+    return 1;
+  }
+  const safeHeight = Number.isFinite(heightMeters) ? Math.max(0, heightMeters ?? 0) : 4;
+  return clamp(
+    Math.max(
+      CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
+      safeHeight / CAMERA_VIEWMODEL_TRAVERSAL_FULL_LOWER_HEIGHT_METERS,
+    ),
+    0,
+    1,
+  );
+};
+
+/** Keep the player-resolved traversal duration authoritative for the gun pose. */
+export const resolveCameraTraversalLoweringDuration = (
+  traversalDurationSeconds: number | undefined,
+): number => {
+  const safeDuration =
+    Number.isFinite(traversalDurationSeconds) && (traversalDurationSeconds ?? 0) > 0
+      ? (traversalDurationSeconds ?? CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS)
+      : CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS;
+  return safeDuration;
+};
+
+/**
+ * Resolve a faster-starting, non-freezing lowering curve.
+ *
+ * The power curve gives the gun a 2x initial response but still reaches its
+ * target exactly at the end of the climb instead of clamping halfway through.
+ */
+export const resolveCameraTraversalLoweringProgress = (
+  elapsedSeconds: number,
+  durationSeconds: number,
+): number => {
+  const duration = resolveCameraTraversalLoweringDuration(durationSeconds);
+  const elapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const normalized = clamp(elapsed / duration, 0, 1);
+  return 1 - (1 - normalized) ** CAMERA_VIEWMODEL_TRAVERSAL_LOWER_SPEED_MULTIPLIER;
+};
 
 /**
  * The spring is intentionally separate from gait bob. Gait motion is a
@@ -232,8 +313,6 @@ export const CAMERA_RECOIL_SPRING = 1200;
  */
 export const CAMERA_RECOIL_DAMPING = 34;
 
-const CAMERA_DIRECTION_MEMORY_SECONDS = 0.24;
-const MIN_LATERAL_INPUT = 0.05;
 const MIN_DELTA_SECONDS = 0;
 const MAX_DELTA_SECONDS = 0.05;
 
@@ -314,9 +393,9 @@ export const resolveCameraGaitOffsets = (
 };
 
 /**
- * Convert front/back acceleration into the same bounded presentation response
- * used by the lateral sprint shift. Positive forward acceleration pitches up;
- * braking pitches down.
+ * Convert front/back acceleration into the bounded presentation response used
+ * by the shared local-acceleration damper. Positive forward acceleration
+ * pitches up; braking pitches down.
  */
 export const resolveCameraAccelerationPitch = (forwardAcceleration: number): number => {
   const acceleration = Number.isFinite(forwardAcceleration) ? forwardAcceleration : 0;
@@ -325,6 +404,26 @@ export const resolveCameraAccelerationPitch = (forwardAcceleration: number): num
     CAMERA_ACCELERATION_PITCH_MAX
   );
 };
+
+/**
+ * Convert local rightward acceleration into the bounded inertial roll response
+ * from the shared local-acceleration damper. The sign is inverted because the
+ * player's body leans left when accelerating to the right.
+ */
+export const resolveCameraAccelerationRoll = (rightAcceleration: number): number => {
+  const acceleration = Number.isFinite(rightAcceleration) ? rightAcceleration : 0;
+  return (
+    -clamp(acceleration / CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED, -1, 1) *
+    CAMERA_ACCELERATION_ROLL_MAX
+  );
+};
+
+const resolveCameraLocalAcceleration = (
+  acceleration: CameraLocalAcceleration,
+): CameraLocalAcceleration => ({
+  right: Number.isFinite(acceleration.right) ? acceleration.right : 0,
+  forward: Number.isFinite(acceleration.forward) ? acceleration.forward : 0,
+});
 
 export interface CameraWeaponShotImpulse {
   readonly yaw: number;
@@ -445,6 +544,23 @@ const easeInOutCubic = (value: number): number =>
   value < 0.5 ? 4 * value ** 3 : 1 - (-2 * value + 2) ** 3 / 2;
 const easeOutCubic = (value: number): number => 1 - (1 - value) ** 3;
 
+const createTraversalViewmodelTransition = (
+  phase: CameraViewmodelTransitionPhase,
+  progress: number,
+  amount: number,
+): CameraViewmodelTransition => ({
+  phase,
+  progress,
+  offset: {
+    x: 0,
+    y: CAMERA_VIEWMODEL_SWITCH_DROP_Y * amount,
+    z: CAMERA_VIEWMODEL_SWITCH_DROP_Z * amount,
+  },
+  pitchRadians: CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS * amount,
+  yawRadians: 0,
+  rollRadians: CAMERA_VIEWMODEL_SWITCH_ROLL_RADIANS * amount,
+});
+
 /**
  * Resolve the shared discard/equip pose for the first-person viewmodel.
  *
@@ -516,8 +632,8 @@ const createDefaultOffsets = (): CameraMotionOffsets => ({
 
 /** Create the one presentation damper shared by camera output and reticule aim. */
 export const createCameraMotionDamper = (): CameraMotionDamper => {
-  let shiftRoll = 0;
-  let shiftTarget = 0;
+  let accelerationRoll = 0;
+  let accelerationRollTarget = 0;
   let accelerationPitch = 0;
   let accelerationPitchTarget = 0;
   let bobPhase = 0;
@@ -539,17 +655,18 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let traversalInputActive = false;
   let traversalTransitionElapsed = 0;
   let traversalTransitionActive = false;
-  let lastLateralDirection = 0;
-  let lateralIdleTime = Number.POSITIVE_INFINITY;
+  let traversalTransitionDurationSeconds = CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS;
+  let traversalTransitionLoweringScale = 1;
+  let traversalTransitionReleasing = false;
+  let traversalReleaseElapsed = 0;
+  let traversalReleaseStartScale = 1;
   let offsets = createDefaultOffsets();
 
-  const clearShift = (): void => {
-    shiftRoll = 0;
-    shiftTarget = 0;
+  const clearAcceleration = (): void => {
+    accelerationRoll = 0;
+    accelerationRollTarget = 0;
     accelerationPitch = 0;
     accelerationPitchTarget = 0;
-    lastLateralDirection = 0;
-    lateralIdleTime = Number.POSITIVE_INFINITY;
     offsets = {
       ...offsets,
       roll: 0,
@@ -574,8 +691,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   };
 
   const reset = (): void => {
-    shiftRoll = 0;
-    shiftTarget = 0;
+    accelerationRoll = 0;
+    accelerationRollTarget = 0;
     accelerationPitch = 0;
     accelerationPitchTarget = 0;
     bobPhase = 0;
@@ -597,8 +714,11 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     traversalInputActive = false;
     traversalTransitionElapsed = 0;
     traversalTransitionActive = false;
-    lastLateralDirection = 0;
-    lateralIdleTime = Number.POSITIVE_INFINITY;
+    traversalTransitionDurationSeconds = CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS;
+    traversalTransitionLoweringScale = 1;
+    traversalTransitionReleasing = false;
+    traversalReleaseElapsed = 0;
+    traversalReleaseStartScale = 1;
     offsets = createDefaultOffsets();
   };
 
@@ -636,23 +756,45 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   const update = (input: CameraMotionUpdateInput): CameraMotionOffsets => {
     const deltaSeconds = clamp(input.deltaSeconds, MIN_DELTA_SECONDS, MAX_DELTA_SECONDS);
     const nextTraversalActive = input.traversalActive === true;
+    const traversalReleaseStarted =
+      !nextTraversalActive && traversalInputActive && traversalTransitionActive;
     if (nextTraversalActive && !traversalInputActive) {
       traversalTransitionElapsed = 0;
       traversalTransitionActive = true;
+      traversalTransitionDurationSeconds = resolveCameraTraversalLoweringDuration(
+        input.traversalDurationSeconds,
+      );
+      traversalTransitionLoweringScale = resolveCameraTraversalLoweringScale(
+        input.traversalKind,
+        input.traversalHeightMeters,
+      );
+      traversalTransitionReleasing = false;
+      traversalReleaseElapsed = 0;
+      traversalReleaseStartScale = 1;
     }
-    if (!nextTraversalActive && traversalInputActive && traversalTransitionActive) {
-      // A hang can last longer than the switch animation. Release from the
-      // shared fully-lowered pose so the normal raise phase always plays.
-      traversalTransitionElapsed = CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS;
+    if (traversalReleaseStarted) {
+      // Release from the pose reached at the end of the climb. This keeps a
+      // shallow vault drop shallow instead of snapping it to the full switch
+      // pose before the normal raise phase starts.
+      const loweringProgress = resolveCameraTraversalLoweringProgress(
+        traversalTransitionElapsed + deltaSeconds,
+        traversalTransitionDurationSeconds,
+      );
+      traversalReleaseStartScale = traversalTransitionLoweringScale * loweringProgress;
+      traversalTransitionReleasing = true;
+      traversalReleaseElapsed = 0;
     }
     traversalInputActive = nextTraversalActive;
-    if (traversalTransitionActive) {
+    if (traversalTransitionActive && traversalInputActive) {
       traversalTransitionElapsed += deltaSeconds;
+    } else if (
+      traversalTransitionActive &&
+      traversalTransitionReleasing &&
+      !traversalReleaseStarted
+    ) {
+      traversalReleaseElapsed += deltaSeconds;
     }
-    const lateralInput = clamp(input.lateralInput, -1, 1);
-    const forwardAcceleration = Number.isFinite(input.forwardAcceleration)
-      ? (input.forwardAcceleration ?? 0)
-      : 0;
+    const localAcceleration = resolveCameraLocalAcceleration(input.localAcceleration);
     const movementMagnitude = clamp(input.movementMagnitude, 0, 1);
     const movementSpeedRatio = clamp(input.movementSpeedRatio, 0, 1);
     const oxygenRatio = clamp(input.oxygenRatio, 0, 1);
@@ -669,60 +811,55 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       deltaSeconds,
     );
 
-    if (input.shiftEnabled && Math.abs(lateralInput) > MIN_LATERAL_INPUT) {
-      const lateralDirection = Math.sign(lateralInput);
-      if (lateralDirection !== lastLateralDirection) {
-        const sprintStrength = clamp(
-          (movementSpeedRatio - PLAYER_WALK_SPEED_RATIO) / (1 - PLAYER_WALK_SPEED_RATIO),
-          0,
-          1,
-        );
-        shiftTarget =
-          -lateralDirection *
-          (CAMERA_SHIFT_WALK + (CAMERA_SHIFT_SPRINT - CAMERA_SHIFT_WALK) * sprintStrength);
-      }
-      lastLateralDirection = lateralDirection;
-      lateralIdleTime = 0;
-    } else if (input.shiftEnabled) {
-      lateralIdleTime += deltaSeconds;
-      if (lateralIdleTime > CAMERA_DIRECTION_MEMORY_SECONDS) {
-        lastLateralDirection = 0;
-      }
-    } else {
-      clearShift();
+    if (input.shiftEnabled && Math.abs(localAcceleration.right) > Number.EPSILON) {
+      accelerationRollTarget = resolveCameraAccelerationRoll(localAcceleration.right);
     }
+    accelerationRollTarget = damp(
+      accelerationRollTarget,
+      0,
+      CAMERA_ACCELERATION_TARGET_DAMPING,
+      deltaSeconds,
+    );
+    accelerationRoll = damp(
+      accelerationRoll,
+      accelerationRollTarget,
+      CAMERA_ACCELERATION_DAMPING,
+      deltaSeconds,
+    );
 
-    shiftTarget = damp(shiftTarget, 0, CAMERA_SHIFT_TARGET_DAMPING, deltaSeconds);
-    shiftRoll = damp(shiftRoll, shiftTarget, CAMERA_SHIFT_DAMPING, deltaSeconds);
-
-    if (input.shiftEnabled && Math.abs(forwardAcceleration) > Number.EPSILON) {
-      accelerationPitchTarget = resolveCameraAccelerationPitch(forwardAcceleration);
+    if (input.shiftEnabled && Math.abs(localAcceleration.forward) > Number.EPSILON) {
+      accelerationPitchTarget = resolveCameraAccelerationPitch(localAcceleration.forward);
     }
     accelerationPitchTarget = damp(
       accelerationPitchTarget,
       0,
-      CAMERA_SHIFT_TARGET_DAMPING,
+      CAMERA_ACCELERATION_TARGET_DAMPING,
       deltaSeconds,
     );
     accelerationPitch = damp(
       accelerationPitch,
       accelerationPitchTarget,
-      CAMERA_SHIFT_DAMPING,
+      CAMERA_ACCELERATION_DAMPING,
       deltaSeconds,
     );
 
-    const bobTarget = input.bobEnabled
+    // Gait represents footfall, so it must not continue while the physics
+    // capsule is airborne or moving through a vault/wall traversal. Keep the
+    // damper stateful so the gait settles smoothly when leaving the ground;
+    // jump/landing weight, breathing, and aim sway remain independent.
+    const gaitEnabled = input.bobEnabled && input.grounded !== false && !nextTraversalActive;
+    const bobTarget = gaitEnabled
       ? resolveCameraGaitAmount(movementMagnitude, movementSpeedRatio, input.crouching)
       : 0;
     bobAmount = damp(bobAmount, bobTarget, CAMERA_BOB_DAMPING, deltaSeconds);
     const gaitAngularFrequency =
-      input.bobEnabled && movementMagnitude > Number.EPSILON
+      gaitEnabled && movementMagnitude > Number.EPSILON
         ? resolveCameraGaitAngularFrequency(
             (movementSpeedRatio / PLAYER_WALK_SPEED_RATIO) * PLAYER_MOVE_SPEED_METERS_PER_SECOND,
           )
         : 0;
     bobPhase += deltaSeconds * gaitAngularFrequency;
-    const gait = resolveCameraGaitOffsets(bobPhase, bobAmount);
+    const gait = resolveCameraGaitOffsets(bobPhase, gaitEnabled ? bobAmount : 0);
     const breathlessness = 1 - oxygenRatio;
     const holdingBreath = input.holdingBreath === true && oxygenRatio > 0;
     const effectiveBreathlessness = holdingBreath ? 0 : breathlessness;
@@ -807,31 +944,37 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       : createIdleViewmodelTransition();
     let traversalTransition: CameraViewmodelTransition | null = null;
     if (traversalTransitionActive) {
-      if (
-        traversalInputActive &&
-        traversalTransitionElapsed >= CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS
-      ) {
-        // Hold the exact muzzle-down/off-screen pose while the player is still
-        // traversing. Once traversal releases, the normal raise phase below
-        // starts from this same pose.
-        traversalTransition = {
-          phase: "lowering",
-          progress: 1,
-          offset: {
-            x: 0,
-            y: CAMERA_VIEWMODEL_SWITCH_DROP_Y,
-            z: CAMERA_VIEWMODEL_SWITCH_DROP_Z,
-          },
-          pitchRadians: CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS,
-          yawRadians: 0,
-          rollRadians: CAMERA_VIEWMODEL_SWITCH_ROLL_RADIANS,
-        };
-      } else {
-        traversalTransition = resolveCameraViewmodelTransition(traversalTransitionElapsed, true);
-      }
-      if (!traversalInputActive && traversalTransition.phase === "idle") {
-        traversalTransitionActive = false;
-        traversalTransition = null;
+      if (traversalInputActive) {
+        const progress = clamp(
+          traversalTransitionElapsed / traversalTransitionDurationSeconds,
+          0,
+          1,
+        );
+        const loweringProgress = resolveCameraTraversalLoweringProgress(
+          traversalTransitionElapsed,
+          traversalTransitionDurationSeconds,
+        );
+        traversalTransition = createTraversalViewmodelTransition(
+          "lowering",
+          progress,
+          traversalTransitionLoweringScale * loweringProgress,
+        );
+      } else if (traversalTransitionReleasing) {
+        const progress = clamp(
+          traversalReleaseElapsed / CAMERA_VIEWMODEL_SWITCH_RAISE_SECONDS,
+          0,
+          1,
+        );
+        traversalTransition = createTraversalViewmodelTransition(
+          "raising",
+          progress,
+          traversalReleaseStartScale * (1 - easeOutCubic(progress)),
+        );
+        if (progress >= 1) {
+          traversalTransitionActive = false;
+          traversalTransitionReleasing = false;
+          traversalTransition = null;
+        }
       }
     }
     if (switchTransition.phase === "idle") {
@@ -840,7 +983,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     const viewmodelTransition = traversalTransition ?? switchTransition;
 
     offsets = {
-      roll: shiftRoll,
+      roll: accelerationRoll,
       headBob,
       headBobLateral: gait.headBobLateral,
       headBobDepth: gait.headBobDepth,
@@ -866,7 +1009,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     applyLandingImpulse,
     applyWeaponShotImpulse,
     applyWeaponSwitchImpulse,
-    clearShift,
+    clearAcceleration,
     clearBob,
     reset,
     getOffsets: () => offsets,

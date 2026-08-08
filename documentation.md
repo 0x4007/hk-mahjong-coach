@@ -140,11 +140,11 @@
   a tight five-ray neighborhood lets a nearby visible tile win when the reticule falls into a narrow gap,
   without jumping through an opaque object. Accommodation eases toward near focus in roughly 0.4 seconds
   and relaxes toward far focus in roughly 0.65 seconds, so the effect reads as eye focus rather than a
-  cinematic snap. Lateral sprint direction changes add a restrained roll kick to suggest shifting weight,
-  while movement speed drives a small damped vertical viewport bob that settles when the player stops. The HUD
-  reticule follows the same damped first-person roll and head-bob offsets as the camera, so rapid left/right weight
-  shifts visibly lag in the aim marker while the focus ray remains anchored to the configured reticule position. The
-  The outer ring follows that motion at 5x; the center dot is tuned to a 5x total displacement without changing
+  cinematic snap. Physics-resolved local acceleration drives the restrained pitch and roll response that suggests
+  shifting weight, while movement speed drives a small damped vertical viewport bob that settles when the player stops.
+  The HUD reticule follows the same damped first-person acceleration and head-bob offsets as the camera, so the aim
+  marker and held viewmodel stay on the one presentation path while the focus ray remains anchored to the configured
+  reticule position. The outer ring follows that motion at 5x; the center dot is tuned to a 5x total displacement without changing
   the camera transform. The current experiment multiplies the underlying camera weight-shift targets by 2x; the
   reticule still reads the raw shared camera output.
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
@@ -381,6 +381,10 @@ or a 1.188 m alternating step. That is 2.862 steps/second (0.349 s per step); th
 stepsPerSecond`, so each vertical dip corresponds to one foot contact. Other speeds recompute the stride from the
 same relation. The phase stops advancing when movement magnitude is zero.
 
+The damper also receives the physics-resolved support state. Footfall gait is disabled while the player is airborne
+or moving through a vault/wall traversal, so the reticule does not keep bouncing as if the legs were running in midair.
+Jump lift, landing response, breathing, aim sway, and acceleration responses remain active during airtime.
+
 Jump lift is driven by the launch velocity. Landing dip is driven by the instantaneous downward velocity
 and the support-stop acceleration (`velocity / frame delta`), so a building fall produces a deeper response
 than a normal jump and a harder stop at the same velocity dips further. Take-off pitches up and landing
@@ -389,11 +393,16 @@ render matrix only, so Rapier or the deterministic fallback remains authoritativ
 Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
 The first front/back inertia pass uses the controller's forward velocity change before collision resolution. It feeds
-that acceleration into the same damped target/response pair as the left/right sprint roll: forward acceleration gives
-a small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
-roll magnitude. A horizontal wall stop now compares requested and resolved velocity, bounds the correction to the speed
-the player carried, projects it onto camera-forward, and sends one additional braking impulse through that same damper.
-Holding movement into the wall does not repeat the impulse every frame. Side-impact roll remains a later extension.
+that acceleration into the same damped target/response pair as the local inertial roll: forward acceleration gives a
+small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
+roll magnitude. The damper now receives one local horizontal acceleration vector with right and forward components,
+so locomotion and collision corrections use the same coordinate convention. The right component produces the matching
+inertial roll, while the forward component produces pitch. The former direction-change roll path has been removed, so
+the vector is now the sole source of horizontal roll and cannot double-stack the same strafe reversal. A horizontal
+wall stop compares requested and resolved velocity, bounds the correction to the speed the player carried, projects it
+onto camera-right and camera-forward, and sends one additional impulse through that same vector input. Holding movement
+into the wall does not repeat the impulse every frame. Vertical jump and landing impulses remain explicit until they are
+folded into the same vector in the traversal pass.
 
 ## Oxygen vital and breathing response
 
@@ -424,9 +433,11 @@ cannot pay a full jump, the controller performs a free mini hop instead: its lau
 balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
 The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. The normal standing
 speed is the 1.5×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
-frame's drain is affordable. When it is not (including at 0%), the controller stays at the same 1.5×-base trot rather
-than stopping movement. The trot's quarter walk-to-sprint blend combines the configured walking recovery (+8/s) and
-sprint drain (-3.33/s) into about +5.17 O₂/s while moving (subject to the existing recovery delay after sprinting).
+frame's drain is affordable. When it is not (including at 0%), the sprint request is cleared and the controller stays at
+the same 1.5×-base trot rather than retrying sprint every frame. The trot's quarter walk-to-sprint blend combines the
+configured walking recovery (+8/s) and sprint drain (-3.33/s) into about +5.17 O₂/s while moving, so the reserve can
+replenish after the existing sprint recovery delay even while movement input remains held. A fresh movement double-tap
+is required to sprint again.
 Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
 stops when the reserve reaches zero.
 
@@ -704,12 +715,13 @@ replacement model.
 
 ## Traversal weapon presentation
 
-The first-person controller sends active ledge vault, wall-hang, and wall-climb state through the same centralized
-camera-motion damper that drives weapon put-away. While traversal is active, the held gun rotates muzzle-down and
-drops below the frame. The damper holds that exact lowered pose for the traversal, then runs the normal raise phase
-when the player returns to ordinary movement. This does not alter physics, weapon inventory, firing, reload, or aim-ray
-authority; it only keeps the viewmodel out of the way during parkour movement. Coverage is in
-`apps/web/src/scene/camera-motion.test.ts`.
+The first-person controller sends active ledge-vault and wall-climb state through the same centralized camera-motion
+damper that drives weapon put-away. The damper receives the resolved climb duration and uses a faster-starting 2x
+lowering curve that reaches its target only at the end of the climb, avoiding a mid-traversal bottom clamp. A vault uses a
+shallow 20% lower amount so the gun remains visible as if it is resting on the obstacle. Wall climbs scale by the
+block's full height and reach the full lower pose at 4 m. Wall hanging alone does not start the lower animation. This
+does not alter physics or aim-ray authority; firing, reload, pickup, and drop remain locked until the shared raise phase
+returns to idle. It only composes a traversal-specific viewmodel pose. Coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
 ## Reload movement
 
@@ -943,3 +955,16 @@ Twelve of the 24 generated catalog entries use a deterministic submachine
 envelope: compact clip feed, one projectile per trigger pull, high cadence,
 moderate spread, and light handling. The archetype is a generator sampling
 choice only; the runtime still consumes generic resolved profiles.
+
+## Layered damage vignette
+
+Incoming player damage uses the same post-processing path as the black O₂ vignette. The radial falloff is centred on
+the live reticule in screen UV space, normalised against the farthest viewport corner, and applied before
+`OutputPass` so the location stays aligned with camera, weapon, and aim presentation. Damage does not add a separate
+DOM overlay or a reticule-only offset.
+
+Every decrease creates an independent transient layer. Lost shield points use a saturated blue layer; lost health
+points use a saturated red layer. The initial opacity is the exact delta multiplied by `0.01` and capped at `1.0`
+(one point equals one percent opacity). Each layer fades over `0.5` seconds. Multiple rapid strikes therefore remain
+separate compositor layers and build opacity through normal sequential alpha blending. A strike that crosses the
+shield boundary creates both its blue shield layer and red health layer from their separate deltas.
