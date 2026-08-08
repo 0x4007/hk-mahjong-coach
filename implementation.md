@@ -32,11 +32,10 @@
   outside vertical melee reach. Direct player damage is rejected when the player's height is outside that same reach,
   preventing melee damage through tall stacks.
 - Added a deterministic Warehouse regression covering support selection and collapse of the connected rack column.
-- Validation: strict typecheck, targeted Prettier, `git diff --check`, and the web production build pass. The current
-  server-owned bus run `1786201782329-17746-f574d208` passes the new support-target regression and 571/572 assertions;
-  its one failure is the unrelated pre-existing rack-LED impact regression. The full workspace build still stops in
-  the unrelated `@hk-mahjong/coach` declaration build. No browser or HMR acceptance is claimed because no connected
-  Vite session is available.
+- Validation: strict typecheck, targeted Prettier, `git diff --check`, and the web production build pass. The final
+  server-owned bus run `1786202982305-17746-64cf6236` passes 572/572 assertions, including support selection and rack
+  collapse. The full workspace build still stops in the unrelated `@hk-mahjong/coach` declaration build. No browser or
+  HMR acceptance is claimed because no connected Vite session is available.
 
 ## 2026-08-08 — Warehouse spawn floor alignment
 
