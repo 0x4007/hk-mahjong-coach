@@ -166,10 +166,11 @@
   legacy ledge-grab transition is disabled; vaulting owns tops from 0.15 m through 2.0 m above the approach feet for
   authored and generated boxes alike. A valid target is kept on the supported surface, biased a short distance
   forward, and the controller eases the camera and capsule over a continuous climb-over arc rather than snapping
-  dead-center. Duration maps from 0.04 s at leg height (0.45 m) to 1.0 s at 2.0 m, with the arc height using the same
-  height mapping. Vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier
-  does not have to report a separate contact first.
-- Tall walls use a separate traversal state. When horizontal movement is blocked by a real contact, a wall must be
+  dead-center. At empty O₂, duration maps from 0.04 s at leg height (0.45 m) to the slowest 1.0 s at 2.0 m; full
+  O₂ halves each duration, with a smooth response between those endpoints. The arc height keeps the same height mapping.
+  Vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier does not have to
+  report a separate contact first.
+- Tall-wall resolution is active in the live browser controller and movement simulator. A wall must be
   above the refined ledge-height window relative to the player's current feet, overlap the player's lateral reach,
   and be within 0.5 m of the capsule front. The resolver tests the approached face in each box's local horizontal
   frame, so streamed rotated backdrop buildings use the same face and top that Rapier uses. Wall-hang detection runs
@@ -178,10 +179,10 @@
   suppressed, and climbs when forward or Space is pressed. The top target keeps the tangent coordinate where the
   player caught the wall; it does not slide to a skinny wall's centre. The wall target scan includes streamed static
   boxes but excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal
-  so low vault/ledge movement is not reclassified as a wall hang. The live climb uses the same short smooth arc,
-  preserved momentum, and landing boost as vaulting, so the gun returns after the brief traversal instead of a long
-  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W and press Space while
-  approaching to catch the upper face, release movement to hang, then hold W or press Space to climb.
+  so low vault/ledge movement is not reclassified as a wall hang. A quick jump tap is buffered through the airborne
+  contact window. Forward or Jump starts a physical upward/inward impulse on the authoritative capsule; Rapier or the
+  fallback controller resolves the wall face, top support, and landing rather than moving only the rendered camera.
+  The captured tangent momentum is restored after the supported landing.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -230,7 +231,7 @@
 - Touch first-person controls, motion look, and the virtual joystick remain available in the interactive
   mobile preview. The surface asks iPhone users to rotate to landscape while preserving the fixed initial
   table composition.
-- Development mode accepts `?debug=1` and adds a visual panel for the table/room/skyline/asset camera
+- The local preview accepts `?debug=1` in both development and checkpoint production bundles and adds a visual panel for the table/room/skyline/asset camera
   presets, adaptive/high/medium/low quality mode, Bokeh/GTAO, physical/simple glass, motion feel, FOV,
   exposure, tone mapper, fog density, skyline visibility, lighting, DPR, and live renderer metrics. The
   quality selector applies its DPR, shadow, post-effect, glass, ambient-animation, and skyline-LOD defaults
@@ -339,24 +340,21 @@ The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01
 not embed the player in the collider. The helper scans all boxes and chooses the closest valid candidate.
 
 The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
-are suppressed. Forward or jump starts the same vault-style short climb arc used by the browser controller, keeping
-the caught tangent coordinate and preserved momentum before a supported landing query. Samples emit `wallHang` only
-on the entry frame and expose `hanging`, `climbing`, and `traversalState` for later frames. JSON mode writes only the
-summary to stdout; the current Rapier package warning is emitted on stderr. The rotated-backdrop regression is
+are suppressed. Forward or jump starts its deterministic vault-style climb approximation, keeping the caught tangent
+coordinate and preserved momentum before a supported landing query. The live browser path instead applies a physical
+upward/inward capsule impulse. Samples emit `wallHang` only on the entry frame and expose `hanging`, `climbing`, and
+`traversalState` for later frames. JSON mode writes only the summary to stdout; the current Rapier package warning is
+emitted on stderr. The rotated-backdrop regression is
 `pnpm test:movement:sim scripts/movement-scenarios/wall-hang-generated-rotated-test.json --json`.
 
-The same traversal state is active in the live first-person browser controller. Open the `Climbing gym`
-debug preset from `?debug=1`; it starts on clear ground facing the measured block row. Click the scene to capture
-pointer lock, hold `W`, and press `Space` while approaching a selected block (or use the touch joystick and Jump
-action). The capsule attaches to a valid airborne edge without gravity, remains hanging while forward is released,
-and starts a vault-style climb when forward is pressed again or `Space`/the mobile Jump action is used. The row
+The live first-person wall-hang entry is active. The `Climbing gym` debug preset from `?debug=1`
+starts on clear ground facing the measured block row, and its airborne vault path remains active. The row
 includes blocks from 0.10 m through 5.00 m in 0.10 m increments, each with a height label. The gym uses a 1.75 m
 standing-eye reference (separate from the elevated mahjong table camera), so the 2.00 m block is visibly above the
 player's head; blocks above 2.00 m are high-obstacle stress tests beyond the current vault window. The CLI regression for
 the full-height timing is
 `pnpm test:movement:sim scripts/movement-scenarios/vault-2m-test.json --json`.
-Backward input releases the hang. The climb follows the vault arc and asks Rapier for the final supported position
-instead of marking the player grounded in midair.
+The offline wall-hang scenarios and pure geometry resolvers remain available as deterministic traversal regressions.
 
 ## Centralized camera motion and landing weight
 
@@ -392,17 +390,17 @@ deceleration pitches down through the same bounded spring. Gait lateral/depth of
 render matrix only, so Rapier or the deterministic fallback remains authoritative for the player position.
 Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
-The first front/back inertia pass uses the controller's forward velocity change before collision resolution. It feeds
-that acceleration into the same damped target/response pair as the local inertial roll: forward acceleration gives a
-small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
-roll magnitude. The damper now receives one local horizontal acceleration vector with right and forward components,
-so locomotion and collision corrections use the same coordinate convention. The right component produces the matching
-inertial roll, while the forward component produces pitch. The former direction-change roll path has been removed, so
-the vector is now the sole source of horizontal roll and cannot double-stack the same strafe reversal. A horizontal
-wall stop compares requested and resolved velocity, bounds the correction to the speed the player carried, projects it
-onto camera-right and camera-forward, and sends one additional impulse through that same vector input. Holding movement
-into the wall does not repeat the impulse every frame. Vertical jump and landing impulses remain explicit until they are
-folded into the same vector in the traversal pass.
+The first-person loop now tracks the velocity that physics actually resolved after each frame and compares it with the
+previous resolved velocity. That single world-space delta-v drives acceleration response for locomotion, braking, wall
+stops, jumps, landings, ledge catches, vaults, and wall climbs; there is no separate wall-impact camera impulse. The
+world acceleration is projected through the camera's yaw-only body basis and world-up axis before entering the damper.
+Signed components therefore cover right/left, forward/backward, and up/down in one vector. A 60 m/s² reference reaches
+the accepted full-sprint roll magnitude. A 10 m/s to 0 m/s resolved stop is roughly 600 m/s² and uses the same path with
+a bounded high-energy overload, so it is visibly stronger instead of flattening to an ordinary sprint response. Looking
+up or down cannot turn horizontal braking into a false lift. The right component produces inertial roll, the forward
+component produces pitch, and the up component drives the shared weight spring. Support stops preserve the measured
+downward delta-v sign so landings dip instead of lifting. The former direction-memory roll path is removed, so strafe
+reversals cannot double-stack the same response.
 
 ## Oxygen vital and breathing response
 
@@ -418,20 +416,21 @@ consecutive full jumps empty the reserve.
 Landing is a separate leg-exertion event. A landing at the full-jump downward speed costs 10 O₂, and the charge follows
 the square of downward speed as a frame-rate-independent kinetic-energy proxy. With the current 48 m/s² gravity, a
 2 m fall is about 13.9 m/s and costs about 11 O₂. The live and fallback controllers use the measured maximum fall speed
-for this calculation. Landing O₂ is spent before impact damage: a sufficient reserve prevents shield/health loss, while
-any unpaid remainder follows the normal shield-then-health path. Landing exertion also uses the 0.25-second jump
-recovery delay. The camera dip is still resolved by the centralized camera damper from its separate landing deceleration
-input.
+for this calculation. Landing O₂ is spent before impact damage: a reserve sufficient for the charge prevents shield/health loss, while
+any unpaid remainder is capped by the speed-derived landing damage and remains zero through the normal full-jump
+landing speed. Landing exertion also uses the 0.25-second jump recovery delay. The camera dip is still resolved by the
+centralized camera damper from its separate landing deceleration input.
 
 Sprint recovery waits 1.5 seconds, recovery after crouch walking waits 0.5 seconds, and jump recovery waits 0.25
 seconds. These delays are stored in the pure state and recovery is integrated for the exact portion of a frame
 after it expires. The browser publishes the rounded reserve as `data-player-o2` and renders it as a third
 HUD bar.
 
-O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. If the reserve
-cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
-balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
-The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. The normal standing
+O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. A reserve between
+zero and 5 O₂ rejects the jump, preserving the input posture and reserve. Only a fully empty reserve gets the free
+mini hop: its launch speed uses the same neutral balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch
+speed, which produces about half the full apex. The mini hop does not change O₂ or add the full-jump recovery delay.
+Crouching has no entry cost. The normal standing
 speed is the 1.5×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
 frame's drain is affordable. When it is not (including at 0%), the sprint request is cleared and the controller stays at
 the same 1.5×-base trot rather than retrying sprint every frame. The trot's quarter walk-to-sprint blend combines the
@@ -464,9 +463,9 @@ The reserve-driven breathing destabilisation now uses one shared 2× fatigue emp
 response; the held weapon consumes that same perspective output, while shot recoil recovery remains a separate central
 spring response.
 
-Pressing Jump while crouched automatically returns the player to standing when either a full jump or the fallback
-mini hop is accepted. The automatic posture change is part of the jump action, so a full jump keeps the existing
-single 5-point cost while an O₂-insufficient mini hop remains free. The returned jump posture also keeps the mobile
+Pressing Jump while crouched automatically returns the player to standing when either a full jump or the zero-O₂
+fallback mini hop is accepted. The automatic posture change is part of the jump action, so a full jump keeps the
+existing single 5-point cost while a partial reserve leaves the player crouched. The returned jump posture also keeps the mobile
 Crouch button's pressed state aligned with the scene controller.
 
 When the first-person capsule is touching the side of any active physics box,
@@ -547,7 +546,10 @@ requested horizontal velocity with the velocity Rapier resolves after contact; p
 delta-v than the player carried into the wall. Sprint speed (10.2 m/s, exactly 36.72 km/h) and below is always harmless.
 Above that limit, a kinetic-energy-shaped km/h curve scales wall damage, reaching 200 damage at an approximate 200 km/h
 human terminal velocity. Landings use the separate O₂ energy curve described above, so a fall can be harmless while the
-reserve is available and only the unpaid exertion becomes shield/health damage.
+reserve is available and only the unpaid exertion becomes shield/health damage. For vertical landings, the normal
+full-jump landing speed (13.2 m/s, 47.52 km/h) is the damage-free deceleration window: an empty reserve does not make
+a normal jump hurt the player, while faster falls can convert the unpaid charge into shield/health damage through the
+same kinetic-energy curve.
 In development (`?debug=1`),
 the Visual debug panel has `Simulate 25 damage` and `Reset vitals` controls so the recharge
 loop can be checked without arranging a traversal impact. The HUD exposes shield and health bars,
@@ -716,12 +718,14 @@ replacement model.
 ## Traversal weapon presentation
 
 The first-person controller sends active ledge-vault and wall-climb state through the same centralized camera-motion
-damper that drives weapon put-away. The damper receives the resolved climb duration and uses a faster-starting 2x
-lowering curve that reaches its target only at the end of the climb, avoiding a mid-traversal bottom clamp. A vault uses a
-shallow 20% lower amount so the gun remains visible as if it is resting on the obstacle. Wall climbs scale by the
-block's full height and reach the full lower pose at 4 m. Wall hanging alone does not start the lower animation. This
-does not alter physics or aim-ray authority; firing, reload, pickup, and drop remain locked until the shared raise phase
-returns to idle. It only composes a traversal-specific viewmodel pose. Coverage is in `apps/web/src/scene/camera-motion.test.ts`.
+damper that drives weapon put-away. Weapon switching and traversal now share one partial lower pose. The damper receives
+the resolved climb duration, including the current O₂-based speed multiplier: empty O₂ is the slowest base duration and
+full O₂ is twice as fast, with a smooth response between them. It uses two chained faster-starting 2x easing passes and
+can continue below that partial pose
+without a bottom clamp if the traversal remains active. Wall height does not select a second full-drop animation. Wall
+hanging alone does not start the lower animation. This does not alter aim-ray authority; firing, reload, pickup, and drop
+remain locked until the shared raise phase returns to idle. It only composes the shared viewmodel pose. Coverage is in
+`apps/web/src/scene/camera-motion.test.ts` and the duration helper tests in `apps/web/src/scene/mahjong-table.test.ts`.
 
 ## Reload movement
 
@@ -829,6 +833,16 @@ factor. This prevents holding breath from causing the heavy breathing and shakin
 
 Wall bracing still applies its independent 50% factor to the existing reserve-driven response. If the player leans on a
 wall while holding breath, the factors compose to 25% for reticle, weapon, and stationary camera breathing motion.
+
+Cover mode is a separate edge-triggered presentation state. Zoom must be toggled on while the completed wall-contact
+probe is already true; walking into a wall while zoom is already active does not arm cover. Toggle zoom off and on
+again after contact to engage it. While cover is active, the shared camera damper moves the camera, viewmodel, reticule,
+and aim ray together for a damped lateral lean and roll. A/D strafe input supplies the corresponding lean and is the
+only cover-lean input. Movement is clamped to the engaged wall face, including yaw-rotated walls, so the capsule stops
+at the usable edge instead of sliding far enough to lose contact. The cover presentation now reaches a
+0.46 m lateral peek and 12° roll. The cover roll follows the lean side (left cover leans left on screen), while the
+optical reticle stays centred and the aim ray uses the leaned camera pose. Leaving the wall or leaving zoom immediately
+clears cover.
 
 ## Damage-driven barrel heat
 
@@ -968,3 +982,76 @@ points use a saturated red layer. The initial opacity is the exact delta multipl
 (one point equals one percent opacity). Each layer fades over `0.5` seconds. Multiple rapid strikes therefore remain
 separate compositor layers and build opacity through normal sequential alpha blending. A strike that crosses the
 shield boundary creates both its blue shield layer and red health layer from their separate deltas.
+
+## Variable traversal O₂ cost
+
+Vaults and wall climbs use one shared height-based O₂ charge. A traversal at or below the minimum 0.15 m vault height
+is free, a 2.0 m traversal costs the 10 O₂ landing reference charge, and heights between those endpoints use a linear
+interpolation. Heights above 2.0 m remain capped at 10 O₂. The charge is paid when the vault or climb transition starts;
+if the reserve cannot pay the full amount, the transition does not start and a wall-hang state remains available for a
+later attempt. The existing O₂-dependent traversal duration uses the reserve immediately before this charge.
+
+## Ragdoll melee props
+
+Knockable exploration props can be equipped with `E`, swung with the mouse, thrown with `Q`, and dropped/holstered with `0`.
+The carried prop is a separate hand slot from the two gun slots: walking over a gun stores it without replacing the
+prop and does not draw it while melee is active. Selecting a stored gun with `1` or `2` (or using `E` on a nearby gun)
+stashes the prop in hand while the gun becomes the active input target. Press `E` again when no gun pickup is being
+selected to draw the stashed prop back. This keeps the melee and gun viewmodels mutually exclusive while still allowing
+walk-over pickup to fill an empty gun slot.
+The first-person object is the actual source prop geometry and material from the world `InstancedMesh`, with its proportions
+and full size preserved. Pickup deliberately resets transient ragdoll rotation to the canonical upright grip; there is no
+substitute rounded-box weapon model. Each prop's
+collider volume is the mass proxy for melee tuning. With volume `V` in cubic metres, the prototype uses:
+
+The seeded outdoor ragdoll families now use recognizable city objects rather than anonymous placeholders: a wooden
+baseball bat, a blue-green street sign, a tapered metal pipe, an orange traffic cone, and a dark cast-iron manhole cover.
+Their silhouettes and materials are authored in the same local Three.js scene, so no external assets or image CDN are
+needed. The bat, pipe, cone, and manhole cover rest on the city floor at their physical half-height; the sign remains a mounted-height street prop. The
+display name shown in the pickup and loadout HUD matches the visible item. Physics IDs, seeded placement, knockable
+state, and the source-geometry viewmodel path are unchanged.
+
+Throwing, dropping, or holstering a held prop returns it to the world as a dynamic ragdoll. A throw adds the mass-scaled
+forward impulse; a drop keeps the player's current velocity, adds a small lift, and applies a spin so it falls and settles
+through the same Rapier knockable path as a melee hit. The explicitly dropped or thrown instance remains a recoverable
+pickup at its live transform, even after it travels far from
+its seeded spawn region; re-equipping removes only that instance's dynamic body. Props toppled by a melee hit or player
+collision remain background ragdolls and are not silently promoted to additional held items. Moved instanced props
+refresh their render bounds after each transform update, so a prop remains visible after it travels away from its spawn.
+
+- damage: `clamp(100 × (V / 0.12)^0.85, 6, 400)`;
+- swing speed: `clamp(4 × sqrt(0.12 / V), 1.5, 9)` radians per second;
+- swing O₂ cost: `0.25 × damage`, matching one gun projectile.
+
+Q throws the held prop along the full aim direction while preserving player velocity. Throw speed is mass-scaled from
+`clamp(11 × sqrt(4 kg / mass), 2, 14)` m/s. The first scene surface crossed by the dynamic body receives throw-impact
+metadata with `0.5 × mass × impactSpeed²` joules and damage `clamp(0.12 × joules, 0, 400)`. A 90 kg manhole cover is
+therefore slow, but a sprint-assisted high-speed impact is substantially more damaging than a light prop. The current
+visual scene records this on `lastMeleeThrowHit`; a future target-health actor can consume the same event without changing
+the formula.
+
+The HUD rounds damage to whole points and swing speed to one decimal place. For example, a prop near `0.036 m³` resolves
+to about `36` damage and `7.3 rad/s`. The held prop rests upright, high on the active side, winds farther back, drives outward
+through the centre to the opposite side, and rises into the next ready pose. Consecutive swings alternate right-to-left
+and left-to-right. The source axis stays upright at rest, the hand pivot is moved near its butt end, and the barrel makes one corkscrew
+then uncorkscrew through contact, so an upright pole is presented and swung like a simple baseball bat rather than spun upright.
+
+Melee reach is derived from the full longest collider axis: `max(0.80 m, 2 × max(halfExtents.x, halfExtents.y,
+halfExtents.z))`. The `0.80 m` floor approximates the shoulder-to-hand reach of a 1.85 m player. There is no global
+range cap, so a longer prop receives a longer swing ray. The HUD reports the resolved reach for the nearby and held
+object.
+
+Camera recoil is applied at every valid visible surface contact, including walls, scenery, and already-knocked props;
+only a fresh knockable prop continues into `applyMeleeHit` for the separate swing-speed-scaled physical ragdoll
+impulse. There is no camera kick at swing start or on a miss. The target's impact direction is converted into
+camera-local axes and inverted for the camera response: if the swing knocks a target left, the camera kicks right.
+Forward/back contact also produces a short damage-scaled depth kick. The contact kick uses the same central
+camera/viewmodel/reticule damper as gun recoil. The impact
+itself is resolved at `50%` of the complete swing animation, not when the mouse button is pressed. Because the
+animation duration is derived from swing speed, a heavier prop reaches that midpoint later and therefore has a longer
+wind-up before its contact. At the impact instant, melee samples a 21-ray forward cone with a `0.42` radian outer
+half-angle (plus an inner ring and centre ray), so targets in front of the player do not need to sit exactly under the
+reticule. The closest visible surface in that cone receives the hit. The impulse direction follows the held prop tip's
+measured world-space velocity at impact; if that sample is unavailable, the vector from the aim origin to the actual
+`hit.point` is used. The target impulse magnitude remains tied to the resolved swing speed, so a faster prop delivers
+the stronger hit.

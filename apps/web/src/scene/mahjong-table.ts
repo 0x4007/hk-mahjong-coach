@@ -58,8 +58,25 @@ import {
   type WeaponSpawnRect,
   type WeaponStateSnapshot,
 } from "./weapons.js";
+import {
+  MELEE_HIT_AREA_RAY_OFFSETS,
+  resolveMeleeImpactDirection,
+  resolveMeleeLongestSizeMeters,
+  resolveMeleeO2Cost,
+  resolveMeleeRangeMeters,
+  resolveMeleeSwing,
+  resolveMeleeSwingPose,
+  resolveMeleeThrow,
+  resolveMeleeThrowVelocity,
+  type MeleeImpactVector,
+  type MeleeThrowResolution,
+  type MeleeObjectSnapshot,
+  type MeleeStateSnapshot,
+  type MeleeSwingDirection,
+} from "./melee.js";
 
 export type { WeaponId, WeaponInventorySnapshot, WeaponStateSnapshot } from "./weapons.js";
+export type { MeleeObjectSnapshot, MeleeStateSnapshot } from "./melee.js";
 
 import {
   createFallbackMahjongPhysics,
@@ -72,6 +89,7 @@ import {
 import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_LANDING_BASE_COST,
   O2_LANDING_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
   O2_SPRINT_DRAIN_PER_SECOND,
@@ -97,6 +115,7 @@ import {
   PLAYER_WALK_SPEED_RATIO,
   resolveImpactDamage,
   resolveLandingO2Cost,
+  resolveLandingO2OverflowDamage,
 } from "./player-impact.js";
 import {
   PLAYER_CAPSULE_CENTER_HEIGHT,
@@ -106,7 +125,6 @@ import {
   PLAYER_JUMP_SPEED,
   PLAYER_STANDING_EYE_HEIGHT,
   PLAYER_STANDING_EYE_HEIGHT_METERS,
-  PLAYER_SUPPORT_SNAP_HEIGHT,
   PLAYER_WALK_MULTIPLIER,
   PLAYER_TROT_MULTIPLIER,
   WORLD_GRAVITY,
@@ -114,7 +132,10 @@ import {
 import {
   CAMERA_VIEWMODEL_STANDING_OFFSET,
   createCameraMotionDamper,
+  resolveCameraLocalAccelerationFromVelocityDelta,
   resolveCameraViewmodelTransition,
+  type CameraLocalFrame,
+  type CameraMotionVector,
   type CameraViewmodelOffset,
   type CameraViewmodelTransition,
   type CameraLocalAcceleration,
@@ -136,7 +157,12 @@ import {
   setO2BlurPassVignette,
   type DamageVignetteKind,
 } from "./o2-blur.js";
-import { isPlayerTouchingWall } from "./wall-contact.js";
+import {
+  clampPlayerPositionToWallTangent,
+  projectPlayerMovementToWallTangent,
+  resolvePlayerWallContact,
+  type PlayerWallContact,
+} from "./wall-contact.js";
 import {
   applySniperScopeProjection,
   createSniperScopePass,
@@ -211,7 +237,40 @@ export const resolveReloadAimingDownSights = (
   reloading: boolean,
 ): boolean => aimingDownSightsRequested && !reloading;
 
+/**
+ * Cover is an explicit zoom transition, not a side effect of walking into a
+ * wall while already zoomed. The caller supplies the pending zoom-on edge
+ * after the physics contact probe has run for the current frame.
+ */
+export const resolveCoverModeFromAimTransition = (
+  coverMode: boolean,
+  zoomActivated: boolean,
+  aimingDownSights: boolean,
+  touchingWall: boolean,
+): boolean => aimingDownSights && touchingWall && (coverMode || zoomActivated);
+
+/** Resolve the A/D strafe input used by cover presentation. */
+export const resolveCoverLeanInput = (coverMode: boolean, strafeInput: number): number => {
+  if (!coverMode) {
+    return 0;
+  }
+  return Number.isFinite(strafeInput) ? THREE.MathUtils.clamp(strafeInput, -1, 1) : 0;
+};
+
+/** A successful gun interaction or selection takes input focus from drawn melee. */
+export const shouldStashMeleeForGun = (
+  meleeActive: boolean,
+  gunActionSucceeded: boolean,
+): boolean => meleeActive && gunActionSucceeded;
+
+/** Walking over a gun may fill an inventory slot, but must not draw it over melee. */
+export const shouldEquipWalkOverGun = (meleeActive: boolean, gunAlreadyActive: boolean): boolean =>
+  !meleeActive && !gunAlreadyActive;
+
 export const MOVEMENT_DOUBLE_TAP_WINDOW_MS = 300;
+
+/** Keep a quick jump tap alive long enough to catch an airborne wall contact. */
+export const JUMP_INPUT_BUFFER_SECONDS = 0.35;
 
 const MOVEMENT_KEY_CODES: ReadonlySet<string> = new Set([
   "KeyW",
@@ -834,6 +893,7 @@ export interface MahjongTableSceneOptions {
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
+  readonly onMeleeStateChange?: (state: MeleeStateSnapshot) => void;
   readonly onReady?: () => void;
   readonly quality?: VisualQualityPreset | "auto";
   readonly roomSeed?: string;
@@ -1071,7 +1131,12 @@ interface WallHangState {
   elapsed: number;
 }
 
-type WallClimbTransition = ClimbingTransition;
+interface WallClimbTransition extends ClimbingTransition {
+  /** World-space launch velocity applied to the authoritative capsule. */
+  physicsVelocity: PhysicsVector;
+  /** Safety timeout if the physical landing cannot be resolved. */
+  timeoutSeconds: number;
+}
 
 type LedgeClimbMomentum = Readonly<{
   readonly preservedForwardVelocity: number;
@@ -1384,6 +1449,50 @@ const MINI_HOP_SPEED = JUMP_SPEED * O2_MINI_HOP_SPEED_BLEND;
 export const resolveJumpLaunchSpeed = (fullJumpAccepted: boolean): number =>
   fullJumpAccepted ? JUMP_SPEED : MINI_HOP_SPEED;
 
+export interface JumpOxygenResolution {
+  readonly accepted: boolean;
+  readonly fullJump: boolean;
+  readonly launchSpeed: number;
+}
+
+/**
+ * Resolve the jump reserve gate without turning a partial reserve into a
+ * reduced jump. A reserve below the full charge is an unavailable jump; the
+ * reduced backup launch exists only after the reserve is fully empty.
+ */
+export const resolveJumpOxygenAvailability = (availableO2: number): JumpOxygenResolution => {
+  const reserve = Number.isFinite(availableO2) ? Math.max(0, availableO2) : 0;
+  if (reserve >= O2_JUMP_COST) {
+    return { accepted: true, fullJump: true, launchSpeed: resolveJumpLaunchSpeed(true) };
+  }
+  if (reserve <= Number.EPSILON) {
+    return { accepted: true, fullJump: false, launchSpeed: resolveJumpLaunchSpeed(false) };
+  }
+  return { accepted: false, fullJump: false, launchSpeed: 0 };
+};
+
+/** Resolve the physical launch impulse that clears a caught wall top. */
+export const resolveWallClimbLaunchVelocity = (
+  climbHeight: number,
+  climbDirection: PhysicsVector,
+  preservedSpeed: number,
+): PhysicsVector => {
+  const safeHeight = Number.isFinite(climbHeight) ? Math.max(0, climbHeight) : 0;
+  const horizontalLength = Math.hypot(climbDirection.x, climbDirection.z);
+  const horizontalDirection =
+    horizontalLength > Number.EPSILON
+      ? { x: climbDirection.x / horizontalLength, z: climbDirection.z / horizontalLength }
+      : { x: 0, z: 0 };
+  const horizontalSpeed = Number.isFinite(preservedSpeed)
+    ? Math.max(2.5, Math.min(6, Math.max(0, preservedSpeed)))
+    : 2.5;
+  return {
+    x: horizontalDirection.x * horizontalSpeed,
+    y: Math.sqrt(2 * GRAVITY * (safeHeight + 0.15)),
+    z: horizontalDirection.z * horizontalSpeed,
+  };
+};
+
 // Every platform traversal uses the same continuous climb-over transition.
 // The duration is resolved from the obstacle height below; these offsets keep
 // the landing supported and preserve the brief momentum carried over the top.
@@ -1466,7 +1575,7 @@ export const resolveWeaponShotReticleOffset = (
     CameraMotionOffsets,
     "roll" | "verticalOffset" | "aimSwayX" | "aimSwayY" | "recoilYaw" | "recoilPitch"
   > &
-    Partial<Pick<CameraMotionOffsets, "headBobLateral" | "headBobPitch">>,
+    Partial<Pick<CameraMotionOffsets, "coverLeanRoll" | "headBobLateral" | "headBobPitch">>,
   includeRecoil = true,
   recoilFeedbackMultiplier = 1,
 ): ReticleBobbingOffset => {
@@ -1474,9 +1583,10 @@ export const resolveWeaponShotReticleOffset = (
     ? Math.max(0, Math.min(1, recoilFeedbackMultiplier))
     : 0;
   const recoilScale = includeRecoil ? safeRecoilFeedbackMultiplier : 0;
+  const reticleRoll = motion.roll - (motion.coverLeanRoll ?? 0);
   return {
     x:
-      (motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
+      (reticleRoll * RETICLE_SWAY_PIXELS_PER_RADIAN +
         (motion.headBobLateral ?? 0) * RETICLE_HEAD_BOB_LATERAL_PIXELS_PER_METER +
         motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
         motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN * recoilScale) *
@@ -2215,6 +2325,16 @@ export const clipExplorationRectAroundPlayAreas = (
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const smoothStep = (value: number): number => value * value * (3 - 2 * value);
 
+const resolveClimbingTransitionY = (transition: ClimbingTransition, elapsed: number): number => {
+  const progress = smoothStep(
+    THREE.MathUtils.clamp(elapsed / Math.max(transition.duration, Number.EPSILON), 0, 1),
+  );
+  return transition.phase === "vault"
+    ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
+        Math.sin(progress * Math.PI) * transition.arcHeight
+    : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+};
+
 const hashNoise = (seed: string, x: number, z: number, salt: string): number => {
   const random = createSeededRandom(`${seed}|${salt}|${String(x)}|${String(z)}`);
   return random.nextFloat();
@@ -2565,6 +2685,36 @@ export const resolveVaultTraversalDuration = (heightAboveFeet: number): number =
     VAULT_MAX_DURATION_SECONDS,
     normalizedHeight,
   );
+};
+/**
+ * Resolve the discrete O₂ charge for a vault or wall climb from its height.
+ * The smallest vaultable ledges are free; a two-metre traversal costs the
+ * same 10 O₂ reference charge as a full landing, with a linear curve between
+ * those endpoints.
+ */
+export const resolveVaultTraversalO2Cost = (heightAboveFeet: number): number => {
+  const safeHeight = Number.isFinite(heightAboveFeet) ? Math.max(0, heightAboveFeet) : 0;
+  const normalizedHeight = THREE.MathUtils.clamp(
+    (safeHeight - VAULT_MIN_HEIGHT) / (VAULT_MAX_HEIGHT - VAULT_MIN_HEIGHT),
+    0,
+    1,
+  );
+  return O2_LANDING_BASE_COST * normalizedHeight;
+};
+/**
+ * Scale traversal time from the current O₂ reserve. Empty O₂ keeps the existing
+ * maximum duration as the slowest case; full O₂ doubles traversal speed.
+ */
+export const resolveO2ScaledTraversalDuration = (
+  baseDurationSeconds: number,
+  oxygenRatio: number,
+): number => {
+  const safeDuration = Number.isFinite(baseDurationSeconds) ? Math.max(0, baseDurationSeconds) : 0;
+  const safeOxygenRatio = Number.isFinite(oxygenRatio)
+    ? THREE.MathUtils.clamp(oxygenRatio, 0, 1)
+    : 0;
+  const durationMultiplier = 2 ** -safeOxygenRatio;
+  return safeDuration * durationMultiplier;
 };
 /** Scale the over-the-top arc with the same continuous height mapping. */
 export const resolveVaultTraversalArcHeight = (heightAboveFeet: number): number => {
@@ -4383,16 +4533,17 @@ interface WeaponRuntime {
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
     spreadContext: GunSpreadResolutionContextV1,
+    meleeActive: boolean,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
   readonly reload: () => void;
   readonly interruptReload: () => void;
   readonly isReloading: () => boolean;
-  readonly interact: () => void;
-  readonly holster: () => void;
-  readonly cycleWeapon: (direction?: 1 | -1) => void;
-  readonly cycleWeaponTo: (slotIndex: number) => void;
+  readonly interact: () => boolean;
+  readonly holster: (immediate?: boolean) => void;
+  readonly cycleWeapon: (direction?: 1 | -1) => boolean;
+  readonly cycleWeaponTo: (slotIndex: number) => boolean;
   readonly dropActiveWeapon: (playerVelocity?: PhysicsVector) => void;
   readonly recordDeath: () => void;
   readonly getSniperScopeLens: () => {
@@ -4401,6 +4552,29 @@ interface WeaponRuntime {
     readonly magnification: number;
   } | null;
   readonly getSnapshot: () => WeaponStateSnapshot;
+  readonly dispose: () => void;
+}
+
+interface MeleeRuntime {
+  readonly update: (
+    deltaSeconds: number,
+    cameraPosition: THREE.Vector3,
+    aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
+    controlsActive: boolean,
+    viewActive: boolean,
+    viewmodelOffset: CameraViewmodelOffset,
+    viewmodelTransition: CameraViewmodelTransition,
+  ) => void;
+  readonly setFireHeld: (held: boolean) => void;
+  readonly fire: () => boolean;
+  readonly interact: () => boolean;
+  readonly isActive: () => boolean;
+  /** Hide the carried prop without returning it to the world. */
+  readonly stash: () => boolean;
+  readonly throwActiveObject: (playerVelocity?: PhysicsVector) => boolean;
+  readonly holster: () => boolean;
+  readonly dropActiveObject: (playerVelocity?: PhysicsVector) => boolean;
+  readonly getSnapshot: () => MeleeStateSnapshot;
   readonly dispose: () => void;
 }
 
@@ -5403,12 +5577,12 @@ const createWeaponRuntime = (
       applyWeaponBarrelHeat(instance.instanceId, nextDamage);
     }
   };
-  const setActiveSlot = (slotIndex: number | null): void => {
+  const setActiveSlot = (slotIndex: number | null): boolean => {
     const slot = slotIndex === null ? null : slots[slotIndex];
     const instance = resolveInstanceForSlot(slot ?? null);
     const profileHash = instance?.profileHash ?? null;
     if (slotIndex !== null && (slot === undefined || instance === null)) {
-      return;
+      return false;
     }
     const previousInstance = resolveActiveInstance();
     const previousProfileHash = previousInstance?.profileHash ?? null;
@@ -5427,8 +5601,21 @@ const createWeaponRuntime = (
       switchAnimation = null;
       showWeaponViewModel(profileHash);
     }
+    return true;
   };
-  const holsterWeapon = (): void => {
+  const holsterWeapon = (immediate = false): void => {
+    if (immediate) {
+      activeSlotIndex = null;
+      switchAnimation = null;
+      switchStartedSinceLastUpdate = false;
+      viewmodelTransitionActive = false;
+      reloadingSeconds = 0;
+      resetRoundReloadPresentation();
+      showWeaponViewModel(null);
+      nearbyPickup = null;
+      emitState(true);
+      return;
+    }
     setActiveSlot(null);
     emitState(true);
   };
@@ -5561,19 +5748,19 @@ const createWeaponRuntime = (
     nearbyPickup = null;
     emitState(true);
   };
-  const collectPickup = (visual: WeaponPickupVisual, equip = true): void => {
+  const collectPickup = (visual: WeaponPickupVisual, equip = true): boolean => {
     if (switchAnimation !== null || viewmodelTransitionActive) {
-      return;
+      return false;
     }
     const slotIndex = findFirstFreeGunSlot(slots);
     if (slotIndex === null) {
       // A full inventory leaves the pickup in the world. There is no silent
       // replacement and no hidden destruction of an existing instance.
-      return;
+      return false;
     }
     const slot = slots[slotIndex];
     if (slot === undefined) {
-      return;
+      return false;
     }
     const gun = visual.spawn.gun;
     gunInstances.set(gun.instanceId, gun);
@@ -5587,19 +5774,20 @@ const createWeaponRuntime = (
     applyWeaponBarrelHeat(gun.instanceId, gun.temperatureC);
     nearbyPickup = null;
     emitState(true);
+    return true;
   };
-  const swapActiveWeaponWithPickup = (visual: WeaponPickupVisual): void => {
+  const swapActiveWeaponWithPickup = (visual: WeaponPickupVisual): boolean => {
     if (switchAnimation !== null || viewmodelTransitionActive || activeSlotIndex === null) {
-      return;
+      return false;
     }
     const activeSlot = slots[activeSlotIndex];
     const outgoing = resolveActiveInstance();
     if (activeSlot === undefined || outgoing === null) {
-      return;
+      return false;
     }
     const incoming = visual.spawn.gun;
     if (incoming.instanceId === outgoing.instanceId) {
-      return;
+      return false;
     }
     const outgoingPosition: readonly [number, number, number] = [
       visual.root.position.x,
@@ -5635,6 +5823,7 @@ const createWeaponRuntime = (
     applyWeaponBarrelHeat(incoming.instanceId, incoming.temperatureC);
     nearbyPickup = null;
     emitState(true);
+    return true;
   };
   const findNearestPickup = (
     position: THREE.Vector3,
@@ -5648,24 +5837,24 @@ const createWeaponRuntime = (
       .map((visual) => ({ visual, distance: visual.root.position.distanceTo(position) }))
       .filter(({ distance }) => distance <= WEAPON_PICKUP_RANGE_METERS)
       .sort((left, right) => left.distance - right.distance)[0];
-  const interact = (): void => {
+  const interact = (): boolean => {
     const candidate = findNearestPickup(camera.position);
     if (candidate === undefined) {
-      return;
+      return false;
     }
     if (findFirstFreeGunSlot(slots) !== null) {
       // E is intentional: unlike a walk-over, it equips the chosen pickup.
-      collectPickup(candidate.visual, true);
+      return collectPickup(candidate.visual, true);
     } else {
       // A full inventory makes E a deliberate hand swap. Walk-over remains a
       // no-op, so sprinting past a candidate never destroys the held gun.
-      swapActiveWeaponWithPickup(candidate.visual);
+      return swapActiveWeaponWithPickup(candidate.visual);
     }
   };
-  const cycleWeapon = (direction: 1 | -1 = 1): void => {
+  const cycleWeapon = (direction: 1 | -1 = 1): boolean => {
     const owned = slots.filter((slot) => slot.gunInstanceId !== null).map((slot) => slot.slotIndex);
     if (owned.length === 0) {
-      return;
+      return false;
     }
     const currentIndex = activeSlotIndex === null ? -1 : owned.indexOf(activeSlotIndex);
     const nextIndex =
@@ -5676,14 +5865,18 @@ const createWeaponRuntime = (
         : (currentIndex + direction + owned.length) % owned.length;
     const nextSlotIndex = owned[nextIndex];
     if (nextSlotIndex === undefined) {
-      return;
+      return false;
     }
-    setActiveSlot(nextSlotIndex);
+    const selected = setActiveSlot(nextSlotIndex);
     emitState(true);
+    return selected;
   };
-  const selectWeapon = (slotIndex: number): void => {
-    setActiveSlot(slotIndex);
-    emitState(true);
+  const selectWeapon = (slotIndex: number): boolean => {
+    const selected = setActiveSlot(slotIndex);
+    if (selected) {
+      emitState(true);
+    }
+    return selected;
   };
   const getSniperScopeLens = (): {
     readonly anchor: THREE.Object3D;
@@ -6196,6 +6389,7 @@ const createWeaponRuntime = (
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
     spreadContext: GunSpreadResolutionContextV1,
+    meleeActive: boolean,
   ): void => {
     controlsActive = active;
     viewActive = visibleInView;
@@ -6318,7 +6512,7 @@ const createWeaponRuntime = (
     // held weapon stays in hand when this fills the second slot; E remains the
     // deliberate equip/swap action.
     if (controlsActive && horizontalDistanceMoved > 0.001 && nearest !== undefined) {
-      collectPickup(nearest.visual, activeSlotIndex === null);
+      collectPickup(nearest.visual, shouldEquipWalkOverGun(meleeActive, activeSlotIndex !== null));
     }
     const nextNearbyVisual = findNearestPickup(cameraPosition)?.visual;
     const nextNearby =
@@ -6506,6 +6700,640 @@ const createWeaponRuntime = (
     dropActiveWeapon,
     recordDeath,
     getSniperScopeLens,
+    getSnapshot,
+    dispose,
+  };
+};
+
+interface MeleeViewModelResources {
+  readonly root: THREE.Group;
+  readonly object: THREE.Mesh;
+  /** The source geometry endpoint used to sample the visible prop tip. */
+  readonly tipLocal: THREE.Vector3;
+}
+
+interface MeleeImpactEffect {
+  readonly object: THREE.Mesh;
+  remainingSeconds: number;
+}
+
+/**
+ * Runtime for claiming the same seeded knockable props used by the world
+ * ragdoll path. It deliberately lives beside the gun runtime so both tools
+ * share the reticle, camera-child viewmodel, and pointer input without
+ * changing the authoritative physics representation.
+ */
+const createMeleeRuntime = (
+  scene: THREE.Scene,
+  camera: THREE.PerspectiveCamera,
+  explorationWorld: ExplorationWorld,
+  onStateChange?: (state: MeleeStateSnapshot) => void,
+  onMeleeSwing?: (damage: number) => number,
+  onMeleeContact?: (damage: number, impactDirection: MeleeImpactVector) => void,
+  onMeleeThrowImpact?: (damage: number, impactDirection: MeleeImpactVector) => void,
+  onMeleeEquip?: () => void,
+): MeleeRuntime => {
+  const effectRoot = new THREE.Group();
+  effectRoot.name = "MeleeEffectsRoot";
+  effectRoot.userData = { weaponVisual: true, dofIgnore: true };
+  scene.add(effectRoot);
+  const impactEffects: MeleeImpactEffect[] = [];
+  const raycaster = new THREE.Raycaster();
+  raycaster.camera = camera;
+  const aimTargetWorld = new THREE.Vector3();
+  const aimTargetLocal = new THREE.Vector3();
+  const aimDirectionLocal = new THREE.Vector3();
+  const aimQuaternion = new THREE.Quaternion();
+  const objectForward = new THREE.Vector3(0, 0, -1);
+  const hitDirection = new THREE.Vector3();
+  const hitRight = new THREE.Vector3();
+  const hitUp = new THREE.Vector3();
+  const hitSampleDirection = new THREE.Vector3();
+  const hitCameraQuaternion = new THREE.Quaternion();
+  const latestCameraPosition = new THREE.Vector3();
+  const latestAimDirection = new THREE.Vector3(0, 0, -1);
+  const currentTipWorldPosition = new THREE.Vector3();
+  const previousTipWorldPosition = new THREE.Vector3();
+  const batTipVelocity = new THREE.Vector3();
+  const dropDirection = new THREE.Vector3();
+  const dropPosition = new THREE.Vector3();
+  let activePickup: ExplorationMeleePickup | null = null;
+  // A carried prop can be stashed while a gun is selected. It remains
+  // equipped in the world simulation, but only the drawn item is active for
+  // input and presentation.
+  let drawn = false;
+  let viewModel: MeleeViewModelResources | null = null;
+  let nearby: MeleeStateSnapshot["nearby"] = null;
+  let swinging = false;
+  let swingElapsedSeconds = 0;
+  let swingDurationSeconds = 0;
+  let swingHitTimeSeconds = 0;
+  let swingDirection: MeleeSwingDirection = "right-to-left";
+  let nextSwingDirection: MeleeSwingDirection = "right-to-left";
+  let swingHitResolved = false;
+  let swings = 0;
+  let hits = 0;
+  let lastDamage = 0;
+  let lastOxygenCost = 0;
+  let fireHeld = false;
+  let controlsActive = false;
+  let viewActive = false;
+  let latestAimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  } | null = null;
+  let latestViewmodelOffset: CameraViewmodelOffset = { x: 0, y: 0, z: 0 };
+  let latestViewmodelTransition: CameraViewmodelTransition = {
+    phase: "idle",
+    progress: 1,
+    offset: { x: 0, y: 0, z: 0 },
+    pitchRadians: 0,
+    yawRadians: 0,
+    rollRadians: 0,
+  };
+  let hasTipWorldSample = false;
+  let lastSerializedSnapshot = "";
+
+  const getSnapshot = (): MeleeStateSnapshot => ({
+    active: drawn ? (activePickup?.snapshot ?? null) : null,
+    nearby,
+    swinging,
+    swings,
+    hits,
+    lastDamage,
+    lastOxygenCost,
+  });
+  const emitState = (force = false): void => {
+    const snapshot = getSnapshot();
+    const serialized = JSON.stringify(snapshot);
+    if (force || serialized !== lastSerializedSnapshot) {
+      lastSerializedSnapshot = serialized;
+      onStateChange?.(snapshot);
+    }
+  };
+
+  const disposeViewModel = (): void => {
+    if (viewModel === null) {
+      return;
+    }
+    camera.remove(viewModel.root);
+    disposeObject(viewModel.root);
+    viewModel = null;
+    hasTipWorldSample = false;
+  };
+  const createViewModel = (
+    pickup: ExplorationMeleePickup,
+    sourceMatrix?: THREE.Matrix4,
+  ): MeleeViewModelResources => {
+    const root = new THREE.Group();
+    root.name = `MeleeObject:${String(pickup.objectId)}`;
+    root.userData = { weaponVisual: true, dofIgnore: true };
+    const instanceMatrix = sourceMatrix?.clone() ?? new THREE.Matrix4();
+    if (sourceMatrix === undefined) {
+      pickup.mesh.getMatrixAt(pickup.index, instanceMatrix);
+    }
+    const instanceScale = new THREE.Vector3();
+    // A knocked or dropped prop's matrix can contain an arbitrary ragdoll
+    // rotation. Keep its scale for the full-size viewmodel, but deliberately
+    // discard that transient quaternion; pickup should always normalize the
+    // held object back to its canonical upright grip.
+    instanceMatrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), instanceScale);
+    // Use the source InstancedMesh geometry/material instead of inventing a
+    // proxy shape. The instance matrix supplies the prop's proportions and
+    // full world size; orientation is rebuilt from its canonical axis below.
+    const geometry = pickup.mesh.geometry.clone();
+    geometry.computeBoundingBox();
+    const sourceSize = new THREE.Vector3();
+    geometry.boundingBox?.getSize(sourceSize);
+    const sourceCenter =
+      geometry.boundingBox?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3();
+    const scaledSourceSize = sourceSize.multiply(
+      new THREE.Vector3(
+        Math.abs(instanceScale.x),
+        Math.abs(instanceScale.y),
+        Math.abs(instanceScale.z),
+      ),
+    );
+    const longestAxis = new THREE.Vector3(1, 0, 0);
+    if (scaledSourceSize.y > scaledSourceSize.x && scaledSourceSize.y >= scaledSourceSize.z) {
+      longestAxis.set(0, 1, 0);
+    } else if (scaledSourceSize.z > scaledSourceSize.x) {
+      longestAxis.set(0, 0, 1);
+    }
+    const tipLocal = sourceCenter.clone();
+    if (geometry.boundingBox !== null) {
+      if (longestAxis.x > 0) {
+        tipLocal.x = geometry.boundingBox.max.x;
+      } else if (longestAxis.y > 0) {
+        tipLocal.y = geometry.boundingBox.max.y;
+      } else {
+        tipLocal.z = geometry.boundingBox.max.z;
+      }
+    }
+    const uprightGripQuaternion = new THREE.Quaternion().setFromUnitVectors(
+      longestAxis,
+      new THREE.Vector3(0, 1, 0),
+    );
+    const sourceLength = Math.max(scaledSourceSize.x, scaledSourceSize.y, scaledSourceSize.z);
+    const sourceMaterial = pickup.mesh.material;
+    const material = Array.isArray(sourceMaterial)
+      ? sourceMaterial.map((entry) => entry.clone())
+      : sourceMaterial.clone();
+    const object = new THREE.Mesh(geometry, material);
+    object.name = "MeleeRagdollObject";
+    // Put the player's hand near the butt end of the full-size source prop.
+    // The center is offset along the now-upright source axis so the bottom of
+    // a pole sits at the hand instead of pivoting around its center of mass.
+    object.position.set(0, sourceLength * 0.38, -0.1);
+    // Keep the longest source axis upright. The shared swing pose can then
+    // present bats, signs, pipes, and cones from their natural grip axis
+    // instead of laying every item sideways like a generic blade.
+    object.quaternion.copy(uprightGripQuaternion);
+    object.scale.copy(instanceScale);
+    object.castShadow = true;
+    object.receiveShadow = true;
+    object.userData = {
+      weaponVisual: true,
+      dofIgnore: true,
+      meleeObjectId: pickup.objectId,
+      meleeDamage: pickup.snapshot.damage,
+      meleeVolumeM3: pickup.snapshot.volumeM3,
+      meleeMassKg: pickup.snapshot.massKg,
+    };
+    root.add(object);
+    root.add(createRightHandViewModel());
+    root.position.set(
+      CAMERA_VIEWMODEL_STANDING_OFFSET.x + 0.12,
+      CAMERA_VIEWMODEL_STANDING_OFFSET.y - 0.08,
+      CAMERA_VIEWMODEL_STANDING_OFFSET.z - 0.08,
+    );
+    root.visible = false;
+    camera.add(root);
+    return { root, object, tipLocal };
+  };
+
+  const applyViewModelPose = (progress: number): void => {
+    if (viewModel === null) {
+      return;
+    }
+    const pose = swinging
+      ? resolveMeleeSwingPose(progress, swingDirection)
+      : resolveMeleeSwingPose(0, swingDirection);
+    aimTargetWorld
+      .copy(latestAimRay?.origin ?? latestCameraPosition)
+      .addScaledVector(latestAimRay?.direction ?? latestAimDirection, 32);
+    aimTargetLocal.copy(aimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
+    viewModel.root.position.set(
+      latestViewmodelOffset.x + pose.offsetX + latestViewmodelTransition.offset.x,
+      latestViewmodelOffset.y + pose.offsetY + latestViewmodelTransition.offset.y,
+      latestViewmodelOffset.z + pose.offsetZ + latestViewmodelTransition.offset.z,
+    );
+    aimDirectionLocal.copy(aimTargetLocal).sub(viewModel.root.position);
+    if (aimDirectionLocal.lengthSq() > 0.0001) {
+      aimDirectionLocal.normalize();
+      aimQuaternion.setFromUnitVectors(objectForward, aimDirectionLocal);
+      viewModel.root.quaternion.copy(aimQuaternion);
+      const swingEuler = new THREE.Euler(
+        pose.pitchRadians + latestViewmodelTransition.pitchRadians,
+        pose.yawRadians + latestViewmodelTransition.yawRadians,
+        pose.rollRadians + latestViewmodelTransition.rollRadians,
+        "XYZ",
+      );
+      viewModel.root.quaternion.multiply(new THREE.Quaternion().setFromEuler(swingEuler));
+    }
+    viewModel.root.visible = viewActive && controlsActive && drawn && activePickup !== null;
+  };
+
+  const sampleBatTipVelocity = (deltaSeconds: number): THREE.Vector3 => {
+    if (viewModel === null) {
+      hasTipWorldSample = false;
+      batTipVelocity.set(0, 0, 0);
+      return batTipVelocity;
+    }
+    scene.updateMatrixWorld(true);
+    currentTipWorldPosition.copy(viewModel.tipLocal);
+    viewModel.object.localToWorld(currentTipWorldPosition);
+    if (hasTipWorldSample && deltaSeconds > 0) {
+      batTipVelocity
+        .copy(currentTipWorldPosition)
+        .sub(previousTipWorldPosition)
+        .multiplyScalar(1 / deltaSeconds);
+    } else {
+      batTipVelocity.set(0, 0, 0);
+    }
+    previousTipWorldPosition.copy(currentTipWorldPosition);
+    hasTipWorldSample = true;
+    return batTipVelocity;
+  };
+
+  /** Resolve a pickup's distance from its collider centre without exposing it in the HUD. */
+  const findNearestMeleePickup = (position: THREE.Vector3): ExplorationMeleePickup | null => {
+    let best: { readonly pickup: ExplorationMeleePickup; readonly distance: number } | null = null;
+    for (const pickup of explorationWorld.getMeleePickups()) {
+      const instanceMatrix = new THREE.Matrix4();
+      pickup.mesh.getMatrixAt(pickup.index, instanceMatrix);
+      const instancePosition = new THREE.Vector3().setFromMatrixPosition(instanceMatrix);
+      const distance = instancePosition.distanceTo(position);
+      if (distance > WEAPON_PICKUP_RANGE_METERS) {
+        continue;
+      }
+      if (best === null || distance < best.distance) {
+        best = { pickup, distance };
+      }
+    }
+    return best?.pickup ?? null;
+  };
+
+  const addImpact = (hit: THREE.Intersection, color: number): void => {
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 1,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const impact = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), material);
+    impact.name = "MeleeImpact";
+    impact.position.copy(hit.point);
+    impact.userData = { weaponVisual: true, dofIgnore: true };
+    effectRoot.add(impact);
+    impactEffects.push({ object: impact, remainingSeconds: 0.16 });
+  };
+
+  const resolveSwingHit = (impactTipVelocity: THREE.Vector3): void => {
+    if (activePickup === null || latestAimRay === null) {
+      return;
+    }
+    scene.updateMatrixWorld(true);
+    hitDirection.copy(latestAimRay.direction);
+    if (hitDirection.lengthSq() <= 0.0001) {
+      return;
+    }
+    hitDirection.normalize();
+    camera.getWorldQuaternion(hitCameraQuaternion);
+    hitRight.set(1, 0, 0).applyQuaternion(hitCameraQuaternion).normalize();
+    hitUp.set(0, 1, 0).applyQuaternion(hitCameraQuaternion).normalize();
+    raycaster.near = 0.12;
+    raycaster.far = activePickup.snapshot.rangeMeters;
+    const liveRaycastRoots = scene.children.filter(
+      (object) => object.name !== "LightingRoot" && object.name !== "DebugRoot",
+    );
+    let hit: THREE.Intersection | undefined;
+    let hitDistance = Number.POSITIVE_INFINITY;
+    for (const offset of MELEE_HIT_AREA_RAY_OFFSETS) {
+      hitSampleDirection
+        .copy(hitDirection)
+        .multiplyScalar(offset.forward)
+        .addScaledVector(hitRight, offset.right)
+        .addScaledVector(hitUp, offset.up)
+        .normalize();
+      raycaster.set(latestAimRay.origin, hitSampleDirection);
+      const sampleHit = liveRaycastRoots
+        .flatMap((object) => raycaster.intersectObject(object, true))
+        .find(
+          (intersection) =>
+            !isWeaponVisual(intersection.object) && !(intersection.object instanceof THREE.Sprite),
+        );
+      if (sampleHit !== undefined && sampleHit.distance < hitDistance) {
+        hit = sampleHit;
+        hitDistance = sampleHit.distance;
+      }
+    }
+    if (hit === undefined) {
+      return;
+    }
+    addImpact(hit, activePickup.color);
+    const impactDirection = resolveMeleeImpactDirection(
+      { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+      { x: latestAimRay.origin.x, y: latestAimRay.origin.y, z: latestAimRay.origin.z },
+      {
+        x: impactTipVelocity.x,
+        y: impactTipVelocity.y,
+        z: impactTipVelocity.z,
+      },
+    );
+    // Every valid visible surface contact gets the damage-scaled camera
+    // feedback. Only a fresh knockable prop continues below into the separate
+    // swing-speed-scaled ragdoll impulse path.
+    onMeleeContact?.(activePickup.snapshot.damage, impactDirection);
+    const objectId = explorationWorld.getMeleeObjectIdForHit(hit.object, hit.instanceId);
+    if (objectId === null) {
+      hit.object.userData.lastMeleeHit = {
+        damage: activePickup.snapshot.damage,
+        volumeM3: activePickup.snapshot.volumeM3,
+        massKg: activePickup.snapshot.massKg,
+      };
+      return;
+    }
+    const didApply = explorationWorld.applyMeleeHit(
+      objectId,
+      impactDirection,
+      activePickup.snapshot.swingSpeedRadiansPerSecond,
+    );
+    if (didApply) {
+      hits += 1;
+      lastDamage = activePickup.snapshot.damage;
+      emitState(true);
+    }
+  };
+
+  const trySwing = (): boolean => {
+    if (
+      !controlsActive ||
+      !drawn ||
+      activePickup === null ||
+      latestAimRay === null ||
+      swinging ||
+      latestViewmodelTransition.phase !== "idle"
+    ) {
+      return false;
+    }
+    const swing = resolveMeleeSwing(activePickup.snapshot.volumeM3);
+    swingDirection = nextSwingDirection;
+    nextSwingDirection = swingDirection === "right-to-left" ? "left-to-right" : "right-to-left";
+    swingDurationSeconds = swing.swingDurationSeconds;
+    swingHitTimeSeconds = swing.hitTimeSeconds;
+    swingElapsedSeconds = 0;
+    swingHitResolved = false;
+    swinging = true;
+    swings += 1;
+    lastDamage = swing.damage;
+    lastOxygenCost = onMeleeSwing?.(swing.damage) ?? resolveMeleeO2Cost(swing.damage);
+    emitState(true);
+    return true;
+  };
+
+  const drawCarriedObject = (): boolean => {
+    if (activePickup === null || drawn) {
+      return false;
+    }
+    drawn = true;
+    onMeleeEquip?.();
+    emitState(true);
+    return true;
+  };
+
+  const interact = (): boolean => {
+    if (activePickup !== null) {
+      if (!drawn) {
+        return drawCarriedObject();
+      }
+      return true;
+    }
+    if (!controlsActive) {
+      return false;
+    }
+    const candidate = findNearestMeleePickup(latestCameraPosition);
+    if (candidate === null) {
+      return false;
+    }
+    const sourceMatrix = new THREE.Matrix4();
+    candidate.mesh.getMatrixAt(candidate.index, sourceMatrix);
+    const equipped = explorationWorld.equipMeleeObject(candidate.objectId);
+    if (equipped === null) {
+      return false;
+    }
+    activePickup = equipped;
+    drawn = true;
+    swingDirection = "right-to-left";
+    nextSwingDirection = "right-to-left";
+    viewModel = createViewModel(equipped, sourceMatrix);
+    onMeleeEquip?.();
+    emitState(true);
+    return true;
+  };
+
+  const stash = (): boolean => {
+    if (activePickup === null || !drawn) {
+      return false;
+    }
+    drawn = false;
+    swinging = false;
+    swingElapsedSeconds = 0;
+    fireHeld = false;
+    if (viewModel !== null) {
+      viewModel.root.visible = false;
+    }
+    hasTipWorldSample = false;
+    batTipVelocity.set(0, 0, 0);
+    emitState(true);
+    return true;
+  };
+
+  const dropActiveObject = (playerVelocity?: PhysicsVector): boolean => {
+    if (activePickup === null) {
+      return false;
+    }
+    dropDirection.copy(latestAimDirection).setY(0);
+    if (dropDirection.lengthSq() <= 0.0001) {
+      dropDirection.set(0, 0, -1);
+    } else {
+      dropDirection.normalize();
+    }
+    dropPosition.copy(latestCameraPosition).addScaledVector(dropDirection, 1.1);
+    dropPosition.y = Math.max(0.2, latestCameraPosition.y - PLAYER_CAPSULE_CENTER_HEIGHT);
+    const didDrop = explorationWorld.dropMeleeObject(
+      activePickup.objectId,
+      dropPosition,
+      Math.atan2(dropDirection.x, dropDirection.z),
+      playerVelocity,
+    );
+    if (!didDrop) {
+      return false;
+    }
+    swinging = false;
+    swingElapsedSeconds = 0;
+    drawn = false;
+    disposeViewModel();
+    activePickup = null;
+    emitState(true);
+    return true;
+  };
+
+  const throwActiveObject = (playerVelocity?: PhysicsVector): boolean => {
+    if (activePickup === null) {
+      return false;
+    }
+    dropDirection.copy(latestAimDirection);
+    if (dropDirection.lengthSq() <= 0.0001) {
+      dropDirection.set(0, 0, -1);
+    } else {
+      dropDirection.normalize();
+    }
+    dropPosition.copy(latestCameraPosition).addScaledVector(dropDirection, 1.1);
+    dropPosition.y = Math.max(0.35, latestCameraPosition.y - PLAYER_CAPSULE_CENTER_HEIGHT + 0.35);
+    const didThrow = explorationWorld.throwMeleeObject(
+      activePickup.objectId,
+      dropPosition,
+      Math.atan2(dropDirection.x, dropDirection.z),
+      { x: dropDirection.x, y: dropDirection.y, z: dropDirection.z },
+      playerVelocity,
+    );
+    if (!didThrow) {
+      return false;
+    }
+    swinging = false;
+    swingElapsedSeconds = 0;
+    drawn = false;
+    disposeViewModel();
+    activePickup = null;
+    emitState(true);
+    return true;
+  };
+
+  const update = (
+    deltaSeconds: number,
+    cameraPosition: THREE.Vector3,
+    aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
+    active: boolean,
+    visibleInView: boolean,
+    viewmodelOffset: CameraViewmodelOffset,
+    viewmodelTransition: CameraViewmodelTransition,
+  ): void => {
+    const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    controlsActive = active;
+    viewActive = visibleInView;
+    latestCameraPosition.copy(cameraPosition);
+    latestAimRay = aimRay;
+    latestAimDirection.copy(aimRay.direction);
+    latestViewmodelOffset = viewmodelOffset;
+    latestViewmodelTransition = viewmodelTransition;
+    for (const impact of explorationWorld.consumeMeleeThrowImpacts()) {
+      const impactDirection: MeleeImpactVector = {
+        x: impact.direction.x,
+        y: impact.direction.y,
+        z: impact.direction.z,
+      };
+      onMeleeThrowImpact?.(impact.resolution.damage, impactDirection);
+      hits += 1;
+      lastDamage = impact.resolution.damage;
+      emitState(true);
+    }
+    if (fireHeld && drawn && activePickup !== null && !swinging) {
+      trySwing();
+    }
+    let swingProgress = 0;
+    if (swinging) {
+      swingElapsedSeconds += safeDelta;
+      swingProgress = Math.min(1, swingElapsedSeconds / Math.max(0.001, swingDurationSeconds));
+    }
+    applyViewModelPose(swinging ? swingProgress : 0);
+    const impactTipVelocity = sampleBatTipVelocity(safeDelta);
+    if (swinging) {
+      if (!swingHitResolved && swingElapsedSeconds >= swingHitTimeSeconds) {
+        swingHitResolved = true;
+        resolveSwingHit(impactTipVelocity);
+      }
+      if (swingProgress >= 1) {
+        swinging = false;
+        swingElapsedSeconds = 0;
+        // The follow-through ends in the mirrored high-ready pose for the
+        // next alternating swing, so the bat does not snap back across the
+        // screen between attacks.
+        swingDirection = nextSwingDirection;
+        emitState(true);
+      }
+    }
+    const nearest = activePickup === null || !drawn ? findNearestMeleePickup(cameraPosition) : null;
+    const nextNearby =
+      nearest === null
+        ? null
+        : {
+            ...nearest.snapshot,
+            distanceMeters: (() => {
+              const matrix = new THREE.Matrix4();
+              nearest.mesh.getMatrixAt(nearest.index, matrix);
+              return new THREE.Vector3().setFromMatrixPosition(matrix).distanceTo(cameraPosition);
+            })(),
+          };
+    if (JSON.stringify(nextNearby) !== JSON.stringify(nearby)) {
+      nearby = nextNearby;
+      emitState();
+    }
+    for (let index = impactEffects.length - 1; index >= 0; index -= 1) {
+      const effect = impactEffects[index];
+      if (effect === undefined) {
+        continue;
+      }
+      effect.remainingSeconds -= safeDelta;
+      effect.object.scale.setScalar(1 + (0.16 - Math.max(0, effect.remainingSeconds)) * 3);
+      if (effect.object.material instanceof THREE.MeshBasicMaterial) {
+        effect.object.material.opacity = Math.max(0, effect.remainingSeconds / 0.16);
+      }
+      if (effect.remainingSeconds <= 0) {
+        effect.object.removeFromParent();
+        disposeObject(effect.object);
+        impactEffects.splice(index, 1);
+      }
+    }
+  };
+
+  const setFireHeld = (held: boolean): void => {
+    fireHeld = held;
+  };
+  const holster = (): boolean => dropActiveObject();
+  const dispose = (): void => {
+    disposeViewModel();
+    for (const effect of impactEffects) {
+      effect.object.removeFromParent();
+      disposeObject(effect.object);
+    }
+    impactEffects.length = 0;
+    effectRoot.removeFromParent();
+    disposeObject(effectRoot);
+  };
+  emitState(true);
+  return {
+    update,
+    setFireHeld,
+    fire: trySwing,
+    interact,
+    isActive: () => drawn && activePickup !== null,
+    stash,
+    throwActiveObject,
+    holster,
+    dropActiveObject,
     getSnapshot,
     dispose,
   };
@@ -8360,8 +9188,50 @@ interface ExplorationWorld {
   readonly getArea: () => string;
   readonly getLoadedChunkCount: () => number;
   readonly getPhysicsBoxes: () => readonly PhysicsBox[];
+  readonly getMeleePickups: () => readonly ExplorationMeleePickup[];
+  readonly getMeleeObjectIdForHit: (
+    object: THREE.Object3D,
+    instanceIndex: number | undefined,
+  ) => number | null;
+  readonly equipMeleeObject: (objectId: number) => ExplorationMeleePickup | null;
+  readonly throwMeleeObject: (
+    objectId: number,
+    position: THREE.Vector3,
+    rotationY: number,
+    direction: PhysicsVector,
+    playerVelocity?: PhysicsVector,
+  ) => boolean;
+  readonly dropMeleeObject: (
+    objectId: number,
+    position: THREE.Vector3,
+    rotationY: number,
+    releaseVelocity?: PhysicsVector,
+  ) => boolean;
+  readonly applyMeleeHit: (
+    objectId: number,
+    direction: PhysicsVector,
+    swingSpeed: number,
+  ) => boolean;
+  readonly consumeMeleeThrowImpacts: () => readonly ExplorationMeleeThrowImpact[];
   readonly getPhysicsVersion: () => number;
   readonly dispose: () => void;
+}
+
+interface ExplorationMeleePickup {
+  readonly objectId: number;
+  readonly snapshot: MeleeObjectSnapshot;
+  readonly mesh: THREE.InstancedMesh;
+  readonly index: number;
+  readonly halfExtents: PhysicsVector;
+  readonly color: number;
+}
+
+interface ExplorationMeleeThrowImpact {
+  readonly objectId: number;
+  readonly displayName: string;
+  readonly point: PhysicsVector;
+  readonly direction: PhysicsVector;
+  readonly resolution: MeleeThrowResolution;
 }
 
 interface ExplorationChunk {
@@ -8377,18 +9247,41 @@ interface ExplorationKnockable {
   readonly baseScale: THREE.Vector3;
   readonly baseQuaternion: THREE.Quaternion;
   readonly halfExtents: PhysicsVector;
-  readonly rotationY?: number;
+  readonly displayName: string;
+  readonly massKg: number;
+  readonly color: number;
+  rotationY?: number;
   readonly physicsId: number;
   readonly fallAxis: THREE.Vector3;
   readonly launchLinearVelocity: THREE.Vector3;
   readonly launchAngularVelocity: THREE.Vector3;
   isKnocked: boolean;
+  /** A dropped held prop remains recoverable while its ragdoll body settles. */
+  isDropped: boolean;
+  isThrown: boolean;
+  throwImpactResolved: boolean;
+  readonly previousBodyPosition: THREE.Vector3;
+  isEquipped: boolean;
   angle: number;
   angularVelocity: number;
   targetAngle: number;
   hasBodyState: boolean;
   kickCooldownSeconds: number;
 }
+
+const refreshKnockableMeshBounds = (mesh: THREE.InstancedMesh): void => {
+  mesh.computeBoundingBox();
+  mesh.computeBoundingSphere();
+};
+
+const hasFinitePhysicsVector = (vector: PhysicsVector): boolean =>
+  Number.isFinite(vector.x) && Number.isFinite(vector.y) && Number.isFinite(vector.z);
+
+const hasFinitePhysicsRotation = (rotation: PhysicsBodyState["rotation"]): boolean =>
+  Number.isFinite(rotation.x) &&
+  Number.isFinite(rotation.y) &&
+  Number.isFinite(rotation.z) &&
+  Number.isFinite(rotation.w);
 
 interface ExplorationBuildingSpec {
   readonly x: number;
@@ -8479,10 +9372,26 @@ export const createExplorationWorld = (
     EXPLORATION_CHUNK_SIZE - 0.08,
   );
   const pathGeometry = new THREE.BoxGeometry(EXPLORATION_CHUNK_SIZE * 0.84, 0.026, 0.9);
-  const propGeometry = new RoundedBoxGeometry(0.28, 1, 0.28, 3, 0.04);
-  const beaconGeometry = new RoundedBoxGeometry(0.12, 0.12, 0.12, 3, 0.02);
-  const citySignGeometry = new RoundedBoxGeometry(1.25, 0.22, 0.06, 2, 0.02);
-  const utilityPostGeometry = new RoundedBoxGeometry(0.12, 2, 0.12, 2, 0.03);
+  // Outdoor ragdollables are deliberately authored as familiar city objects,
+  // not anonymous rounded boxes. Each family remains instanced so the seeded
+  // placement and the physics/object-id mapping stay unchanged.
+  const baseballBatGeometry = new THREE.LatheGeometry(
+    [
+      new THREE.Vector2(0, -0.5),
+      new THREE.Vector2(0.075, -0.48),
+      new THREE.Vector2(0.078, -0.36),
+      new THREE.Vector2(0.068, -0.12),
+      new THREE.Vector2(0.085, 0.2),
+      new THREE.Vector2(0.12, 0.38),
+      new THREE.Vector2(0.145, 0.47),
+      new THREE.Vector2(0, 0.5),
+    ],
+    18,
+  );
+  const trafficConeGeometry = new THREE.CylinderGeometry(0.075, 0.22, 0.42, 16);
+  const streetSignGeometry = new RoundedBoxGeometry(1.25, 0.22, 0.07, 3, 0.025);
+  const metalPipeGeometry = new THREE.CylinderGeometry(0.075, 0.095, 2, 14);
+  const manholeCoverGeometry = new THREE.CylinderGeometry(0.58, 0.58, 0.12, 32);
   const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
   const windowGeometry = new THREE.BoxGeometry(0.56, 0.055, 0.045);
   const bridgeGeometry = new RoundedBoxGeometry(EXPLORATION_CHUNK_SIZE * 0.86, 0.14, 0.2, 3, 0.035);
@@ -8492,8 +9401,8 @@ export const createExplorationWorld = (
   const pathMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.path, 0.82, 0, undefined, surfaceTextures?.detail),
   );
-  const propMaterials = EXPLORATION_BIOMES.map((style) =>
-    createMaterial(style.prop, 0.66, 0.05, undefined, surfaceTextures?.detail),
+  const baseballBatMaterials = EXPLORATION_BIOMES.map(() =>
+    createMaterial(0x8d542f, 0.62, 0.04, undefined, surfaceTextures?.detail),
   );
   const accentMaterials = EXPLORATION_BIOMES.map((style) =>
     createAccentMaterial(style.accent, 0.35, 0.16, 0.28, surfaceTextures?.detail),
@@ -8507,11 +9416,17 @@ export const createExplorationWorld = (
   const bridgeMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.path, 0.48, 0.44, undefined, surfaceTextures?.detail),
   );
-  const citySignMaterials = EXPLORATION_BIOMES.map((style) =>
-    createAccentMaterial(style.accent, 0.24, 0.25, 0.35, surfaceTextures?.detail),
+  const streetSignMaterials = EXPLORATION_BIOMES.map(() =>
+    createAccentMaterial(0x26717e, 0.3, 0.34, 0.28, surfaceTextures?.detail),
   );
-  const utilityPostMaterials = EXPLORATION_BIOMES.map((style) =>
-    createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
+  const metalPipeMaterials = EXPLORATION_BIOMES.map(() =>
+    createMaterial(0x59666d, 0.34, 0.78, undefined, surfaceTextures?.detail),
+  );
+  const trafficConeMaterials = EXPLORATION_BIOMES.map(() =>
+    createAccentMaterial(0xe86531, 0.48, 0.08, 0.12, surfaceTextures?.detail),
+  );
+  const manholeCoverMaterials = EXPLORATION_BIOMES.map(() =>
+    createMaterial(0x3d4448, 0.62, 0.78, undefined, surfaceTextures?.detail),
   );
   const activeChunks = new Map<string, ExplorationChunk>();
   const knockCollisionRefreshDistance = 1.05;
@@ -8528,14 +9443,50 @@ export const createExplorationWorld = (
   const knockedRestitution = 0.35;
   const knockedFriction = 0.21;
   const knockRehitCooldownSeconds = 0.12;
+  const droppedRagdollLiftVelocity = 0.32;
+  const droppedRagdollSpinVelocity = 2.6;
+  const thrownRagdollLiftVelocity = 0.08;
   let nextKnockablePhysicsId = 0;
   const knockAxis = new THREE.Vector3(0, 0, 1);
   const knockDirection = new THREE.Vector3();
+  const knockImpulseDirection = new THREE.Vector3();
   const knockToObject = new THREE.Vector3();
   const knockQuaternion = new THREE.Quaternion();
   const knockMatrix = new THREE.Matrix4();
+  const thrownRaycaster = new THREE.Raycaster();
+  const thrownTravel = new THREE.Vector3();
+  const thrownDirection = new THREE.Vector3();
+  const meleeThrowImpacts: ExplorationMeleeThrowImpact[] = [];
   let physicsVersion = 0;
   let currentArea = "Penthouse";
+
+  const activateKnockableRagdoll = (
+    knockable: ExplorationKnockable,
+    direction: PhysicsVector,
+  ): void => {
+    knockImpulseDirection.set(direction.x, direction.y, direction.z);
+    if (knockImpulseDirection.lengthSq() <= Number.EPSILON) {
+      knockImpulseDirection.set(0, 0, -1);
+    } else {
+      knockImpulseDirection.normalize();
+    }
+    knockDirection.set(knockImpulseDirection.x, 0, knockImpulseDirection.z);
+    if (knockDirection.lengthSq() <= Number.EPSILON) {
+      knockDirection.set(0, 0, -1);
+    } else {
+      knockDirection.normalize();
+    }
+    knockable.isKnocked = true;
+    knockable.angle = 0;
+    knockable.hasBodyState = false;
+    knockable.kickCooldownSeconds = knockRehitCooldownSeconds;
+    knockAxis.set(knockDirection.z, 0, -knockDirection.x);
+    if (knockAxis.lengthSq() <= Number.EPSILON) {
+      knockAxis.set(1, 0, 0);
+    }
+    knockAxis.normalize();
+    knockable.fallAxis.copy(knockAxis);
+  };
 
   // Existing generator branches use this name; keep every streamed building,
   // prop, window, bridge, and beacon out of all authored play-area squares.
@@ -8925,6 +9876,8 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
+      readonly massKg: number;
     }> = [];
     const citySignCount = Math.max(
       1,
@@ -8939,6 +9892,8 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
+      readonly massKg: number;
     }> = [];
     const utilityPostCount = Math.max(
       1,
@@ -8951,21 +9906,37 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
+      readonly massKg: number;
+    }> = [];
+    const manholeCoverCount = chunkX === 1 && chunkZ === 0 ? 1 : random.nextFloat() < 0.38 ? 1 : 0;
+    const manholeCoverMatrices: THREE.Matrix4[] = [];
+    const manholeCoverTransforms: Array<{
+      readonly position: THREE.Vector3;
+      readonly quaternion: THREE.Quaternion;
+      readonly scale: THREE.Vector3;
+      readonly halfExtents: PhysicsVector;
+      readonly rotationY: number;
+      readonly displayName: string;
+      readonly massKg: number;
     }> = [];
     for (let index = 0; index < propCount; index += 1) {
       position.set(
         quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
-        quantizeToGrid(0.4 + random.nextFloat() * 0.8),
+        0,
         quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
       );
       const rotationY = quantizeRotation45(random.nextFloat() * Math.PI * 2);
       rotation.setFromAxisAngle(yAxis, rotationY);
       scale.set(
-        quantizeScale(0.65 + random.nextFloat() * 1.25),
-        quantizeScale(0.65 + random.nextFloat() * 2.2),
-        quantizeScale(0.65 + random.nextFloat() * 1.25),
+        quantizeScale(0.82 + random.nextFloat() * 0.34),
+        quantizeScale(0.9 + random.nextFloat() * 0.45),
+        quantizeScale(0.82 + random.nextFloat() * 0.34),
       );
-      const halfExtent = 0.14 * Math.max(scale.x, scale.z);
+      // The bat geometry is centred on its handle-to-barrel axis. Rest it on
+      // the city floor instead of floating like the former generic prop.
+      position.y = scale.y * 0.5 + 0.04;
+      const halfExtent = 0.145 * Math.max(scale.x, scale.z);
       if (
         !isExplorationRectOutsidePenthouse({
           minX: position.x - halfExtent,
@@ -8990,13 +9961,15 @@ export const createExplorationWorld = (
       }
       matrix.compose(position, rotation, scale);
       propMatrices.push(matrix.clone());
-      const halfExtents = { x: scale.x * 0.14, y: scale.y * 0.5, z: scale.z * 0.14 };
+      const halfExtents = { x: scale.x * 0.145, y: scale.y * 0.5, z: scale.z * 0.145 };
       propTransforms.push({
         position: position.clone(),
         quaternion: rotation.clone(),
         scale: scale.clone(),
         halfExtents,
         rotationY,
+        displayName: "Baseball Bat",
+        massKg: 0.9,
       });
     }
     for (let index = 0; index < citySignCount; index += 1) {
@@ -9010,11 +9983,11 @@ export const createExplorationWorld = (
       scale.set(
         quantizeScale(0.8 + random.nextFloat() * 1.4),
         quantizeScale(0.8 + random.nextFloat() * 0.9),
-        quantizeScale(0.08 + random.nextFloat() * 0.09),
+        quantizeScale(0.9 + random.nextFloat() * 0.2),
       );
       const baseHalfWidth = 0.625 * scale.x;
       const baseHalfHeight = 0.11 * scale.y;
-      const baseHalfDepth = 0.03 * scale.z;
+      const baseHalfDepth = 0.035 * scale.z;
       const halfWidth =
         Math.abs(Math.cos(rotationY)) * baseHalfWidth +
         Math.abs(Math.sin(rotationY)) * baseHalfDepth;
@@ -9051,6 +10024,8 @@ export const createExplorationWorld = (
         scale: scale.clone(),
         halfExtents: { x: baseHalfWidth, y: baseHalfHeight, z: baseHalfDepth },
         rotationY,
+        displayName: "Street Sign",
+        massKg: 5.5,
       });
     }
     for (let index = 0; index < utilityPostCount; index += 1) {
@@ -9062,13 +10037,15 @@ export const createExplorationWorld = (
       const rotationY = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
       rotation.setFromAxisAngle(yAxis, rotationY);
       scale.set(
-        quantizeScale(0.6 + random.nextFloat() * 0.7),
-        quantizeScale(1.4 + random.nextFloat() * 1.2),
-        quantizeScale(0.6 + random.nextFloat() * 0.7),
+        quantizeScale(0.86 + random.nextFloat() * 0.26),
+        quantizeScale(0.82 + random.nextFloat() * 0.4),
+        quantizeScale(0.86 + random.nextFloat() * 0.26),
       );
-      position.y = scale.y / 2;
-      const baseHalfWidth = 0.06 * scale.x;
-      const baseHalfDepth = 0.06 * scale.z;
+      // A hand-length maintenance pipe is heavy enough to ragdoll but still
+      // plausible as a loose city prop.
+      position.y = scale.y + 0.04;
+      const baseHalfWidth = 0.095 * scale.x;
+      const baseHalfDepth = 0.095 * scale.z;
       if (
         !isExplorationRectOutsidePenthouse({
           minX: position.x - baseHalfWidth,
@@ -9097,17 +10074,69 @@ export const createExplorationWorld = (
         position: position.clone(),
         quaternion: rotation.clone(),
         scale: scale.clone(),
-        halfExtents: { x: baseHalfWidth, y: scale.y / 2, z: baseHalfDepth },
+        halfExtents: { x: baseHalfWidth, y: scale.y, z: baseHalfDepth },
         rotationY,
+        displayName: "Metal Pipe",
+        massKg: 4,
+      });
+    }
+    for (let index = 0; index < manholeCoverCount; index += 1) {
+      const guaranteedCover = chunkX === 1 && chunkZ === 0 && index === 0;
+      position.set(
+        guaranteedCover
+          ? originX - EXPLORATION_CHUNK_SIZE / 2 + 1
+          : quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2.2)),
+        0.09,
+        guaranteedCover
+          ? originZ
+          : quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 2.2)),
+      );
+      const rotationY = quantizeRotation45(random.nextFloat() * Math.PI * 2);
+      rotation.setFromAxisAngle(yAxis, rotationY);
+      const coverScale = quantizeScale(0.9 + random.nextFloat() * 0.18);
+      scale.set(coverScale, coverScale, coverScale);
+      const halfExtent = 0.58 * coverScale;
+      if (
+        !isExplorationRectOutsidePenthouse({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        }) ||
+        isExplorationRectOutsideWorld({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        }) ||
+        !isExplorationRectOutsideFocusCalibrationRamp({
+          minX: position.x - halfExtent,
+          maxX: position.x + halfExtent,
+          minZ: position.z - halfExtent,
+          maxZ: position.z + halfExtent,
+        })
+      ) {
+        continue;
+      }
+      matrix.compose(position, rotation, scale);
+      manholeCoverMatrices.push(matrix.clone());
+      manholeCoverTransforms.push({
+        position: position.clone(),
+        quaternion: rotation.clone(),
+        scale: scale.clone(),
+        halfExtents: { x: halfExtent, y: 0.06 * coverScale, z: halfExtent },
+        rotationY,
+        displayName: "Manhole Cover",
+        massKg: 90,
       });
     }
     if (propMatrices.length > 0) {
       const props = new THREE.InstancedMesh(
-        propGeometry,
-        propMaterials[styleIndex],
+        baseballBatGeometry,
+        baseballBatMaterials[styleIndex],
         propMatrices.length,
       );
-      props.name = "ExplorationPropInstances";
+      props.name = "BaseballBatInstances";
       props.castShadow = true;
       props.receiveShadow = true;
       propMatrices.forEach((propMatrix, index) => {
@@ -9126,6 +10155,9 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          massKg: transform.massKg,
+          color: 0x8d542f,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9133,6 +10165,11 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
+          isThrown: false,
+          throwImpactResolved: false,
+          previousBodyPosition: transform.position.clone(),
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.75,
@@ -9145,11 +10182,11 @@ export const createExplorationWorld = (
     }
     if (citySignMatrices.length > 0) {
       const signs = new THREE.InstancedMesh(
-        citySignGeometry,
-        citySignMaterials[styleIndex],
+        streetSignGeometry,
+        streetSignMaterials[styleIndex],
         citySignMatrices.length,
       );
-      signs.name = "CitySignInstances";
+      signs.name = "StreetSignInstances";
       signs.castShadow = true;
       signs.receiveShadow = true;
       citySignMatrices.forEach((citySignMatrix, index) => {
@@ -9168,6 +10205,9 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          massKg: transform.massKg,
+          color: 0x26717e,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9175,6 +10215,11 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
+          isThrown: false,
+          throwImpactResolved: false,
+          previousBodyPosition: transform.position.clone(),
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.52,
@@ -9187,11 +10232,11 @@ export const createExplorationWorld = (
     }
     if (utilityPostMatrices.length > 0) {
       const utilityPosts = new THREE.InstancedMesh(
-        utilityPostGeometry,
-        utilityPostMaterials[styleIndex],
+        metalPipeGeometry,
+        metalPipeMaterials[styleIndex],
         utilityPostMatrices.length,
       );
-      utilityPosts.name = "CityUtilityPostInstances";
+      utilityPosts.name = "MetalPipeInstances";
       utilityPosts.castShadow = true;
       utilityPosts.receiveShadow = true;
       utilityPostMatrices.forEach((utilityPostMatrix, index) => {
@@ -9210,6 +10255,9 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          massKg: transform.massKg,
+          color: 0x59666d,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9217,6 +10265,11 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
+          isThrown: false,
+          throwImpactResolved: false,
+          previousBodyPosition: transform.position.clone(),
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.52,
@@ -9227,6 +10280,53 @@ export const createExplorationWorld = (
       utilityPosts.computeBoundingSphere();
       chunk.add(utilityPosts);
     }
+    if (manholeCoverMatrices.length > 0) {
+      const manholeCovers = new THREE.InstancedMesh(
+        manholeCoverGeometry,
+        manholeCoverMaterials[styleIndex],
+        manholeCoverMatrices.length,
+      );
+      manholeCovers.name = "ManholeCoverInstances";
+      manholeCovers.castShadow = true;
+      manholeCovers.receiveShadow = true;
+      manholeCoverMatrices.forEach((manholeCoverMatrix, index) => {
+        manholeCovers.setMatrixAt(index, manholeCoverMatrix);
+      });
+      manholeCoverTransforms.forEach((transform, index) => {
+        manholeCovers.setMatrixAt(index, manholeCoverMatrices[index] ?? new THREE.Matrix4());
+        knockableProps.push({
+          physicsId: nextKnockablePhysicsId,
+          mesh: manholeCovers,
+          index,
+          basePosition: transform.position,
+          baseScale: transform.scale,
+          baseQuaternion: transform.quaternion,
+          halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          massKg: transform.massKg,
+          color: 0x3d4448,
+          rotationY: transform.rotationY,
+          fallAxis: new THREE.Vector3(0, 0, 1),
+          launchLinearVelocity: new THREE.Vector3(),
+          launchAngularVelocity: new THREE.Vector3(),
+          hasBodyState: false,
+          kickCooldownSeconds: 0,
+          isKnocked: false,
+          isDropped: false,
+          isThrown: false,
+          throwImpactResolved: false,
+          previousBodyPosition: transform.position.clone(),
+          isEquipped: false,
+          angle: 0,
+          angularVelocity: 0,
+          targetAngle: Math.PI * 0.52,
+        });
+        nextKnockablePhysicsId += 1;
+      });
+      manholeCovers.instanceMatrix.needsUpdate = true;
+      manholeCovers.computeBoundingSphere();
+      chunk.add(manholeCovers);
+    }
 
     const beaconCount = random.nextFloat() < style.beaconDensity * 1.2 + featureBias * 0.2 ? 1 : 0;
     const beaconMatrices: THREE.Matrix4[] = [];
@@ -9236,33 +10336,38 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
+      readonly massKg: number;
     }> = [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
     for (let index = 0; index < beaconCount; index += 1) {
       position.set(
         quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2)),
-        quantizeToGrid(1.5 + random.nextFloat() * 1.8),
+        0,
         quantizeToGrid(originZ + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.2)),
       );
+      const coneScale = quantizeScale(0.9 + random.nextFloat() * 0.24);
+      beaconScale.set(coneScale, coneScale, coneScale);
+      position.y = 0.21 * coneScale + 0.04;
       if (
         !isExplorationRectOutsidePenthouse({
-          minX: position.x - 0.06,
-          maxX: position.x + 0.06,
-          minZ: position.z - 0.06,
-          maxZ: position.z + 0.06,
+          minX: position.x - 0.22 * coneScale,
+          maxX: position.x + 0.22 * coneScale,
+          minZ: position.z - 0.22 * coneScale,
+          maxZ: position.z + 0.22 * coneScale,
         }) ||
         isExplorationRectOutsideWorld({
-          minX: position.x - 0.06,
-          maxX: position.x + 0.06,
-          minZ: position.z - 0.06,
-          maxZ: position.z + 0.06,
+          minX: position.x - 0.22 * coneScale,
+          maxX: position.x + 0.22 * coneScale,
+          minZ: position.z - 0.22 * coneScale,
+          maxZ: position.z + 0.22 * coneScale,
         }) ||
         !isExplorationRectOutsideFocusCalibrationRamp({
-          minX: position.x - 0.06,
-          maxX: position.x + 0.06,
-          minZ: position.z - 0.06,
-          maxZ: position.z + 0.06,
+          minX: position.x - 0.22 * coneScale,
+          maxX: position.x + 0.22 * coneScale,
+          minZ: position.z - 0.22 * coneScale,
+          maxZ: position.z + 0.22 * coneScale,
         })
       ) {
         continue;
@@ -9273,17 +10378,19 @@ export const createExplorationWorld = (
         position: position.clone(),
         quaternion: rotation.clone(),
         scale: beaconScale.clone(),
-        halfExtents: { x: 0.06, y: 0.06, z: 0.06 },
+        halfExtents: { x: 0.22 * coneScale, y: 0.21 * coneScale, z: 0.22 * coneScale },
         rotationY: 0,
+        displayName: "Traffic Cone",
+        massKg: 3.2,
       });
     }
     if (beaconMatrices.length > 0) {
       const beacons = new THREE.InstancedMesh(
-        beaconGeometry,
-        accentMaterials[styleIndex],
+        trafficConeGeometry,
+        trafficConeMaterials[styleIndex],
         beaconMatrices.length,
       );
-      beacons.name = "ExplorationBeaconInstances";
+      beacons.name = "TrafficConeInstances";
       beacons.castShadow = true;
       beaconMatrices.forEach((beaconMatrix, index) => {
         beacons.setMatrixAt(index, beaconMatrix);
@@ -9301,6 +10408,9 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          massKg: transform.massKg,
+          color: 0xe86531,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9308,6 +10418,11 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
+          isThrown: false,
+          throwImpactResolved: false,
+          previousBodyPosition: transform.position.clone(),
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.68,
@@ -9392,6 +10507,7 @@ export const createExplorationWorld = (
     for (const dynamicBodyState of dynamicBodyStates) {
       dynamicStateById.set(dynamicBodyState.dynamicId, dynamicBodyState);
     }
+    const updatedMeshes = new Set<THREE.InstancedMesh>();
     const impactMagnitude = Math.hypot(impactDelta.x, impactDelta.z);
     const impactSpeed = impactMagnitude / Math.max(deltaSeconds, 1 / 240);
     const shouldKnock =
@@ -9405,6 +10521,9 @@ export const createExplorationWorld = (
 
     for (const chunk of activeChunks.values()) {
       for (const knockable of chunk.knockableProps) {
+        if (knockable.isEquipped) {
+          continue;
+        }
         const wasKnocked = knockable.isKnocked;
         if (knockable.kickCooldownSeconds > 0) {
           knockable.kickCooldownSeconds = Math.max(0, knockable.kickCooldownSeconds - deltaSeconds);
@@ -9468,7 +10587,79 @@ export const createExplorationWorld = (
         }
         const bodyState = dynamicStateById.get(knockable.physicsId);
         if (bodyState !== undefined) {
+          if (
+            !hasFinitePhysicsVector(bodyState.center) ||
+            !hasFinitePhysicsVector(bodyState.linearVelocity) ||
+            !hasFinitePhysicsVector(bodyState.angularVelocity) ||
+            !hasFinitePhysicsRotation(bodyState.rotation)
+          ) {
+            // A malformed physics snapshot must not poison an InstancedMesh
+            // matrix with NaN values or keep the throw raycast alive forever.
+            knockable.isThrown = false;
+            knockable.throwImpactResolved = true;
+            knockable.launchLinearVelocity.set(0, 0, 0);
+            knockable.launchAngularVelocity.set(0, 0, 0);
+            continue;
+          }
           knockable.basePosition.set(bodyState.center.x, bodyState.center.y, bodyState.center.z);
+          if (knockable.isThrown && !knockable.throwImpactResolved) {
+            thrownTravel.set(
+              knockable.basePosition.x - knockable.previousBodyPosition.x,
+              knockable.basePosition.y - knockable.previousBodyPosition.y,
+              knockable.basePosition.z - knockable.previousBodyPosition.z,
+            );
+            const travelDistance = thrownTravel.length();
+            if (travelDistance > 0.0001) {
+              thrownDirection.copy(thrownTravel).multiplyScalar(1 / travelDistance);
+              const bodySpeed = Math.hypot(
+                bodyState.linearVelocity.x,
+                bodyState.linearVelocity.y,
+                bodyState.linearVelocity.z,
+              );
+              const impactSpeed = Math.max(
+                bodySpeed,
+                travelDistance / Math.max(deltaSeconds, 1 / 240),
+              );
+              thrownRaycaster.set(knockable.previousBodyPosition, thrownDirection);
+              thrownRaycaster.far =
+                travelDistance + Math.max(...Object.values(knockable.halfExtents));
+              const hit = scene.children
+                .filter((object) => object.name !== "LightingRoot" && object.name !== "DebugRoot")
+                .flatMap((object) => thrownRaycaster.intersectObject(object, true))
+                .find(
+                  (intersection) =>
+                    intersection.object !== knockable.mesh &&
+                    !isWeaponVisual(intersection.object) &&
+                    !(intersection.object instanceof THREE.Sprite),
+                );
+              if (hit !== undefined) {
+                const resolution = resolveMeleeThrow(knockable.massKg, impactSpeed);
+                const impactDirection: PhysicsVector = {
+                  x: thrownDirection.x,
+                  y: thrownDirection.y,
+                  z: thrownDirection.z,
+                };
+                hit.object.userData.lastMeleeThrowHit = {
+                  objectId: knockable.physicsId,
+                  displayName: knockable.displayName,
+                  massKg: resolution.massKg,
+                  speedMetersPerSecond: resolution.speedMetersPerSecond,
+                  kineticEnergyJoules: resolution.kineticEnergyJoules,
+                  damage: resolution.damage,
+                };
+                meleeThrowImpacts.push({
+                  objectId: knockable.physicsId,
+                  displayName: knockable.displayName,
+                  point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+                  direction: impactDirection,
+                  resolution,
+                });
+                knockable.throwImpactResolved = true;
+                knockable.isThrown = false;
+              }
+            }
+          }
+          knockable.previousBodyPosition.copy(knockable.basePosition);
         }
         if (
           wasKnocked &&
@@ -9562,11 +10753,67 @@ export const createExplorationWorld = (
         }
         knockable.mesh.setMatrixAt(knockable.index, knockMatrix);
         knockable.mesh.instanceMatrix.needsUpdate = true;
+        updatedMeshes.add(knockable.mesh);
       }
+    }
+    for (const mesh of updatedMeshes) {
+      refreshKnockableMeshBounds(mesh);
     }
     if (physicsChanged) {
       physicsVersion += 1;
     }
+  };
+
+  const writeKnockableMatrix = (
+    knockable: ExplorationKnockable,
+    position: THREE.Vector3,
+    quaternion: THREE.Quaternion,
+    scale: THREE.Vector3,
+  ): void => {
+    knockMatrix.compose(position, quaternion, scale);
+    knockable.mesh.setMatrixAt(knockable.index, knockMatrix);
+    knockable.mesh.instanceMatrix.needsUpdate = true;
+    refreshKnockableMeshBounds(knockable.mesh);
+  };
+
+  const meleeLongestSize = (knockable: ExplorationKnockable): number =>
+    resolveMeleeLongestSizeMeters(knockable.halfExtents);
+
+  const meleeVolume = (knockable: ExplorationKnockable): number =>
+    Math.max(
+      0.0001,
+      8 * knockable.halfExtents.x * knockable.halfExtents.y * knockable.halfExtents.z,
+    );
+
+  const toMeleePickup = (knockable: ExplorationKnockable): ExplorationMeleePickup => {
+    const swing = resolveMeleeSwing(meleeVolume(knockable));
+    return {
+      objectId: knockable.physicsId,
+      snapshot: {
+        objectId: knockable.physicsId,
+        displayName: knockable.displayName,
+        volumeM3: swing.volumeM3,
+        massKg: knockable.massKg,
+        rangeMeters: resolveMeleeRangeMeters(meleeLongestSize(knockable)),
+        swingSpeedRadiansPerSecond: swing.swingSpeedRadiansPerSecond,
+        damage: swing.damage,
+        oxygenCost: swing.oxygenCost,
+      },
+      mesh: knockable.mesh,
+      index: knockable.index,
+      halfExtents: knockable.halfExtents,
+      color: knockable.color,
+    };
+  };
+
+  const findKnockable = (objectId: number): ExplorationKnockable | null => {
+    for (const chunk of activeChunks.values()) {
+      const knockable = chunk.knockableProps.find((candidate) => candidate.physicsId === objectId);
+      if (knockable !== undefined) {
+        return knockable;
+      }
+    }
+    return null;
   };
 
   const dispose = (): void => {
@@ -9577,23 +10824,26 @@ export const createExplorationWorld = (
     activeChunks.clear();
     groundGeometry.dispose();
     pathGeometry.dispose();
-    propGeometry.dispose();
-    citySignGeometry.dispose();
-    utilityPostGeometry.dispose();
-    beaconGeometry.dispose();
+    baseballBatGeometry.dispose();
+    streetSignGeometry.dispose();
+    metalPipeGeometry.dispose();
+    trafficConeGeometry.dispose();
     buildingGeometry.dispose();
     windowGeometry.dispose();
     bridgeGeometry.dispose();
+    manholeCoverGeometry.dispose();
     for (const material of [
       ...groundMaterials,
       ...pathMaterials,
-      ...propMaterials,
+      ...baseballBatMaterials,
       ...accentMaterials,
       ...buildingMaterials,
       ...windowMaterials,
       ...bridgeMaterials,
-      ...citySignMaterials,
-      ...utilityPostMaterials,
+      ...streetSignMaterials,
+      ...metalPipeMaterials,
+      ...trafficConeMaterials,
+      ...manholeCoverMaterials,
     ]) {
       material.dispose();
     }
@@ -9612,6 +10862,9 @@ export const createExplorationWorld = (
       for (const chunk of activeChunks.values()) {
         boxes.push(...chunk.physicsBoxes);
         for (const knockable of chunk.knockableProps) {
+          if (knockable.isEquipped) {
+            continue;
+          }
           if (knockable.isKnocked) {
             boxes.push({
               center: {
@@ -9653,6 +10906,184 @@ export const createExplorationWorld = (
       }
       return boxes;
     },
+    getMeleePickups: () => {
+      const pickups: ExplorationMeleePickup[] = [];
+      for (const chunk of activeChunks.values()) {
+        for (const knockable of chunk.knockableProps) {
+          if (
+            !knockable.isEquipped &&
+            !knockable.isThrown &&
+            (!knockable.isKnocked || knockable.isDropped)
+          ) {
+            pickups.push(toMeleePickup(knockable));
+          }
+        }
+      }
+      return pickups;
+    },
+    getMeleeObjectIdForHit: (object, instanceIndex) => {
+      if (!(object instanceof THREE.InstancedMesh) || instanceIndex === undefined) {
+        return null;
+      }
+      for (const chunk of activeChunks.values()) {
+        const knockable = chunk.knockableProps.find(
+          (candidate) => candidate.mesh === object && candidate.index === instanceIndex,
+        );
+        if (knockable !== undefined && !knockable.isEquipped && !knockable.isDropped) {
+          return knockable.physicsId;
+        }
+      }
+      return null;
+    },
+    equipMeleeObject: (objectId) => {
+      const knockable = findKnockable(objectId);
+      if (
+        knockable === null ||
+        knockable.isEquipped ||
+        knockable.isThrown ||
+        (knockable.isKnocked && !knockable.isDropped)
+      ) {
+        return null;
+      }
+      // A dropped prop may still be rotating or moving in the dynamic body.
+      // Capture its current instance transform before removing that body so
+      // the recovered item does not snap back to its seeded spawn transform.
+      const currentMatrix = new THREE.Matrix4();
+      knockable.mesh.getMatrixAt(knockable.index, currentMatrix);
+      const currentPosition = new THREE.Vector3();
+      const currentQuaternion = new THREE.Quaternion();
+      currentMatrix.decompose(currentPosition, currentQuaternion, knockable.baseScale);
+      if (
+        Number.isFinite(currentPosition.x) &&
+        Number.isFinite(currentPosition.y) &&
+        Number.isFinite(currentPosition.z)
+      ) {
+        knockable.basePosition.copy(currentPosition);
+      }
+      if (
+        Number.isFinite(currentQuaternion.x) &&
+        Number.isFinite(currentQuaternion.y) &&
+        Number.isFinite(currentQuaternion.z) &&
+        Number.isFinite(currentQuaternion.w)
+      ) {
+        knockable.baseQuaternion.copy(currentQuaternion);
+      }
+      knockable.isDropped = false;
+      knockable.isKnocked = false;
+      knockable.isThrown = false;
+      knockable.throwImpactResolved = false;
+      knockable.hasBodyState = false;
+      knockable.angle = 0;
+      knockable.angularVelocity = 0;
+      knockable.kickCooldownSeconds = 0;
+      knockable.launchLinearVelocity.set(0, 0, 0);
+      knockable.launchAngularVelocity.set(0, 0, 0);
+      knockable.previousBodyPosition.copy(knockable.basePosition);
+      knockable.isEquipped = true;
+      writeKnockableMatrix(
+        knockable,
+        knockable.basePosition,
+        knockable.baseQuaternion,
+        new THREE.Vector3(0, 0, 0),
+      );
+      physicsVersion += 1;
+      return toMeleePickup(knockable);
+    },
+    throwMeleeObject: (objectId, position, rotationY, direction, playerVelocity) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || !knockable.isEquipped) {
+        return false;
+      }
+      knockable.isEquipped = false;
+      knockable.isDropped = true;
+      knockable.isThrown = true;
+      knockable.throwImpactResolved = false;
+      knockable.basePosition.copy(position);
+      knockable.baseQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotationY);
+      knockable.rotationY = rotationY;
+      activateKnockableRagdoll(knockable, direction);
+      const throwVelocity = resolveMeleeThrowVelocity(
+        direction,
+        playerVelocity ?? { x: 0, y: 0, z: 0 },
+        knockable.massKg,
+      );
+      knockable.angularVelocity = droppedRagdollSpinVelocity;
+      knockable.launchLinearVelocity.set(
+        throwVelocity.x,
+        throwVelocity.y + thrownRagdollLiftVelocity,
+        throwVelocity.z,
+      );
+      knockable.launchAngularVelocity.copy(knockAxis).multiplyScalar(droppedRagdollSpinVelocity);
+      knockable.previousBodyPosition.copy(knockable.basePosition);
+      writeKnockableMatrix(
+        knockable,
+        knockable.basePosition,
+        knockable.baseQuaternion,
+        knockable.baseScale,
+      );
+      physicsVersion += 1;
+      return true;
+    },
+    dropMeleeObject: (objectId, position, rotationY, releaseVelocity) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || !knockable.isEquipped) {
+        return false;
+      }
+      knockable.isEquipped = false;
+      knockable.isDropped = true;
+      knockable.isThrown = false;
+      knockable.throwImpactResolved = false;
+      knockable.basePosition.copy(position);
+      knockable.baseQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotationY);
+      knockable.rotationY = rotationY;
+      activateKnockableRagdoll(knockable, {
+        x: Math.sin(rotationY),
+        y: 0,
+        z: Math.cos(rotationY),
+      });
+      const releaseX =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.x) ? releaseVelocity.x : 0;
+      const releaseY =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.y) ? releaseVelocity.y : 0;
+      const releaseZ =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.z) ? releaseVelocity.z : 0;
+      knockable.angularVelocity = droppedRagdollSpinVelocity;
+      knockable.launchLinearVelocity.set(releaseX, releaseY + droppedRagdollLiftVelocity, releaseZ);
+      knockable.launchAngularVelocity.copy(knockAxis).multiplyScalar(droppedRagdollSpinVelocity);
+      knockable.previousBodyPosition.copy(knockable.basePosition);
+      writeKnockableMatrix(
+        knockable,
+        knockable.basePosition,
+        knockable.baseQuaternion,
+        knockable.baseScale,
+      );
+      physicsVersion += 1;
+      return true;
+    },
+    applyMeleeHit: (objectId, direction, swingSpeed) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
+        return false;
+      }
+      knockable.isDropped = false;
+      knockable.isThrown = false;
+      knockable.throwImpactResolved = false;
+      const safeSwingSpeed = Number.isFinite(swingSpeed) ? Math.max(0, swingSpeed) : 0;
+      const swingScale = THREE.MathUtils.clamp(safeSwingSpeed / 8, 0.35, 2.2);
+      activateKnockableRagdoll(knockable, direction);
+      const meleeImpulseMagnitude = knockLinearImpulseScale * swingScale * 2.4;
+      knockable.launchLinearVelocity.set(
+        knockImpulseDirection.x * meleeImpulseMagnitude,
+        knockImpulseDirection.y * meleeImpulseMagnitude,
+        knockImpulseDirection.z * meleeImpulseMagnitude,
+      );
+      knockable.launchAngularVelocity
+        .copy(knockAxis)
+        .multiplyScalar(knockAngularImpulseScale * (swingScale + 0.4));
+      physicsVersion += 1;
+      return true;
+    },
+    consumeMeleeThrowImpacts: () => meleeThrowImpacts.splice(0, meleeThrowImpacts.length),
     getPhysicsVersion: () => physicsVersion,
     dispose,
   };
@@ -9948,6 +11379,7 @@ export const createMahjongTableScene = (
   const cameraRecoilEuler = new THREE.Euler(0, 0, 0, "YXZ");
   const cameraMotionRight = new THREE.Vector3();
   const cameraMotionForward = new THREE.Vector3();
+  const cameraMotionUp = new THREE.Vector3();
   const quality = resolveQuality(requestedQuality);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   renderer.shadowMap.enabled = quality.shadows !== "off";
@@ -10519,10 +11951,12 @@ export const createMahjongTableScene = (
   };
   let jumpOffset = 0;
   let verticalVelocity = 0;
+  let presentationWorldVelocity: CameraMotionVector = { x: 0, y: 0, z: 0 };
   let grounded = true;
   let physicsRuntime: MahjongPhysicsRuntime | null = null;
   let physicsCharacterPosition: PhysicsVector | null = null;
   let weaponRuntime: WeaponRuntime | null = null;
+  let meleeRuntime: MeleeRuntime | null = null;
   let staticPhysicsBoxes: readonly PhysicsBox[] = [];
   let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
   let appliedPhysicsVersion = -1;
@@ -10530,12 +11964,19 @@ export const createMahjongTableScene = (
   let wallHangState: WallHangState | null = null;
   let wallClimbTransition: WallClimbTransition | null = null;
   let wallHangElapsed = 0;
+  const isLiveWallHangingEnabled = (): boolean => true;
   let touchingWall = false;
+  let wallContact: PlayerWallContact | null = null;
   let wallBracedAim = false;
+  let coverMode = false;
+  let coverActivationPending = false;
+  let coverActivationPendingWall: PlayerWallContact | null = null;
+  let coverWall: PlayerWallContact | null = null;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
-  let wallImpactActive = false;
   const cameraMotion = createCameraMotionDamper();
+  const meleeContactDirectionLocal = new THREE.Vector3();
+  const meleeContactCameraQuaternion = new THREE.Quaternion();
   let touchMovementActive = false;
   let touchForward = 0;
   let touchRight = 0;
@@ -10628,10 +12069,16 @@ export const createMahjongTableScene = (
     if (oxygenCost <= 0 || playerVitals.isDead) {
       return;
     }
+    const shortfallDamage = resolveLandingO2OverflowDamage(
+      downwardSpeed,
+      oxygenCost,
+      playerVitals.o2,
+    );
     const result = applyPlayerO2ImpactCost(
       playerVitals,
       oxygenCost,
       O2_LANDING_RECOVERY_DELAY_SECONDS,
+      shortfallDamage,
     );
     if (result.oxygenSpent <= 0 && result.damage <= 0) {
       return;
@@ -10676,7 +12123,20 @@ export const createMahjongTableScene = (
       weaponRuntime?.isReloading() ?? false,
     );
     const aimingChanged = aimingDownSights !== nextAiming;
+    const zoomActivated = !aimingDownSights && nextAiming;
     aimingDownSights = nextAiming;
+    if (!nextAiming) {
+      coverMode = false;
+      coverActivationPending = false;
+      coverActivationPendingWall = null;
+      coverWall = null;
+    } else if (aimingChanged && zoomActivated) {
+      // The contact flag is the last completed physics probe. This records
+      // contact at the zoom-on edge, so walking into a wall while already
+      // zoomed cannot arm cover later.
+      coverActivationPending = touchingWall;
+      coverActivationPendingWall = wallContact;
+    }
     const nextVitals = setPlayerHoldingBreath(
       playerVitals,
       holdingBreath && nextAiming,
@@ -10771,20 +12231,54 @@ export const createMahjongTableScene = (
     wallClimbTransition = null;
     wallHangElapsed = 0;
   };
-  const beginWallClimb = (): void => {
+  const beginWallClimb = (): boolean => {
     const wall = wallHangState;
     if (wall === null || wallClimbTransition !== null) {
-      return;
+      return false;
     }
     const targetPosition = resolveWallClimbTarget(wall);
     const climbHeight = Math.max(0, targetPosition.y - wall.target.y);
+    const oxygenRatio = playerVitals.o2 / PLAYER_MAX_O2;
+    const traversalO2Cost = resolveVaultTraversalO2Cost(climbHeight);
+    if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+      return false;
+    }
     const preservedSpeed = Math.hypot(wall.preservedForwardVelocity, wall.preservedStrafeVelocity);
+    const targetHorizontalDelta = {
+      x: targetPosition.x - wall.target.x,
+      z: targetPosition.z - wall.target.z,
+    };
+    const targetHorizontalDistance = Math.hypot(targetHorizontalDelta.x, targetHorizontalDelta.z);
+    const climbDirection =
+      targetHorizontalDistance > Number.EPSILON
+        ? {
+            x: targetHorizontalDelta.x / targetHorizontalDistance,
+            y: 0,
+            z: targetHorizontalDelta.z / targetHorizontalDistance,
+          }
+        : {
+            x: -wall.wallNormal.x,
+            y: 0,
+            z: -wall.wallNormal.z,
+          };
+    // Launch the capsule high enough to clear the actual top, with a small
+    // clearance margin. Horizontal motion is the caught approach impulse,
+    // capped so the controller can still resolve the wall face before the
+    // capsule rises over it.
+    const physicsVelocity = resolveWallClimbLaunchVelocity(
+      climbHeight,
+      climbDirection,
+      preservedSpeed,
+    );
     wallClimbTransition = {
-      duration: resolveVaultTraversalDuration(climbHeight),
+      duration: resolveO2ScaledTraversalDuration(
+        resolveVaultTraversalDuration(climbHeight),
+        oxygenRatio,
+      ),
       arcHeight: resolveVaultTraversalArcHeight(climbHeight),
       elapsed: 0,
       phase: "vault",
-      traversalHeightMeters: wall.box.halfExtents.y * 2,
+      traversalHeightMeters: climbHeight,
       startX: wall.target.x,
       startY: wall.target.y,
       startZ: wall.target.z,
@@ -10794,23 +12288,29 @@ export const createMahjongTableScene = (
       preservedForwardVelocity: wall.preservedForwardVelocity,
       preservedStrafeVelocity: wall.preservedStrafeVelocity,
       preserveSprinting: wall.preserveSprinting,
-      landingBoostDistance:
-        preservedSpeed > 0 ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05) : 0,
+      landingBoostDistance: 0,
+      physicsVelocity,
+      timeoutSeconds:
+        resolveO2ScaledTraversalDuration(resolveVaultTraversalDuration(climbHeight), oxygenRatio) +
+        1,
     };
     wallHangState = null;
     wallHangElapsed = 0;
     grounded = false;
-    verticalVelocity = 0;
+    verticalVelocity = physicsVelocity.y;
+    physicsCharacterPosition = { ...wall.target };
     forwardVelocity = 0;
     strafeVelocity = 0;
+    return true;
   };
   const resetCameraMotion = (): void => {
     cameraMotion.reset();
-    wallImpactActive = false;
+    presentationWorldVelocity = { x: 0, y: verticalVelocity, z: 0 };
     camera.updateMatrix();
   };
   const movementKeys = MOVEMENT_KEY_CODES;
   let jumpKeyHeld = false;
+  let jumpInputBufferSeconds = 0;
   const hasMovementInput = (): boolean => {
     for (const key of movementKeys) {
       if (pressedKeys.has(key)) {
@@ -10875,6 +12375,17 @@ export const createMahjongTableScene = (
       syncAimingFromInput();
     }
   };
+  const runGunActionWithMeleeHandoff = (action: () => boolean): boolean => {
+    const meleeWasActive = meleeRuntime?.isActive() ?? false;
+    if (meleeWasActive && !(meleeRuntime?.stash() ?? false)) {
+      return false;
+    }
+    const succeeded = action();
+    if (!succeeded && meleeWasActive) {
+      meleeRuntime?.interact();
+    }
+    return succeeded;
+  };
   const onKeyDown = (event: KeyboardEvent): void => {
     const leftCommandKey = isLeftCommandKeyEvent(event);
     const captureLeftCommand = shouldCaptureLeftCommandKeystroke(event, leftCommandHeld);
@@ -10907,7 +12418,21 @@ export const createMahjongTableScene = (
       event.preventDefault();
       if (event.code === "KeyE") {
         if (!event.repeat) {
-          weaponRuntime?.interact();
+          const meleeActive = meleeRuntime?.isActive() ?? false;
+          const gunNearby = (weaponRuntime?.getSnapshot().nearbyPickup ?? null) !== null;
+          if (meleeActive || gunNearby) {
+            // Stash before changing gun state so the two viewmodels can never
+            // be active in the same frame. Restore melee if the gun action
+            // does not succeed.
+            const gunInteractionSucceeded = runGunActionWithMeleeHandoff(
+              () => weaponRuntime?.interact() ?? false,
+            );
+            if (!gunInteractionSucceeded && !meleeRuntime?.isActive()) {
+              meleeRuntime?.interact();
+            }
+          } else if (!meleeRuntime?.interact()) {
+            weaponRuntime?.interact();
+          }
         }
       } else if (event.code === "KeyR") {
         if (!event.repeat) {
@@ -10915,15 +12440,22 @@ export const createMahjongTableScene = (
         }
       } else if (event.code === "KeyQ") {
         if (!event.repeat) {
-          weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
+          if (!meleeRuntime?.isActive()) {
+            weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
+          } else {
+            meleeRuntime?.throwActiveObject(resolvePlayerWorldVelocity());
+          }
         }
       } else if (/^Digit[0-4]$/u.test(event.code)) {
         if (!event.repeat) {
           const slotIndex = resolveWeaponHotkey(event.code);
           if (slotIndex === null) {
+            if (meleeRuntime?.isActive()) {
+              meleeRuntime?.holster();
+            }
             weaponRuntime?.holster();
           } else if (slotIndex !== undefined) {
-            weaponRuntime?.cycleWeaponTo(slotIndex);
+            runGunActionWithMeleeHandoff(() => weaponRuntime?.cycleWeaponTo(slotIndex) ?? false);
           }
         }
       } else if (crouchKeys.has(event.code)) {
@@ -10932,6 +12464,7 @@ export const createMahjongTableScene = (
         }
       } else if (event.code === "Space") {
         jumpKeyHeld = true;
+        jumpInputBufferSeconds = JUMP_INPUT_BUFFER_SECONDS;
         jump();
       } else if (movementKeys.has(event.code)) {
         pressedKeys.add(event.code);
@@ -10974,8 +12507,10 @@ export const createMahjongTableScene = (
     return isCrouched;
   };
   const jump = (): boolean => {
-    if (activeView === "seat" && wallHangState !== null) {
-      beginWallClimb();
+    if (isLiveWallHangingEnabled() && activeView === "seat" && wallHangState !== null) {
+      if (beginWallClimb()) {
+        jumpInputBufferSeconds = 0;
+      }
       return isCrouched;
     }
     if (
@@ -10984,15 +12519,20 @@ export const createMahjongTableScene = (
       ledgeClimbTransition === null &&
       wallClimbTransition === null
     ) {
-      const fullJumpAccepted = spendPlayerO2(O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS);
-      if (!fullJumpAccepted && playerVitals.isDead) {
+      const jumpOxygen = resolveJumpOxygenAvailability(playerVitals.o2);
+      if (!jumpOxygen.accepted || playerVitals.isDead) {
+        jumpInputBufferSeconds = 0;
         return isCrouched;
       }
-      const launchSpeed = resolveJumpLaunchSpeed(fullJumpAccepted);
+      if (jumpOxygen.fullJump && !spendPlayerO2(O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+        jumpInputBufferSeconds = 0;
+        return isCrouched;
+      }
+      const launchSpeed = jumpOxygen.launchSpeed;
       isCrouched = resolveCrouchedStateAfterJump(isCrouched, true);
       verticalVelocity = launchSpeed;
       grounded = false;
-      cameraMotion.applyJumpImpulse(launchSpeed);
+      jumpInputBufferSeconds = 0;
     }
     return isCrouched;
   };
@@ -11006,6 +12546,7 @@ export const createMahjongTableScene = (
     jumpOffset = 0;
     grounded = true;
     jumpKeyHeld = false;
+    jumpInputBufferSeconds = 0;
     forwardVelocity = 0;
     strafeVelocity = 0;
     isSprinting = false;
@@ -11017,6 +12558,10 @@ export const createMahjongTableScene = (
     leftCommandHeld = false;
     rightMouseAiming = false;
     syncAimingFromInput();
+    wallContact = null;
+    coverActivationPendingWall = null;
+    coverWall = null;
+    meleeRuntime?.setFireHeld(false);
     weaponRuntime?.setFireHeld(false);
     lastMovementTapAtByKey.clear();
     ledgeClimbTransition = null;
@@ -11054,8 +12599,14 @@ export const createMahjongTableScene = (
     if (event.button !== 0) {
       return;
     }
-    weaponRuntime?.setFireHeld(true);
-    weaponRuntime?.fire();
+    const activeMeleeRuntime = meleeRuntime;
+    if (activeMeleeRuntime?.isActive()) {
+      activeMeleeRuntime.setFireHeld(true);
+      activeMeleeRuntime.fire();
+    } else {
+      weaponRuntime?.setFireHeld(true);
+      weaponRuntime?.fire();
+    }
   };
   const onWindowMouseUp = (event: MouseEvent): void => {
     if (event.button === 2) {
@@ -11064,6 +12615,7 @@ export const createMahjongTableScene = (
     if (event.button !== 0) {
       return;
     }
+    meleeRuntime?.setFireHeld(false);
     weaponRuntime?.setFireHeld(false);
   };
   window.addEventListener("keydown", onKeyDown, true);
@@ -12273,6 +13825,43 @@ export const createMahjongTableScene = (
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
     },
   );
+  if (explorationWorld !== null) {
+    meleeRuntime = createMeleeRuntime(
+      scene,
+      camera,
+      explorationWorld,
+      options.onMeleeStateChange,
+      (damage) => {
+        return spendPlayerProjectileO2(damage, 1);
+      },
+      (damage, impactDirection) => {
+        // Project against the physical pointer-lock pose; presentation recoil
+        // is composed into the camera matrix separately.
+        meleeContactDirectionLocal
+          .set(impactDirection.x, impactDirection.y, impactDirection.z)
+          .applyQuaternion(meleeContactCameraQuaternion.copy(camera.quaternion).invert());
+        cameraMotion.applyMeleeContactImpulse({
+          damage,
+          targetImpulseDirection: meleeContactDirectionLocal,
+        });
+      },
+      (damage, impactDirection) => {
+        meleeContactDirectionLocal
+          .set(impactDirection.x, impactDirection.y, impactDirection.z)
+          .applyQuaternion(meleeContactCameraQuaternion.copy(camera.quaternion).invert());
+        cameraMotion.applyMeleeContactImpulse({
+          damage,
+          targetImpulseDirection: meleeContactDirectionLocal,
+        });
+      },
+      () => {
+        // A claimed ragdoll object occupies the player's hand. Keep the gun
+        // instance in its inventory, but holster its viewmodel until the
+        // object is dropped or manually re-equipped.
+        weaponRuntime?.holster(true);
+      },
+    );
+  }
   // Keep the same collision/traversal path active while Rapier's optional
   // WASM module is loading.  The previous null-runtime window let the camera
   // move through the training wall before the async initialisation settled,
@@ -12328,9 +13917,10 @@ export const createMahjongTableScene = (
     readonly aimNdc: THREE.Vector2;
   } => {
     const motion = cameraMotion.getOffsets();
+    const reticleRoll = motion.roll - motion.coverLeanRoll;
     const bobbingOffset: ReticleBobbingOffset = {
       x:
-        motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
+        reticleRoll * RETICLE_SWAY_PIXELS_PER_RADIAN +
         motion.headBobLateral * RETICLE_HEAD_BOB_LATERAL_PIXELS_PER_METER +
         motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
         motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN,
@@ -12372,6 +13962,8 @@ export const createMahjongTableScene = (
       cameraMotionRight.normalize();
       presentationOffsetX += cameraMotionRight.x * motion.headBobLateral;
       presentationOffsetZ += cameraMotionRight.z * motion.headBobLateral;
+      presentationOffsetX += cameraMotionRight.x * motion.coverLeanOffset;
+      presentationOffsetZ += cameraMotionRight.z * motion.coverLeanOffset;
     }
     cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
     cameraMotionForward.y = 0;
@@ -12379,6 +13971,11 @@ export const createMahjongTableScene = (
       cameraMotionForward.normalize();
       presentationOffsetX += cameraMotionForward.x * motion.headBobDepth;
       presentationOffsetZ += cameraMotionForward.z * motion.headBobDepth;
+      // Recoil depth is expressed in camera-local +z (backward), while this
+      // basis points along the view direction (-z). Keep the translation in
+      // the same presentation-only matrix so physics never consumes it.
+      presentationOffsetX -= cameraMotionForward.x * motion.recoilDepth;
+      presentationOffsetZ -= cameraMotionForward.z * motion.recoilDepth;
     }
     camera.updateMatrix();
     // Keep the physical camera position untouched. The presentation offset is
@@ -12409,7 +14006,6 @@ export const createMahjongTableScene = (
   };
   const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
   const COLLISION_DAMAGE_COOLDOWN_SECONDS = 0.8;
-  const CAMERA_WALL_IMPACT_SPEED_THRESHOLD = 0.5;
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") {
       saveSceneState(true);
@@ -12514,6 +14110,7 @@ export const createMahjongTableScene = (
     let knockImpactDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
     let knockCollisionCount = 0;
     if (firstPersonActive) {
+      jumpInputBufferSeconds = Math.max(0, jumpInputBufferSeconds - delta);
       if (motionLookEnabled && motionTargetValid) {
         camera.quaternion.slerp(motionTargetQuaternion, 1 - Math.exp(-18 * delta));
       }
@@ -12658,23 +14255,31 @@ export const createMahjongTableScene = (
         });
         currentMoveSpeed = moveSpeed * speedMultiplier;
       }
-      if (wallHangState !== null) {
+      if (isLiveWallHangingEnabled() && wallHangState !== null) {
         wallHangElapsed = Math.min(wallHangElapsed + delta, WALL_HANG_SETTLE_DURATION);
         if (forward < -0.1) {
           wallHangState = null;
           wallHangElapsed = 0;
           grounded = false;
           verticalVelocity = 0;
-        } else if (wallHangElapsed >= WALL_HANG_SETTLE_DURATION && (forward > 0.1 || jumpKeyHeld)) {
-          beginWallClimb();
+        } else if (
+          wallHangElapsed >= WALL_HANG_SETTLE_DURATION &&
+          (forward > 0.1 || jumpKeyHeld || jumpInputBufferSeconds > 0)
+        ) {
+          if (beginWallClimb()) {
+            jumpInputBufferSeconds = 0;
+          }
         }
       }
-      const isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
+      const isWallTraversalActive =
+        (isLiveWallHangingEnabled() && wallHangState !== null) || wallClimbTransition !== null;
       const desiredForward = isWallTraversalActive ? 0 : forward * inputScale * currentMoveSpeed;
       const desiredStrafe = isWallTraversalActive ? 0 : right * inputScale * currentMoveSpeed;
-      let localAcceleration: CameraLocalAcceleration = { right: 0, forward: 0 };
+      const previousPresentationWorldVelocity = presentationWorldVelocity;
+      const velocityDeltaSeconds = Math.max(delta, 1 / 120);
+      let resolvedWorldVelocity: CameraMotionVector;
       const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
-      const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
+      let movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
       movementMagnitudeActivity = movementMagnitude;
       locomotionBlendActivity = crouching
         ? 0
@@ -12699,17 +14304,9 @@ export const createMahjongTableScene = (
       if (isWallTraversalActive) {
         forwardVelocity = 0;
         strafeVelocity = 0;
-        wallImpactActive = false;
       } else {
-        const previousForwardVelocity = forwardVelocity;
-        const previousStrafeVelocity = strafeVelocity;
         forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
         strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
-        const accelerationDelta = Math.max(delta, 1 / 120);
-        localAcceleration = {
-          right: (strafeVelocity - previousStrafeVelocity) / accelerationDelta,
-          forward: (forwardVelocity - previousForwardVelocity) / accelerationDelta,
-        };
       }
       const movementStart = camera.position.clone();
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(forwardVelocity) > 0.001) {
@@ -12718,7 +14315,16 @@ export const createMahjongTableScene = (
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(strafeVelocity) > 0.001) {
         firstPersonControls.moveRight(strafeVelocity * delta);
       }
-      const desiredHorizontalDelta = camera.position.clone().sub(movementStart);
+      let desiredHorizontalDelta: PhysicsVector = camera.position.clone().sub(movementStart);
+      if (coverMode && coverWall !== null) {
+        // Once cover is engaged, keep locomotion on the wall face even when
+        // the player turns to look around the corner. This removes the
+        // camera-relative strafe's outward normal component before physics.
+        desiredHorizontalDelta = projectPlayerMovementToWallTangent(
+          desiredHorizontalDelta,
+          coverWall,
+        );
+      }
       let baseCameraY: number;
       if (physicsRuntime !== null) {
         camera.position.copy(movementStart);
@@ -12734,85 +14340,57 @@ export const createMahjongTableScene = (
             camera.position.x = target.x;
             camera.position.z = target.z;
             baseCameraY = target.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+            resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
           } else {
             const transition = wallClimbTransition;
             if (transition === null) {
               baseCameraY = camera.position.y;
+              resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
             } else {
-              transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
-              const progress = smoothStep(
-                THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
-              );
-              const transitionY =
-                THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
-                (transition.phase === "vault"
-                  ? Math.sin(progress * Math.PI) * transition.arcHeight
-                  : 0);
+              const previousPosition = physicsCharacterPosition ?? {
+                x: transition.startX,
+                y: transition.startY,
+                z: transition.startZ,
+              };
+              transition.elapsed = Math.min(transition.elapsed + delta, transition.timeoutSeconds);
+              transition.physicsVelocity = {
+                ...transition.physicsVelocity,
+                y: transition.physicsVelocity.y - GRAVITY * delta,
+              };
+              verticalVelocity = transition.physicsVelocity.y;
+              const movement = physicsRuntime.move(previousPosition, {
+                x: transition.physicsVelocity.x * delta,
+                y: transition.physicsVelocity.y * delta,
+                z: transition.physicsVelocity.z * delta,
+              });
               const position: PhysicsVector = {
-                x: THREE.MathUtils.lerp(transition.startX, transition.targetX, progress),
-                y: transitionY,
-                z: THREE.MathUtils.lerp(transition.startZ, transition.targetZ, progress),
+                x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+                y: movement.position.y,
+                z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+              };
+              resolvedWorldVelocity = {
+                x: (position.x - previousPosition.x) / velocityDeltaSeconds,
+                y: (position.y - previousPosition.y) / velocityDeltaSeconds,
+                z: (position.z - previousPosition.z) / velocityDeltaSeconds,
               };
               physicsCharacterPosition = position;
-              grounded = false;
-              verticalVelocity = 0;
+              grounded = movement.grounded && verticalVelocity <= 0;
+              if (!grounded) {
+                maximumFallSpeed = Math.max(maximumFallSpeed, Math.max(0, -verticalVelocity));
+              }
               jumpOffset = Math.max(0, position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
               camera.position.x = position.x;
               camera.position.z = position.z;
               baseCameraY = position.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
               forwardVelocity = transition.preservedForwardVelocity;
               strafeVelocity = transition.preservedStrafeVelocity;
-              if (transition.elapsed >= transition.duration) {
-                if (transition.phase === "vault" && transition.landingBoostDistance > 0) {
-                  const preservedSpeed = Math.hypot(
-                    transition.preservedForwardVelocity,
-                    transition.preservedStrafeVelocity,
-                  );
-                  const boostDirectionForward =
-                    preservedSpeed > 0 ? transition.preservedForwardVelocity / preservedSpeed : 0;
-                  const boostDirectionRight =
-                    preservedSpeed > 0 ? transition.preservedStrafeVelocity / preservedSpeed : 0;
-                  transition.startX = transition.targetX;
-                  transition.startY = transition.targetY;
-                  transition.startZ = transition.targetZ;
-                  transition.targetX += boostDirectionForward * transition.landingBoostDistance;
-                  transition.targetZ += boostDirectionRight * transition.landingBoostDistance;
-                  transition.duration = LEDGE_CLIMB_EXIT_BOOST_DURATION;
-                  transition.elapsed = 0;
-                  transition.phase = "landingBoost";
-                  baseCameraY = transition.startY - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
-                } else {
-                  const targetPosition: PhysicsVector = {
-                    x: transition.targetX,
-                    y: transition.targetY,
-                    z: transition.targetZ,
-                  };
-                  const landing = physicsRuntime.move(targetPosition, {
-                    x: 0,
-                    y: -PLAYER_SUPPORT_SNAP_HEIGHT,
-                    z: 0,
-                  });
-                  const landedPosition: PhysicsVector = {
-                    x: THREE.MathUtils.clamp(
-                      landing.position.x,
-                      WORLD_BOUNDS.minX,
-                      WORLD_BOUNDS.maxX,
-                    ),
-                    y: landing.position.y,
-                    z: THREE.MathUtils.clamp(
-                      landing.position.z,
-                      WORLD_BOUNDS.minZ,
-                      WORLD_BOUNDS.maxZ,
-                    ),
-                  };
-                  physicsCharacterPosition = landedPosition;
-                  grounded = landing.grounded;
+              const reachedSupportedTop = grounded && position.y >= transition.targetY - 0.12;
+              if (reachedSupportedTop || transition.elapsed >= transition.timeoutSeconds) {
+                wallClimbTransition = null;
+                if (reachedSupportedTop) {
+                  grounded = true;
                   verticalVelocity = 0;
-                  jumpOffset = Math.max(0, landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT);
-                  camera.position.x = landedPosition.x;
-                  camera.position.z = landedPosition.z;
-                  baseCameraY = landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
-                  wallClimbTransition = null;
+                  maximumFallSpeed = 0;
                 }
               }
             }
@@ -12840,54 +14418,14 @@ export const createMahjongTableScene = (
           });
           if (movement.collisions > 0 && delta > 0) {
             const requestedVelocity = {
-              x: desiredHorizontalDelta.x / delta,
-              z: desiredHorizontalDelta.z / delta,
+              x: desiredHorizontalDelta.x / velocityDeltaSeconds,
+              z: desiredHorizontalDelta.z / velocityDeltaSeconds,
             };
             const resolvedVelocity = {
-              x: (movement.position.x - characterPosition.x) / delta,
-              z: (movement.position.z - characterPosition.z) / delta,
+              x: (movement.position.x - characterPosition.x) / velocityDeltaSeconds,
+              z: (movement.position.z - characterPosition.z) / velocityDeltaSeconds,
             };
             const requestedSpeed = Math.hypot(requestedVelocity.x, requestedVelocity.z);
-            const velocityChange = {
-              x: resolvedVelocity.x - requestedVelocity.x,
-              z: resolvedVelocity.z - requestedVelocity.z,
-            };
-            const velocityChangeMagnitude = Math.hypot(velocityChange.x, velocityChange.z);
-            const boundedVelocityChangeMagnitude = Math.min(
-              requestedSpeed,
-              velocityChangeMagnitude,
-            );
-            const velocityChangeScale =
-              velocityChangeMagnitude > Number.EPSILON
-                ? boundedVelocityChangeMagnitude / velocityChangeMagnitude
-                : 0;
-            const horizontalImpact =
-              boundedVelocityChangeMagnitude > CAMERA_WALL_IMPACT_SPEED_THRESHOLD;
-            if (horizontalImpact && !wallImpactActive && velocityChangeScale > 0) {
-              cameraMotionRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
-              cameraMotionRight.y = 0;
-              cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-              cameraMotionForward.y = 0;
-              if (
-                cameraMotionRight.lengthSq() > 0.0001 &&
-                cameraMotionForward.lengthSq() > 0.0001
-              ) {
-                cameraMotionRight.normalize();
-                cameraMotionForward.normalize();
-                const accelerationDelta = Math.max(delta, 1 / 120);
-                const rightVelocityChange =
-                  velocityChange.x * velocityChangeScale * cameraMotionRight.x +
-                  velocityChange.z * velocityChangeScale * cameraMotionRight.z;
-                const forwardVelocityChange =
-                  velocityChange.x * velocityChangeScale * cameraMotionForward.x +
-                  velocityChange.z * velocityChangeScale * cameraMotionForward.z;
-                localAcceleration = {
-                  right: localAcceleration.right + rightVelocityChange / accelerationDelta,
-                  forward: localAcceleration.forward + forwardVelocityChange / accelerationDelta,
-                };
-              }
-            }
-            wallImpactActive = horizontalImpact;
             if (impactDamageCooldown <= 0) {
               const velocityDrop = Math.hypot(
                 requestedVelocity.x - resolvedVelocity.x,
@@ -12903,8 +14441,6 @@ export const createMahjongTableScene = (
                 impactDamageCooldown = COLLISION_DAMAGE_COOLDOWN_SECONDS;
               }
             }
-          } else {
-            wallImpactActive = false;
           }
           knockImpactDelta = {
             x: desiredHorizontalDelta.x,
@@ -12912,11 +14448,18 @@ export const createMahjongTableScene = (
             z: desiredHorizontalDelta.z,
           };
           knockCollisionCount = movement.collisions;
-          const clampedPosition: PhysicsVector = {
+          let clampedPosition: PhysicsVector = {
             x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
             y: movement.position.y,
             z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
           };
+          if (coverMode && coverWall !== null) {
+            // The physics controller stops at the wall face but can slide past
+            // the end of a thin box because there is no longer a side face to
+            // collide with. Keep the cover capsule inside the engaged face's
+            // tangent span so A/D cannot silently drop wall contact.
+            clampedPosition = clampPlayerPositionToWallTangent(clampedPosition, coverWall);
+          }
           const canUseAirborneTraversal =
             !grounded &&
             (!movement.grounded || verticalVelocity > 0) &&
@@ -12967,6 +14510,7 @@ export const createMahjongTableScene = (
           // Require the horizontal approach itself to be blocked before the
           // wall resolver is allowed to consider a candidate.
           if (
+            isLiveWallHangingEnabled() &&
             vaultTarget === null &&
             ledgeClimbTransition === null &&
             canUseAirborneTraversal &&
@@ -12983,10 +14527,6 @@ export const createMahjongTableScene = (
                     ...staticPhysicsBoxes,
                     ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
                   ];
-            // Use Rapier's corrected contact position first. This prevents a
-            // ceiling or unrelated side contact from stealing a nearby wall.
-            // For a long horizontal sweep, retry the safe pre-move point only
-            // when the approach itself was blocked.
             wallHangResolution = resolveWallHangTargetDetails(
               clampedPosition,
               wallApproach,
@@ -12998,65 +14538,75 @@ export const createMahjongTableScene = (
               wallHangPhysicsBoxes,
             );
           }
-          const climbTarget = vaultTarget;
+          let climbTarget = vaultTarget;
           if (climbTarget !== null && ledgeClimbTransition === null) {
-            const climbStartX = clampedPosition.x;
-            const climbStartY = clampedPosition.y;
-            const climbStartZ = clampedPosition.z;
-            const clampedX = THREE.MathUtils.clamp(
-              climbTarget.x,
-              WORLD_BOUNDS.minX,
-              WORLD_BOUNDS.maxX,
-            );
-            const clampedZ = THREE.MathUtils.clamp(
-              climbTarget.z,
-              WORLD_BOUNDS.minZ,
-              WORLD_BOUNDS.maxZ,
-            );
-            const momentum = resolveLedgeClimbMomentum(
-              desiredForward,
-              desiredStrafe,
-              forwardVelocity,
-              strafeVelocity,
-              isSprinting,
-              moveSpeed,
-            );
-            const preservedSpeed = Math.hypot(
-              momentum.preservedForwardVelocity,
-              momentum.preservedStrafeVelocity,
-            );
+            const traversalTarget = climbTarget;
             // Use the feet height before this frame's physics move. A jump can
-            // already be rising when the box is detected; timing from the
-            // post-move position would shorten a measured two-metre vault.
-            const climbHeight = Math.max(0, climbTarget.y - characterPosition.y);
-            const landingBoostDistance =
-              preservedSpeed > 0
-                ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
-                : 0;
-            clampedPosition.x = clampedX;
-            clampedPosition.z = clampedZ;
-            clampedPosition.y = climbTarget.y;
-            ledgeClimbTransition = {
-              duration: resolveVaultTraversalDuration(climbHeight),
-              arcHeight: resolveVaultTraversalArcHeight(climbHeight),
-              elapsed: 0,
-              phase: "vault",
-              traversalHeightMeters: climbHeight,
-              startX: climbStartX,
-              startY: climbStartY,
-              startZ: climbStartZ,
-              targetX: clampedPosition.x,
-              targetY: clampedPosition.y,
-              targetZ: clampedPosition.z,
-              preservedForwardVelocity: momentum.preservedForwardVelocity,
-              preservedStrafeVelocity: momentum.preservedStrafeVelocity,
-              preserveSprinting: momentum.preserveSprinting,
-              landingBoostDistance,
-            };
-            grounded = true;
-            verticalVelocity = 0;
+            // already be rising when the box is detected; timing and O₂ cost
+            // from the post-move position would undercharge a measured vault.
+            const climbHeight = Math.max(0, traversalTarget.y - characterPosition.y);
+            const oxygenRatio = playerVitals.o2 / PLAYER_MAX_O2;
+            const traversalO2Cost = resolveVaultTraversalO2Cost(climbHeight);
+            if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+              climbTarget = null;
+            } else {
+              const climbStartX = clampedPosition.x;
+              const climbStartY = clampedPosition.y;
+              const climbStartZ = clampedPosition.z;
+              const clampedX = THREE.MathUtils.clamp(
+                traversalTarget.x,
+                WORLD_BOUNDS.minX,
+                WORLD_BOUNDS.maxX,
+              );
+              const clampedZ = THREE.MathUtils.clamp(
+                traversalTarget.z,
+                WORLD_BOUNDS.minZ,
+                WORLD_BOUNDS.maxZ,
+              );
+              const momentum = resolveLedgeClimbMomentum(
+                desiredForward,
+                desiredStrafe,
+                forwardVelocity,
+                strafeVelocity,
+                isSprinting,
+                moveSpeed,
+              );
+              const preservedSpeed = Math.hypot(
+                momentum.preservedForwardVelocity,
+                momentum.preservedStrafeVelocity,
+              );
+              const landingBoostDistance =
+                preservedSpeed > 0
+                  ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
+                  : 0;
+              clampedPosition.x = clampedX;
+              clampedPosition.z = clampedZ;
+              clampedPosition.y = traversalTarget.y;
+              ledgeClimbTransition = {
+                duration: resolveO2ScaledTraversalDuration(
+                  resolveVaultTraversalDuration(climbHeight),
+                  oxygenRatio,
+                ),
+                arcHeight: resolveVaultTraversalArcHeight(climbHeight),
+                elapsed: 0,
+                phase: "vault",
+                traversalHeightMeters: climbHeight,
+                startX: climbStartX,
+                startY: climbStartY,
+                startZ: climbStartZ,
+                targetX: clampedPosition.x,
+                targetY: clampedPosition.y,
+                targetZ: clampedPosition.z,
+                preservedForwardVelocity: momentum.preservedForwardVelocity,
+                preservedStrafeVelocity: momentum.preservedStrafeVelocity,
+                preserveSprinting: momentum.preserveSprinting,
+                landingBoostDistance,
+              };
+              grounded = true;
+              verticalVelocity = 0;
+            }
           }
-          if (wallHangResolution !== null && climbTarget === null) {
+          if (isLiveWallHangingEnabled() && wallHangResolution !== null && climbTarget === null) {
             const wallMomentum = resolveLedgeClimbMomentum(
               desiredForward,
               desiredStrafe,
@@ -13097,17 +14647,20 @@ export const createMahjongTableScene = (
               : climbTarget === null
                 ? movement.grounded && verticalVelocity <= 0
                 : true;
+          resolvedWorldVelocity =
+            climbTarget !== null || wallHangResolution !== null
+              ? { x: 0, y: 0, z: 0 }
+              : {
+                  x: (clampedPosition.x - characterPosition.x) / velocityDeltaSeconds,
+                  y: grounded ? 0 : verticalVelocity,
+                  z: (clampedPosition.z - characterPosition.z) / velocityDeltaSeconds,
+                };
           if (
             !wasGrounded &&
             movement.grounded &&
             climbTarget === null &&
             wallHangResolution === null
           ) {
-            const landingVelocity = Math.max(0, -verticalVelocity);
-            cameraMotion.applyLandingImpulse({
-              downwardVelocity: landingVelocity,
-              downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
-            });
             applyLandingO2(maximumFallSpeed);
           }
           if (grounded) {
@@ -13122,7 +14675,22 @@ export const createMahjongTableScene = (
           baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
           if (ledgeClimbTransition !== null) {
             const transition = ledgeClimbTransition;
+            const previousTransitionProgress = smoothStep(
+              THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
+            );
+            const previousTransitionX = THREE.MathUtils.lerp(
+              transition.startX,
+              transition.targetX,
+              previousTransitionProgress,
+            );
+            const previousTransitionZ = THREE.MathUtils.lerp(
+              transition.startZ,
+              transition.targetZ,
+              previousTransitionProgress,
+            );
+            const previousTransitionY = resolveClimbingTransitionY(transition, transition.elapsed);
             transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
+            const transitionY = resolveClimbingTransitionY(transition, transition.elapsed);
             const progress = smoothStep(
               THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
             );
@@ -13136,11 +14704,12 @@ export const createMahjongTableScene = (
               transition.targetZ,
               progress,
             );
-            const transitionY =
-              transition.phase === "vault"
-                ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
-                  Math.sin(progress * Math.PI) * transition.arcHeight
-                : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+            verticalVelocity = (transitionY - previousTransitionY) / velocityDeltaSeconds;
+            resolvedWorldVelocity = {
+              x: (transitionX - previousTransitionX) / velocityDeltaSeconds,
+              y: verticalVelocity,
+              z: (transitionZ - previousTransitionZ) / velocityDeltaSeconds,
+            };
             camera.position.x = transitionX;
             camera.position.z = transitionZ;
             baseCameraY = resolveLedgeClimbTargetCameraY(transitionY);
@@ -13188,6 +14757,7 @@ export const createMahjongTableScene = (
                   z: targetZ,
                 };
                 camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+                resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
               }
             }
             if (transition.phase === "landingBoost" && transition.elapsed >= transition.duration) {
@@ -13204,6 +14774,7 @@ export const createMahjongTableScene = (
                 z: targetZ,
               };
               camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+              resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
             }
           }
         }
@@ -13228,11 +14799,6 @@ export const createMahjongTableScene = (
           if (jumpOffset <= 0) {
             jumpOffset = 0;
             if (!wasGrounded) {
-              const landingVelocity = Math.max(0, -verticalVelocity);
-              cameraMotion.applyLandingImpulse({
-                downwardVelocity: landingVelocity,
-                downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
-              });
               applyLandingO2(maximumFallSpeed);
               maximumFallSpeed = 0;
             }
@@ -13241,6 +14807,11 @@ export const createMahjongTableScene = (
           }
         }
         baseCameraY = firstPersonGroundY + eyeHeight + jumpOffset;
+        resolvedWorldVelocity = {
+          x: (camera.position.x - movementStart.x) / velocityDeltaSeconds,
+          y: grounded ? 0 : verticalVelocity,
+          z: (camera.position.z - movementStart.z) / velocityDeltaSeconds,
+        };
       }
       const wallContactPosition = physicsCharacterPosition ?? {
         x: camera.position.x,
@@ -13251,31 +14822,142 @@ export const createMahjongTableScene = (
         dynamicPhysicsBoxes.length === 0
           ? staticPhysicsBoxes
           : [...staticPhysicsBoxes, ...dynamicPhysicsBoxes];
-      touchingWall = isPlayerTouchingWall(wallContactPosition, wallContactBoxes, {
+      wallContact = resolvePlayerWallContact(wallContactPosition, wallContactBoxes, {
         radius: PLAYER_COLLIDER_RADIUS,
         halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
       });
+      touchingWall = wallContact !== null;
       wallBracedAim = touchingWall && aimingDownSights;
-      if (jumpKeyHeld) {
+      const wasCoverMode = coverMode;
+      coverMode = resolveCoverModeFromAimTransition(
+        coverMode,
+        coverActivationPending,
+        aimingDownSights,
+        touchingWall,
+      );
+      if (!coverMode) {
+        coverWall = null;
+      } else if (!wasCoverMode) {
+        coverWall = coverActivationPendingWall ?? wallContact;
+      } else if (coverWall === null) {
+        coverWall = wallContact;
+      }
+      coverActivationPending = false;
+      coverActivationPendingWall = null;
+      const wasGroundedBeforeHeldJump = grounded;
+      const wasHangingBeforeHeldJump = wallHangState !== null;
+      if (jumpKeyHeld || jumpInputBufferSeconds > 0) {
         jump();
+      }
+      if (
+        wasGroundedBeforeHeldJump &&
+        !wasHangingBeforeHeldJump &&
+        wallClimbTransition === null &&
+        !grounded &&
+        verticalVelocity > 0
+      ) {
+        resolvedWorldVelocity = {
+          ...resolvedWorldVelocity,
+          y: verticalVelocity,
+        };
+      }
+      // Input can remain held against a wall edge after the controller has
+      // clamped the capsule. Drive gait, O₂ workload, and the viewmodel's
+      // movement factor from the resolved horizontal velocity so a blocked
+      // strafe does not keep producing a walking bounce.
+      const resolvedHorizontalSpeed = Math.hypot(resolvedWorldVelocity.x, resolvedWorldVelocity.z);
+      const movementReferenceSpeed =
+        currentMoveSpeed > Number.EPSILON ? currentMoveSpeed : maxMoveSpeed;
+      movementMagnitude = THREE.MathUtils.clamp(
+        resolvedHorizontalSpeed / movementReferenceSpeed,
+        0,
+        1,
+      );
+      movementSpeedRatio = THREE.MathUtils.clamp(resolvedHorizontalSpeed / maxMoveSpeed, 0, 1);
+      movementMagnitudeActivity = movementMagnitude;
+      locomotionBlendActivity = crouching
+        ? 0
+        : THREE.MathUtils.clamp(
+            (movementSpeedRatio - WALK_SPEED_RATIO) / (1 - WALK_SPEED_RATIO),
+            0,
+            1,
+          );
+      exerciseIntensity = THREE.MathUtils.clamp(
+        movementMagnitude * (crouching ? 1 : movementSpeedRatio),
+        0,
+        1,
+      );
+      if (!grounded) {
+        exerciseIntensity = Math.max(exerciseIntensity, 0.25);
+      }
+      sprintingActivity = !crouching && movementMagnitude > 0.05 && sprintingMovement;
+      crouchWalkingActivity = crouching && movementMagnitude > 0.05;
+      walkingActivity =
+        !crouching && movementMagnitude > 0.05 && !sprintingActivity && !isWallTraversalActive;
+      const supportStop =
+        resolvedWorldVelocity.y === 0 &&
+        previousPresentationWorldVelocity.y < -Number.EPSILON &&
+        (grounded ||
+          wallHangState !== null ||
+          ledgeClimbTransition !== null ||
+          wallClimbTransition !== null);
+      presentationWorldVelocity = resolvedWorldVelocity;
+      // PointerLockControls moves parallel to the world XZ plane. Use the
+      // same yaw-only body basis for delta-v projection; looking up or down
+      // must not turn horizontal braking into a fake vertical load. Vertical
+      // acceleration remains world-up, which gives the full signed six-way
+      // response without inventing a camera-pitch axis.
+      cameraMotionRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+      cameraMotionRight.y = 0;
+      if (cameraMotionRight.lengthSq() > 0.0001) {
+        cameraMotionRight.normalize();
+      } else {
+        cameraMotionRight.set(1, 0, 0);
+      }
+      cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      cameraMotionForward.y = 0;
+      if (cameraMotionForward.lengthSq() > 0.0001) {
+        cameraMotionForward.normalize();
+      } else {
+        cameraMotionForward.set(0, 0, -1);
+      }
+      cameraMotionUp.set(0, 1, 0);
+      const cameraMotionFrame: CameraLocalFrame = {
+        right: cameraMotionRight,
+        forward: cameraMotionForward,
+        up: cameraMotionUp,
+      };
+      let localAcceleration: CameraLocalAcceleration =
+        resolveCameraLocalAccelerationFromVelocityDelta(
+          resolvedWorldVelocity,
+          previousPresentationWorldVelocity,
+          velocityDeltaSeconds,
+          cameraMotionFrame,
+        );
+      if (supportStop) {
+        // A downward velocity removed by support is felt as a downward load,
+        // so keep the camera's weight-response sign opposite the raw upward
+        // contact impulse while retaining the measured delta-v magnitude.
+        localAcceleration = {
+          ...localAcceleration,
+          up: previousPresentationWorldVelocity.y / velocityDeltaSeconds,
+        };
       }
       const activeTraversal =
         ledgeClimbTransition !== null && ledgeClimbTransition.phase === "vault"
           ? {
-              kind: "vault" as const,
               duration: ledgeClimbTransition.duration,
-              height: ledgeClimbTransition.traversalHeightMeters,
             }
           : wallClimbTransition !== null && wallClimbTransition.phase === "vault"
             ? {
-                kind: "wall-climb" as const,
                 duration: wallClimbTransition.duration,
-                height: wallClimbTransition.traversalHeightMeters,
               }
             : null;
       applyFirstPersonCameraMotion(baseCameraY, {
         deltaSeconds: delta,
-        localAcceleration: debugCameraShiftEnabled ? localAcceleration : { right: 0, forward: 0 },
+        localAcceleration: debugCameraShiftEnabled
+          ? localAcceleration
+          : { right: 0, forward: 0, up: localAcceleration.up },
         movementMagnitude,
         movementSpeedRatio,
         oxygenRatio: playerVitals.o2 / PLAYER_MAX_O2,
@@ -13285,17 +14967,13 @@ export const createMahjongTableScene = (
         aimingDownSights,
         holdingBreath: playerVitals.holdingBreath,
         stabilizedByWall: wallBracedAim,
+        coverMode,
+        coverLean: resolveCoverLeanInput(coverMode, right),
         grounded,
         traversalActive: activeTraversal !== null,
         ...(activeTraversal?.duration === undefined
           ? {}
           : { traversalDurationSeconds: activeTraversal.duration }),
-        ...(activeTraversal === null
-          ? {}
-          : {
-              traversalKind: activeTraversal.kind,
-              traversalHeightMeters: activeTraversal.height,
-            }),
       });
     } else {
       exerciseIntensity = 0;
@@ -13336,6 +15014,7 @@ export const createMahjongTableScene = (
       wallClimbTransition !== null ? "climbing" : wallHangState !== null ? "hanging" : "none";
     container.dataset.playerWallContact = touchingWall ? "true" : "false";
     container.dataset.playerWallBraced = wallBracedAim ? "true" : "false";
+    container.dataset.playerCoverMode = coverMode ? "true" : "false";
     camera.updateMatrixWorld(true);
     weaponRuntime?.update(
       delta,
@@ -13356,6 +15035,16 @@ export const createMahjongTableScene = (
             2,
         ),
       },
+      meleeRuntime?.isActive() ?? false,
+    );
+    meleeRuntime?.update(
+      delta,
+      camera.position,
+      getAimRay(),
+      firstPersonActive,
+      activeView === "seat" && firstPersonControls.enabled,
+      cameraMotion.getOffsets().viewmodelOffset,
+      cameraMotion.getOffsets().viewmodelTransition,
     );
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
@@ -13528,13 +15217,51 @@ export const createMahjongTableScene = (
     setMotionLookEnabled,
     setTouchMovementVector,
     toggleCrouch,
-    jump,
-    fire: () => weaponRuntime?.fire(),
+    jump: () => {
+      jumpInputBufferSeconds = JUMP_INPUT_BUFFER_SECONDS;
+      return jump();
+    },
+    fire: () => {
+      if (meleeRuntime?.isActive()) {
+        meleeRuntime.fire();
+        return;
+      }
+      weaponRuntime?.fire();
+    },
     reload: () => weaponRuntime?.reload(),
-    interact: () => weaponRuntime?.interact(),
-    cycleWeapon: (direction = 1) => weaponRuntime?.cycleWeapon(direction),
-    dropActiveWeapon: () => weaponRuntime?.dropActiveWeapon(),
-    cycleWeaponTo: (weapon) => weaponRuntime?.cycleWeaponTo(weapon),
+    interact: () => {
+      const meleeActive = meleeRuntime?.isActive() ?? false;
+      const gunNearby = (weaponRuntime?.getSnapshot().nearbyPickup ?? null) !== null;
+      if (meleeActive || gunNearby) {
+        const gunInteractionSucceeded = runGunActionWithMeleeHandoff(
+          () => weaponRuntime?.interact() ?? false,
+        );
+        if (!gunInteractionSucceeded && !meleeRuntime?.isActive()) {
+          meleeRuntime?.interact();
+        }
+      } else if (!meleeRuntime?.interact()) {
+        weaponRuntime?.interact();
+      }
+    },
+    cycleWeapon: (direction = 1) => {
+      const selected = runGunActionWithMeleeHandoff(
+        () => weaponRuntime?.cycleWeapon(direction) ?? false,
+      );
+      return selected;
+    },
+    dropActiveWeapon: () => {
+      if (meleeRuntime?.isActive()) {
+        meleeRuntime?.dropActiveObject(resolvePlayerWorldVelocity());
+      } else {
+        weaponRuntime?.dropActiveWeapon();
+      }
+    },
+    cycleWeaponTo: (weapon) => {
+      const selected = runGunActionWithMeleeHandoff(
+        () => weaponRuntime?.cycleWeaponTo(weapon) ?? false,
+      );
+      return selected;
+    },
     setReticlePosition: setFocusReticle,
     getReticleBobbingOffset,
     getAimRay,
@@ -13637,6 +15364,8 @@ export const createMahjongTableScene = (
       physicsCharacterPosition = null;
       weaponRuntime?.dispose();
       weaponRuntime = null;
+      meleeRuntime?.dispose();
+      meleeRuntime = null;
       explorationWorld?.dispose();
       explorationWorld = null;
       disposeObject(scene);

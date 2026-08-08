@@ -1,5 +1,68 @@
 # Implementation status
 
+## 2026-08-08 — Mass-scaled throwable melee props
+
+- Added explicit mass metadata to every seeded city melee prop and added a realistic 90 kg manhole-cover family.
+- Q now throws a held prop along the full aim direction while preserving player velocity. Throw speed follows the
+  mass-scaled curve `clamp(11 × sqrt(4 kg / mass), 2, 14)` m/s.
+- Thrown impact damage uses kinetic energy: `clamp(0.12 × 0.5 × mass × impactSpeed², 0, 400)`. The first crossed
+  scene surface records `lastMeleeThrowHit` with mass, speed, energy, and damage; this is the target-health seam for
+  future actors because this worktree has no replicated enemy-health entity yet.
+- Added pure throw-formula tests, a seeded manhole mass regression, and a world-level launch-velocity regression.
+- `pnpm typecheck` passes after the change. Centralized bus tests and build remain to be refreshed on the final state.
+
+## 2026-08-08 — Melee impact follows the visible swing
+
+- Kept the opening first-person swing impulse damage-scaled and separate from the physical target impact.
+- The held prop's longest-geometry endpoint is sampled in world space each frame. At the midpoint impact, the target
+  impulse follows that tip velocity; the vector from the aim origin to the actual hit point is the deterministic
+  fallback when a velocity sample is unavailable.
+- Impact magnitude remains tied to the resolved volume-based swing speed, so faster props deliver a stronger physical
+  impulse without making force depend on frame rate. Added focused direction-resolution coverage.
+- Every visible surface hit now sends the contact response, including static walls, scenery, and props that are already
+  knocked down. The dynamic ragdoll impulse remains conditional on a fresh knockable prop, while the camera contact
+  response is damage-scaled and opposite to the target direction. Straight-on contacts also use a short depth kick,
+  so a wall hit is visible even when there is no lateral screen direction.
+
+## 2026-08-08 — Debug menu query in local production preview
+
+- The explicit `?debug=1` query now enables the visual debug menu in both Vite development and the local checkpoint
+  production bundle. The menu remains opt-in and does not appear in a normal URL.
+
+## 2026-08-08 — Melee and gun handoff
+
+- A carried melee prop can now be stashed without dropping it when a gun is selected. `1`/`2`, gun cycling, and a
+  successful `E` gun interaction transfer input focus to the gun; failed interactions leave melee active.
+- Walking over a gun while melee is drawn now stores the gun in the first free inventory slot without drawing it. This
+  closes the remaining path where auto-pickup could make a gun and melee viewmodel active at the same time; deliberate
+  `E` or number-key selection still performs the explicit handoff.
+- Mouse fire and the scene-level fire action now follow the drawn item, so a stored gun can fire after the melee prop
+  is stashed. The prop remains equipped in the exploration world and can be drawn again with `E` when no gun pickup is
+  being selected. Added a focused handoff regression for the success/failure gate.
+
+## 2026-08-08 — Recoverable melee drops
+
+- A prop dropped with `Q` remains a recoverable melee pickup at its live ragdoll transform, including after it travels
+  far from its seeded spawn. Re-equipping captures that current transform and removes only that prop's dynamic body.
+- Props toppled by a melee hit or player collision remain world ragdolls and are not silently added to the pickup list;
+  this keeps background copies from becoming additional held items.
+- Fixed stale prop-family geometry disposal names so the exploration world can instantiate and tear down after the
+  city-object mesh rename.
+
+## 2026-08-08 — Recognizable city melee items
+
+- Replaced the four anonymous outdoor ragdoll families with local procedural geometry for a baseball bat, street sign,
+  metal pipe, and traffic cone. Their pickup/loadout names now describe the visible object, and each family has a
+  distinct wood, sign-paint, metal, or safety-orange material.
+- Kept seeded placement, instanced object IDs, collider-driven melee tuning, pickup/drop state, and the shared source
+  geometry viewmodel path intact. The bat, pipe, and cone now sit on the city floor using their physical half-height;
+  street signs retain their raised placement.
+- `pnpm typecheck` and focused ESLint for the melee/world test files pass. The repository-wide `pnpm lint` remains
+  blocked by 85 pre-existing dirty-lane errors across `main.tsx`, the large scene/controller file, physics, and the
+  movement simulator; none are in the new melee module or the new item regression. The server-owned test bus snapshot
+  after the rename passed the new recognizable-item regression; the remaining failures are unrelated analysis,
+  persistence, simulation, and camera-motion tests.
+
 ## Canonical state
 
 - Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
@@ -16,6 +79,44 @@
 ## Current milestone
 
 Milestone 5 — Persistence and replay repairs and acceptance.
+
+## 2026-08-08 — Full-size source ragdoll melee viewmodel
+
+- The melee viewmodel now clones the equipped prop's real `InstancedMesh` geometry and material instead of creating a
+  rounded-box proxy. Its instance matrix is captured before the world instance is hidden, so the held object keeps its
+  proportions and full world size in first person while transient ragdoll rotation is reset to the canonical upright grip.
+- Volume-based melee tuning remains deterministic: damage is `100 × (volume / 0.12)^0.85`, swing speed is
+  `4 × sqrt(0.12 / volume)` (half the original rate), both with gameplay clamps, and each swing uses the same quarter-of-damage O₂ charge as a
+  projectile. The reference prop deals 100 damage and the upper clamp is 400. Swings alternate between right-to-left
+  and left-to-right horizontal swipes. HUD damage is rounded to a whole number while swing speed is shown to one decimal
+  rad/s. The viewmodel lays the source prop's longest axis into a high side-ready grip, pivots near its butt end, drives
+  outward across the body, and finishes in the mirrored ready pose. The source axis stays upright at rest, corkscrews once through contact,
+  then uncorkscrews before the finish, so upright poles swing like a simple baseball bat instead of rotating around their standing axis.
+
+## 2026-08-08 — Dynamic ragdoll drops and moved-instance bounds
+
+- Dropping or holstering a held prop now clears the equipped state and re-enters the same dynamic knockable path used by
+  melee impacts. The release preserves player velocity, adds a small lift, and applies a release spin so the object falls
+  and settles instead of returning as a static upright prop.
+- Every moved knockable `InstancedMesh` refreshes its bounding box and sphere after its instance matrix changes. This keeps
+  frustum culling and raycast broad-phase bounds aligned when physics or pickup/drop moves an instance away from its seed.
+
+## 2026-08-08 — Physics-derived unified camera acceleration
+
+- Replaced the controller-intent and one-shot wall-impact presentation inputs with a resolved world-velocity delta.
+  Each frame compares the velocity that physics actually resolved with the previous resolved velocity, so locomotion,
+  wall stops, jumps, landings, ledge catches, vaults, and climbs enter the same acceleration signal.
+- Projected that world acceleration through the same yaw-only body basis used by movement plus world-up. The signed vector therefore covers
+  all six linear directions without separate left/back/down fields. Looking up or down cannot turn horizontal braking
+  into a false vertical load, and the camera, viewmodel, reticule, and aim ray still consume one damper output. Support
+  stops retain the measured downward delta-v sign for the intended landing load.
+- Kept the accepted 60 m/s² locomotion response, but added a bounded high-energy overload based only on delta-v
+  magnitude. A resolved 10 m/s to 0 m/s stop therefore produces a visibly stronger pitch/roll response without a
+  second wall-impact event path.
+- Removed the legacy contact-onset roll path and fixed wall-climb transition velocity so traversal arcs contribute their
+  actual motion instead of being overwritten before presentation sampling.
+- Added pure regressions for signed local projection and a 10 m/s to 0 m/s resolved stop producing the expected large
+  delta-v.
 
 ## 2026-08-08 — O₂ sprint failure returns to recoverable trot
 
@@ -39,9 +140,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   effort), and other falls scale by the square of downward speed so a 2 m fall costs slightly more than a full jump
   landing in the current world-gravity scale.
 - Physics and fallback landings now spend the resolved O₂ charge before applying the existing shield-then-health damage
-  path. A full reserve therefore absorbs the landing without health or shield loss; when O₂ is insufficient, the unpaid
-  remainder becomes ordinary impact damage. The camera landing impulse remains separate and continues to use its own
-  deceleration input.
+  path. A reserve sufficient for the charge absorbs the landing without health or shield loss; the normal full-jump landing speed
+  is now a vertical deceleration grace window, so an empty reserve cannot damage a normal jump. Faster falls use the
+  speed-derived impact curve for any unpaid charge, capped by that unpaid amount. The camera landing impulse remains
+  separate and continues to use its own deceleration input.
 - Added pure regressions for the speed-to-energy mapping and reserve-overflow behavior. The live browser acceptance still
   requires a manual traversal check in the existing session.
 
@@ -80,7 +182,16 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   accepted response scale without additive double-rolling on strafe reversals.
 - Wall delta-v now contributes both local components at contact onset. A side-on stop can therefore roll the view while
   a head-on stop pitches it down, and camera, viewmodel, reticule, and aim ray continue to consume the composed output.
-  Vertical jump and landing impulses remain explicit for the next traversal integration pass.
+
+## 2026-08-08 — Unified vertical traversal acceleration
+
+- Extended the local acceleration vector with an `up` component and removed the separate jump/landing damper methods.
+  The scene now derives vertical presentation acceleration from the actual vertical velocity change, including gravity,
+  support stops, ledge catches, vault arcs, and wall climbs.
+- The shared weight spring converts that measured delta-v into the same camera/viewmodel/reticule output. Landing and
+  traversal catches use the support-stop sign so harder falls produce a deeper downward response without a second
+  presentation path.
+- Added focused camera regressions for vertical acceleration sign, bounded response, and stronger hard-stop behavior.
 
 ## 2026-08-08 — Airborne reticule gait suppression
 
@@ -455,17 +566,31 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Kept one shared block definition for rendering and collision, so each visible height label corresponds to the exact
   collider used by the vault resolver.
 
-## 2026-08-08 — Height-matched traversal weapon lowering
+## 2026-08-08 — Shared partial traversal weapon lowering
 
-- The centralized camera-motion damper now receives the resolved vault or wall-climb duration and advances the gun
-  faster-starting 2x curve over the full interval instead of using the fixed 0.18 s weapon-switch timing; it reaches
-  the target only at the end of the climb, so there is no mid-traversal bottom clamp.
-- Vaults use a shallow 20% of the normal lower pose. Wall climbs scale from a shallow minimum to the full pose at
-  a four-metre block, using the block's full collider height rather than only the remaining vertical arc.
+- The centralized camera-motion damper now receives the resolved vault or wall-climb duration and uses the same
+  partial lower pose for weapon switching and traversal. Two chained faster-starting 2x easing passes can continue
+  below that pose while traversal remains active, with no bottom clamp or height-selected full-drop variant.
 - Wall hanging alone leaves the gun raised; the lower phase starts when the climb arc starts and raises from the
-  exact pose reached at release. Firing, reload, pickup, and drop remain locked until the shared raise phase is idle;
-  weapon switching keeps its existing full lower/raise behavior.
-- Added camera-motion regressions for duration matching, shallow vault lowering, and full four-metre wall-climb lowering.
+  exact pose reached at release. Firing, reload, pickup, and drop remain locked until the shared raise phase is idle.
+- Added camera-motion regressions for duration matching, one shared partial lower pose, and unclamped continuation.
+
+## 2026-08-08 — Restore live wall climbing and O₂ jump gate
+
+- Re-enabled the live wall-hang detector and hold-to-climb input. A short jump-request buffer keeps a quick tap alive
+  through the airborne contact frame, so climbing no longer depends on holding Space until the wall is reached.
+- Wall climbs now launch the authoritative physics capsule with an upward/inward impulse and let Rapier or the fallback
+  controller resolve the top support. The rendered camera follows that resolved capsule position.
+- Restored the O₂ jump contract: a full 5-point reserve charge gives the full jump, a partial reserve rejects the jump,
+  and only exactly empty O₂ permits the free reduced mini-hop.
+
+## 2026-08-08 — O₂-scaled traversal duration
+
+- Added a smooth O₂ duration curve with empty O₂ as the slowest case: a maximum 1.0-second traversal is 0.5 seconds at
+  full O₂ and remains 1.0 second at zero O₂.
+- Applied the resolved duration at vault and retained wall-climb transition creation so the centralized gun lowering
+  animation follows the same O₂-dependent timing.
+- Added helper coverage for the full, intermediate, and empty-reserve cases.
 
 ## Next action
 
@@ -1336,3 +1461,61 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   latest server-owned bus snapshot (`1786149860791-25084-75af1ee4`) passed 471/472 assertions, including all three
   damage-vignette tests; the one failure is the unrelated `packages/test-fixtures` core-engine property test.
   Browser interaction is not opened in this lane.
+
+## 2026-08-08 — Edge-triggered wall cover lean
+
+- Added a separate cover state that arms only on a zoom-on transition while the completed wall-contact probe is true.
+  Walking into a wall while already zoomed leaves cover disarmed; toggling zoom off and on again after contact arms it.
+- Routed cover lean through the centralized camera damper. The camera, viewmodel, reticule, and aim ray now share a
+  damped lateral offset and roll. A/D strafe input is the only cover-lean input when cover is active. Leaving zoom or
+  wall contact clears cover.
+- Added pure cover activation/lean regressions and camera-damper coverage. Browser interaction remains unopened in this
+  lane.
+
+## 2026-08-08 — Bounded cover strafe and lean direction
+
+- Wall contact now retains the contacted box face, world tangent, and capsule-safe tangent limit. Active cover projects
+  movement onto that tangent and clamps the resolved player position to its span, including yaw-rotated walls, so A/D stops
+  at the usable wall edge instead of adding an outward drift or dropping the brace.
+- Inverted the cover roll sign in the shared camera damper so a left-side lean tilts left on screen while preserving the
+  lateral offset and unified camera/viewmodel/reticule/aim-ray path.
+- Increased the cover presentation to a 0.46 m lateral peek and 12° roll. Cover roll is separated from optical reticle
+  feedback, so the reticle remains centred while the aim ray follows the leaned camera. Gait and O₂ activity now use the
+  resolved horizontal velocity, so holding A/D at the wall edge does not keep a walking bounce alive.
+- Added axis-aligned and rotated wall-limit regressions plus corrected cover-roll/reticle assertions. Browser interaction
+  remains unopened in this lane.
+
+## 2026-08-08 — Variable vault and climb O₂ cost
+
+- Added one shared traversal cost resolver: 0 O₂ at or below the 0.15 m minimum vault height, a linear charge through
+  the supported height range, and the existing 10 O₂ landing reference charge at 2.0 m and above.
+- Vaults and the retained wall-climb transition now pay that charge at transition start and remain atomic when the
+  reserve cannot afford it. The pre-charge O₂ reserve still determines the existing traversal-duration multiplier.
+- Added focused height-curve coverage, including lower/upper clamping and non-finite input.
+
+## 2026-08-08 — Object-sized melee reach
+
+- Melee swing raycasts now use the full longest collider dimension of the held prop as their reach, with no global
+  cap. Tiny props use a 0.80 m floor, an approximate shoulder-to-hand reach for a 1.85 m player.
+- Added pure longest-axis and range regressions and exposed the resolved reach in the melee snapshot/HUD.
+
+## 2026-08-08 — Mid-swing melee impact and broad front hit area
+
+- Melee resolution now carries an explicit `hitTimeSeconds` at `MELEE_HIT_PROGRESS = 0.5`. The midpoint is derived
+  from the complete volume-scaled swing duration, so heavier props have a longer delay before connecting.
+- Replaced the single reticule ray with a deterministic 21-ray forward cone: a centre ray, an inner ring, and a
+  `0.42` radian outer ring. The nearest visible intersection is selected for contact, while the held prop tip's
+  measured world-space velocity drives the ragdoll impulse; the aim-origin-to-hit-point vector is the fallback. The
+  impulse magnitude remains tied to the resolved swing speed, making targets in front of the player easier to hit
+  without changing the held prop's reach.
+- Added pure midpoint/weight-lag and broad-cone regression coverage. Browser interaction remains unopened in this lane.
+
+## 2026-08-08 — Opposite melee contact impulse for every visible surface
+
+- Removed the melee camera kick from swing start. The swing-start callback now spends O₂ only.
+- Every valid visible surface hit now runs the contact callback with the resolved target direction and damage, so walls,
+  scenery, and already-knocked props produce camera/viewmodel feedback. A fresh knockable prop still enters the separate
+  `applyMeleeHit` path, where its physical ragdoll impulse remains scaled by swing speed.
+- The target direction is projected into camera-local axes and inverted before the shared damper maps it to yaw/pitch
+  and a short depth kick, so a target knocked left kicks the player's camera right. Added focused resolver and damper
+  regressions.

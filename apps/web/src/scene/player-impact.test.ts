@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   HUMAN_TERMINAL_VELOCITY_KILOMETERS_PER_HOUR,
+  PLAYER_LANDING_DAMAGE_FREE_SPEED_METERS_PER_SECOND,
   PLAYER_MAX_IMPACT_DAMAGE,
   resolveLandingO2Cost,
+  resolveLandingImpactDamage,
+  resolveLandingO2OverflowDamage,
   PLAYER_SPRINT_SPEED_METERS_PER_SECOND,
   resolveImpactDamage,
 } from "./player-impact.js";
@@ -32,6 +35,18 @@ describe("player impact damage", () => {
 
     expect(resolveImpactDamage(terminalVelocityMetersPerSecond)).toBe(PLAYER_MAX_IMPACT_DAMAGE);
     expect(resolveImpactDamage(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+
+  it("uses a normal full-jump landing as the vertical damage grace window", () => {
+    expect(PLAYER_LANDING_DAMAGE_FREE_SPEED_METERS_PER_SECOND).toBe(
+      PLAYER_JUMP_SPEED_METERS_PER_SECOND,
+    );
+    expect(resolveLandingImpactDamage(PLAYER_JUMP_SPEED_METERS_PER_SECOND)).toBe(0);
+    expect(resolveLandingO2OverflowDamage(PLAYER_JUMP_SPEED_METERS_PER_SECOND, 10, 0)).toBe(0);
+
+    const harderLanding = PLAYER_JUMP_SPEED_METERS_PER_SECOND + 5;
+    expect(resolveLandingImpactDamage(harderLanding)).toBeGreaterThan(0);
+    expect(resolveLandingO2OverflowDamage(harderLanding, 10, 0)).toBeGreaterThan(0);
   });
 
   it("maps landing speed to an energy-shaped O₂ cost", () => {

@@ -25,6 +25,7 @@ import {
   createPlayerVitals,
 } from "./scene/player-vitals.js";
 import { createEmptyWeaponStateSnapshot } from "./scene/weapons.js";
+import { createEmptyMeleeStateSnapshot, type MeleeStateSnapshot } from "./scene/melee.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
@@ -44,8 +45,9 @@ import {
   VISUAL_SCENE_AREA_IDS,
 } from "./scene/mahjong-table.js";
 
-const DEBUG_PANEL_ENABLED =
-  import.meta.env.DEV && new URLSearchParams(window.location.search).has("debug");
+// The local checkpoint server can serve a production bundle. Keep the explicit
+// query opt-in available there as well as in the Vite development bundle.
+const DEBUG_PANEL_ENABLED = new URLSearchParams(window.location.search).has("debug");
 const VISUAL_QUALITY_MODE_STORAGE_KEY = "hk-mahjong-coach:visual-quality-mode:v1";
 
 const debugCameraPresets: readonly {
@@ -1158,6 +1160,9 @@ const App = (): React.JSX.Element => {
   const [weaponState, setWeaponState] = React.useState<WeaponStateSnapshot>(() =>
     createEmptyWeaponStateSnapshot(),
   );
+  const [meleeState, setMeleeState] = React.useState<MeleeStateSnapshot>(() =>
+    createEmptyMeleeStateSnapshot(),
+  );
   const mountRef = React.useRef<MahjongTableMount | null>(null);
   const [debugMount, setDebugMount] = React.useState<MahjongTableMount | null>(null);
   const joystickKnobRef = React.useRef<HTMLSpanElement>(null);
@@ -1277,6 +1282,7 @@ const App = (): React.JSX.Element => {
         setIsSprinting(false);
         setPlayerSpeed(0);
         setWeaponState(createEmptyWeaponStateSnapshot());
+        setMeleeState(createEmptyMeleeStateSnapshot());
         setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
         hasAppliedPersistedVisualStateRef.current = false;
@@ -1686,6 +1692,8 @@ const App = (): React.JSX.Element => {
   const nearbyWeaponPickup = weaponState.nearbyPickup;
   const hasOwnedWeapon = weaponState.slots.some((slot) => slot.owned);
   const inventoryFull = weaponState.slots.every((slot) => slot.owned);
+  const activeMelee = meleeState.active;
+  const nearbyMelee = meleeState.nearby;
 
   return (
     <main id="main" className="immersive-shell">
@@ -1714,6 +1722,7 @@ const App = (): React.JSX.Element => {
               onSpeedChange={setPlayerSpeed}
               onVitalsChange={setPlayerVitals}
               onWeaponStateChange={setWeaponState}
+              onMeleeStateChange={setMeleeState}
             />
           ) : (
             <div className="scene-canvas">
@@ -1774,7 +1783,9 @@ const App = (): React.JSX.Element => {
                 Click to look around. WASD moves through the room; double-tap any movement key to
                 sprint. Walk through the cyan arch to leave the room and explore streamed play
                 areas. Hold left Command to aim and hold your breath; right-click toggles aim
-                without holding your breath. Double-tap a movement key to sprint and leave aim.
+                without holding your breath. Engage cover by toggling zoom on while touching a wall;
+                arriving at a wall while already zoomed does not engage it. Use A/D strafe input to
+                lean while cover is active. Double-tap a movement key to sprint and leave aim.
               </p>
             )}
           </header>
@@ -1952,17 +1963,31 @@ const App = (): React.JSX.Element => {
             <div className="scene-panel-heading">
               <span>Loadout</span>
               <small>
-                {weaponState.reloading ? "Reloading" : hasOwnedWeapon ? "Ready" : "Unarmed"}
+                {weaponState.reloading
+                  ? "Reloading"
+                  : activeMelee !== null
+                    ? "Melee ready"
+                    : hasOwnedWeapon
+                      ? "Ready"
+                      : "Unarmed"}
               </small>
             </div>
             <div className="scene-weapons-heading">
-              <span>{activeWeaponLabel ?? "No weapon"}</span>
+              <span>{activeMelee?.displayName ?? activeWeaponLabel ?? "No weapon"}</span>
               <strong>
-                {activeWeaponSlot === null
-                  ? "—"
-                  : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
+                {activeMelee !== null
+                  ? `${activeMelee.damage.toFixed(0)} dmg · ${activeMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s`
+                  : activeWeaponSlot === null
+                    ? "—"
+                    : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
               </strong>
             </div>
+            {nearbyMelee !== null ? (
+              <p className="scene-weapons-pickup">
+                Press E to equip {nearbyMelee.displayName} · {nearbyMelee.rangeMeters.toFixed(2)} m
+                reach · {nearbyMelee.damage.toFixed(0)} damage
+              </p>
+            ) : null}
             {nearbyWeaponPickup !== null ? (
               <p className="scene-weapons-pickup">
                 {inventoryFull && activeSlotIndex !== null
@@ -1997,13 +2022,25 @@ const App = (): React.JSX.Element => {
             <small>
               {weaponState.reloading
                 ? "Reloading…"
-                : activeWeaponSlot === null
-                  ? hasOwnedWeapon
-                    ? "1–2 equip · Q throw"
-                    : "Find a glowing pickup"
-                  : "Click fire · R reload · 0 holster · Q throw"}
+                : activeMelee !== null
+                  ? "Click swing · 1–2 switch to gun · Q throw · 0 holster"
+                  : activeWeaponSlot === null
+                    ? hasOwnedWeapon
+                      ? "1–2 equip · Q throw"
+                      : "Find a glowing pickup"
+                    : "Click fire · R reload · 0 holster · Q throw"}
             </small>
-            {weaponState.profileInspection !== null ? (
+            {activeMelee !== null ? (
+              <small>
+                Reach {activeMelee.rangeMeters.toFixed(2)} m · Volume{" "}
+                {activeMelee.volumeM3.toFixed(3)} m³ · {activeMelee.oxygenCost.toFixed(1)} O₂ per
+                swing ·{" "}
+                {meleeState.swinging
+                  ? "Swinging"
+                  : `${meleeState.swings} swings · ${meleeState.hits} ragdoll hits`}
+              </small>
+            ) : null}
+            {weaponState.profileInspection !== null && activeMelee === null ? (
               <details
                 className="scene-weapon-inspection"
                 data-profile-hash={weaponState.profileInspection.profileHash}
@@ -2120,7 +2157,7 @@ const App = (): React.JSX.Element => {
             <p>
               {isMobile
                 ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · R reload · 0 holster · 1–2 equip · Q throw · Shift crouch · Space jump · Esc releases pointer"}
+                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · engage cover while touching a wall · A/D lean in cover · R reload · 0 holster · 1–2 equip · Q throw · Shift crouch · Space jump · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

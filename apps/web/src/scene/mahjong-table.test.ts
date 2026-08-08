@@ -22,7 +22,10 @@ import {
   resolveVaultTarget,
   resolveVaultTraversalArcHeight,
   resolveVaultTraversalDuration,
+  resolveVaultTraversalO2Cost,
+  resolveO2ScaledTraversalDuration,
   resolveWallClimbTarget,
+  resolveWallClimbLaunchVelocity,
   resolveWallHangTarget,
   resolveWallHangTargetDetails,
   WALL_HANG_MIN_TOP,
@@ -38,6 +41,7 @@ import {
   resolveHumanEyeBokeh,
   resolveHumanEyePupilDiameter,
   resolveCrouchedStateAfterJump,
+  resolveJumpOxygenAvailability,
   resolveCrouchedStateAfterSprint,
   resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
@@ -46,6 +50,10 @@ import {
   resolveWeaponShotReticleOffset,
   ZOOM_RECOIL_FEEDBACK_MULTIPLIER,
   resolveDesktopAimInput,
+  resolveCoverLeanInput,
+  resolveCoverModeFromAimTransition,
+  shouldEquipWalkOverGun,
+  shouldStashMeleeForGun,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
   isMovementDoubleTap,
@@ -58,6 +66,8 @@ import {
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
+import { resolveMeleeThrowDamage, resolveMeleeThrowSpeed } from "./melee.js";
+import { O2_JUMP_COST, O2_LANDING_BASE_COST } from "./player-vitals.js";
 import {
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
   PLAYER_SPRINT_MULTIPLIER,
@@ -68,6 +78,21 @@ import {
   PLAYER_TROT_SPEED_METERS_PER_SECOND,
   PLAYER_WALK_MULTIPLIER,
 } from "./world-scale.js";
+
+describe("melee and gun handoff", () => {
+  it("stashes drawn melee only after a gun action succeeds", () => {
+    expect(shouldStashMeleeForGun(true, true)).toBe(true);
+    expect(shouldStashMeleeForGun(true, false)).toBe(false);
+    expect(shouldStashMeleeForGun(false, true)).toBe(false);
+  });
+
+  it("never auto-equips a walked-over gun over drawn melee", () => {
+    expect(shouldEquipWalkOverGun(true, false)).toBe(false);
+    expect(shouldEquipWalkOverGun(true, true)).toBe(false);
+    expect(shouldEquipWalkOverGun(false, false)).toBe(true);
+    expect(shouldEquipWalkOverGun(false, true)).toBe(false);
+  });
+});
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -370,6 +395,25 @@ describe("left Command keyboard binding", () => {
   });
 });
 
+describe("cover mode", () => {
+  it("arms only when zoom is activated while wall contact is present", () => {
+    expect(resolveCoverModeFromAimTransition(false, false, true, true)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(false, true, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(false, true, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(true, true, false, true)).toBe(false);
+  });
+
+  it("uses only A/D strafe input for cover lean", () => {
+    expect(resolveCoverLeanInput(false, 1)).toBe(0);
+    expect(resolveCoverLeanInput(true, 1)).toBe(1);
+    expect(resolveCoverLeanInput(true, -1)).toBe(-1);
+    expect(resolveCoverLeanInput(true, -0.4)).toBe(-0.4);
+    expect(resolveCoverLeanInput(true, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
 describe("movement sprint double-tap", () => {
   const movementKeys = [
     "KeyW",
@@ -419,6 +463,33 @@ describe("jump posture", () => {
     expect(miniHop).toBeLessThan(fullJump);
     expect(miniHop / fullJump).toBeCloseTo(12 / 17, 8);
   });
+
+  it("rejects a partial reserve and reserves the mini-hop for empty O₂", () => {
+    const partial = resolveJumpOxygenAvailability(1);
+    const empty = resolveJumpOxygenAvailability(0);
+    const full = resolveJumpOxygenAvailability(O2_JUMP_COST);
+
+    expect(partial).toEqual({ accepted: false, fullJump: false, launchSpeed: 0 });
+    expect(empty.accepted).toBe(true);
+    expect(empty.fullJump).toBe(false);
+    expect(empty.launchSpeed).toBe(resolveJumpLaunchSpeed(false));
+    expect(full).toEqual({
+      accepted: true,
+      fullJump: true,
+      launchSpeed: resolveJumpLaunchSpeed(true),
+    });
+  });
+
+  it("scales the wall climb launch from the physical clearance height", () => {
+    const low = resolveWallClimbLaunchVelocity(0.5, { x: 0, y: 0, z: -1 }, 1);
+    const high = resolveWallClimbLaunchVelocity(2, { x: 0, y: 0, z: -1 }, 12);
+
+    expect(low.y).toBeGreaterThan(0);
+    expect(high.y).toBeGreaterThan(low.y);
+    expect(low.z).toBeLessThan(0);
+    expect(Math.abs(low.z)).toBeCloseTo(2.5, 8);
+    expect(Math.abs(high.z)).toBeCloseTo(6, 8);
+  });
 });
 
 describe("sprint posture", () => {
@@ -467,6 +538,20 @@ describe("reticule-anchored seat zoom", () => {
 });
 
 describe("shot direction reticule", () => {
+  it("does not turn cover roll into an optical reticle shift", () => {
+    const motion = {
+      roll: 0.2,
+      coverLeanRoll: 0.2,
+      verticalOffset: 0,
+      aimSwayX: 0,
+      aimSwayY: 0,
+      recoilYaw: 0,
+      recoilPitch: 0,
+    };
+
+    expect(resolveWeaponShotReticleOffset(motion, false)).toEqual({ x: 0, y: 0 });
+  });
+
   it("keeps full hip-fire recoil feedback and damps it for zoom direction selection", () => {
     const motion = {
       roll: 0.01,
@@ -625,6 +710,178 @@ describe("append-only exploration chunks", () => {
     world.dispose();
   });
 
+  it("keeps a moved dropped prop recoverable without moving its siblings", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "ragdoll-drop-bounds-test");
+    const pickupsBefore = world.getMeleePickups();
+    const pickup = pickupsBefore[0];
+    if (pickup === undefined) {
+      throw new Error("Expected at least one exploration melee pickup");
+    }
+    const sibling = pickupsBefore.find((candidate) => candidate.objectId !== pickup.objectId);
+    if (sibling === undefined) {
+      throw new Error("Expected a second exploration melee pickup");
+    }
+    const sourceMatrix = new THREE.Matrix4();
+    pickup.mesh.getMatrixAt(pickup.index, sourceMatrix);
+    const siblingMatrixBefore = new THREE.Matrix4();
+    sibling.mesh.getMatrixAt(sibling.index, siblingMatrixBefore);
+    const sourcePosition = new THREE.Vector3().setFromMatrixPosition(sourceMatrix);
+    const dropPosition = new THREE.Vector3(
+      sourcePosition.x < 0 ? EXPLORATION_WORLD_HALF_SIZE - 1 : -EXPLORATION_WORLD_HALF_SIZE + 1,
+      1,
+      sourcePosition.z < 0 ? EXPLORATION_WORLD_HALF_SIZE - 1 : -EXPLORATION_WORLD_HALF_SIZE + 1,
+    );
+
+    try {
+      expect(world.equipMeleeObject(pickup.objectId)).not.toBeNull();
+      expect(world.dropMeleeObject(pickup.objectId, dropPosition, 0)).toBe(true);
+
+      const droppedMatrix = new THREE.Matrix4();
+      pickup.mesh.getMatrixAt(pickup.index, droppedMatrix);
+      const droppedPosition = new THREE.Vector3().setFromMatrixPosition(droppedMatrix);
+      expect(pickup.mesh.boundingSphere?.containsPoint(droppedPosition)).toBe(true);
+
+      const droppedBody = world.getPhysicsBoxes().find((box) => box.dynamicId === pickup.objectId);
+      expect(droppedBody?.dynamic).toBe(true);
+      expect(droppedBody?.rotationY).toBe(0);
+      expect(droppedBody?.linearVelocity?.y).toBeGreaterThan(0);
+      expect(
+        Math.hypot(
+          droppedBody?.angularVelocity?.x ?? 0,
+          droppedBody?.angularVelocity?.y ?? 0,
+          droppedBody?.angularVelocity?.z ?? 0,
+        ),
+      ).toBeGreaterThan(0);
+
+      const droppedPickup = world
+        .getMeleePickups()
+        .find((candidate) => candidate.objectId === pickup.objectId);
+      expect(droppedPickup).toBeDefined();
+      const siblingMatrixAfterDrop = new THREE.Matrix4();
+      sibling.mesh.getMatrixAt(sibling.index, siblingMatrixAfterDrop);
+      expect(siblingMatrixAfterDrop.equals(siblingMatrixBefore)).toBe(true);
+
+      expect(world.equipMeleeObject(pickup.objectId)).not.toBeNull();
+      expect(
+        world.getMeleePickups().some((candidate) => candidate.objectId === pickup.objectId),
+      ).toBe(false);
+      expect(world.getPhysicsBoxes().some((box) => box.dynamicId === pickup.objectId)).toBe(false);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("launches a thrown manhole cover with its mass-scaled speed", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "throwable-manhole-test");
+    const manhole = world
+      .getMeleePickups()
+      .find((candidate) => candidate.snapshot.displayName === "Manhole Cover");
+    if (manhole === undefined) {
+      throw new Error("Expected a seeded manhole cover");
+    }
+
+    try {
+      expect(world.equipMeleeObject(manhole.objectId)).not.toBeNull();
+      expect(
+        world.throwMeleeObject(
+          manhole.objectId,
+          new THREE.Vector3(10, 1.2, 10),
+          Math.PI,
+          { x: 0, y: 0, z: -1 },
+          { x: 1.5, y: 0, z: 0 },
+        ),
+      ).toBe(true);
+      expect(
+        world.getMeleePickups().some((candidate) => candidate.objectId === manhole.objectId),
+      ).toBe(false);
+      const body = world.getPhysicsBoxes().find((box) => box.dynamicId === manhole.objectId);
+      expect(body?.dynamic).toBe(true);
+      expect(body?.linearVelocity?.z).toBeCloseTo(-resolveMeleeThrowSpeed(90), 10);
+      expect(body?.linearVelocity?.x).toBeCloseTo(1.5, 10);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("records kinetic-energy damage when a thrown prop crosses a target surface", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "throw-impact-metadata-test");
+    const manhole = world
+      .getMeleePickups()
+      .find((candidate) => candidate.snapshot.displayName === "Manhole Cover");
+    if (manhole === undefined) {
+      throw new Error("Expected a seeded manhole cover");
+    }
+    const target = new THREE.Mesh(
+      new THREE.BoxGeometry(1.4, 1.4, 0.25),
+      new THREE.MeshBasicMaterial(),
+    );
+    target.position.set(0, 1.2, -1.4);
+    scene.add(target);
+
+    try {
+      expect(world.equipMeleeObject(manhole.objectId)).not.toBeNull();
+      expect(
+        world.throwMeleeObject(manhole.objectId, new THREE.Vector3(0, 1.2, -1), 0, {
+          x: 0,
+          y: 0,
+          z: -1,
+        }),
+      ).toBe(true);
+      scene.updateMatrixWorld(true);
+      world.updateKnockables(0.1, new THREE.Vector3(), { x: 0, y: 0, z: 0 }, 0, true, [
+        {
+          dynamicId: manhole.objectId,
+          center: { x: 0, y: 1.2, z: -1.8 },
+          linearVelocity: { x: 0, y: 0, z: -8 },
+          angularVelocity: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0, w: 1 },
+        },
+      ]);
+      const impacts = world.consumeMeleeThrowImpacts();
+      expect(impacts).toHaveLength(1);
+      expect(impacts[0]?.resolution.damage).toBe(resolveMeleeThrowDamage(90, 8));
+      expect(target.userData.lastMeleeThrowHit).toMatchObject({
+        objectId: manhole.objectId,
+        displayName: "Manhole Cover",
+        massKg: 90,
+        speedMetersPerSecond: 8,
+        damage: resolveMeleeThrowDamage(90, 8),
+      });
+    } finally {
+      target.geometry.dispose();
+      target.material.dispose();
+      world.dispose();
+    }
+  });
+
+  it("uses recognizable city objects for every seeded melee pickup family", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "recognizable-melee-items");
+
+    try {
+      const pickups = world.getMeleePickups();
+      const names = new Set(pickups.map((pickup) => pickup.snapshot.displayName));
+      expect(names).toEqual(
+        new Set(["Baseball Bat", "Street Sign", "Metal Pipe", "Traffic Cone", "Manhole Cover"]),
+      );
+      expect(pickups.every((pickup) => !pickup.snapshot.displayName.startsWith("Ragdoll"))).toBe(
+        true,
+      );
+      const manhole = pickups.find((pickup) => pickup.snapshot.displayName === "Manhole Cover");
+      expect(manhole?.snapshot.massKg).toBe(90);
+      expect(scene.getObjectByName("BaseballBatInstances")).toBeDefined();
+      expect(scene.getObjectByName("StreetSignInstances")).toBeDefined();
+      expect(scene.getObjectByName("MetalPipeInstances")).toBeDefined();
+      expect(scene.getObjectByName("TrafficConeInstances")).toBeDefined();
+      expect(scene.getObjectByName("ManholeCoverInstances")).toBeDefined();
+    } finally {
+      world.dispose();
+    }
+  });
+
   it("keeps every authored training pad inside the compact map bounds", () => {
     const playAreaHalfSize = PLAY_AREA_SIZE_METERS / 2;
     for (const origin of Object.values(PLAY_AREA_ORIGINS)) {
@@ -644,6 +901,24 @@ describe("ledge vaulting helpers", () => {
     expect(resolveVaultTraversalDuration(1)).toBeLessThan(1);
     expect(resolveVaultTraversalArcHeight(0.45)).toBeCloseTo(0.03, 6);
     expect(resolveVaultTraversalArcHeight(2)).toBeCloseTo(0.24, 6);
+  });
+
+  it("scales a maximum traversal from slow empty O₂ to fast full O₂", () => {
+    const maximumDuration = resolveVaultTraversalDuration(2);
+
+    expect(maximumDuration).toBeCloseTo(1, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 1)).toBeCloseTo(0.5, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 0.5)).toBeCloseTo(2 ** -0.5, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 0)).toBeCloseTo(1, 6);
+  });
+
+  it("charges traversal O₂ continuously from the minimum vault to two metres", () => {
+    expect(resolveVaultTraversalO2Cost(0.1)).toBe(0);
+    expect(resolveVaultTraversalO2Cost(0.15)).toBeCloseTo(0, 8);
+    expect(resolveVaultTraversalO2Cost(1.075)).toBeCloseTo(O2_LANDING_BASE_COST / 2, 8);
+    expect(resolveVaultTraversalO2Cost(2)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
+    expect(resolveVaultTraversalO2Cost(3)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
+    expect(resolveVaultTraversalO2Cost(Number.NaN)).toBe(0);
   });
 
   it("keeps a procedural rotated box on the same local vault path", () => {

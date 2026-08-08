@@ -4,10 +4,14 @@ import {
   CAMERA_BOB_AMPLITUDE,
   CAMERA_BOB_LATERAL_AMPLITUDE,
   CAMERA_BREATHING_BASE_AMPLITUDE,
+  CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
+  CAMERA_COVER_LEAN_OFFSET_METERS,
+  CAMERA_COVER_LEAN_ROLL_RADIANS,
+  CAMERA_MELEE_RECOIL_DEPTH_METERS,
   CAMERA_GAIT_PLAYER_HEIGHT_METERS,
   CAMERA_GAIT_AMOUNT_MAX,
   CAMERA_GAIT_HIP_HEIGHT_RATIO,
-  CAMERA_JUMP_LIFT_SCALE,
+  CAMERA_VERTICAL_ACCELERATION_WEIGHT_SCALE,
   CAMERA_WEIGHT_PITCH_MAX,
   CAMERA_RECOIL_RETICLE_FOLLOW_ANGLE,
   CAMERA_RECOIL_RETICLE_PIXELS_PER_RADIAN,
@@ -24,30 +28,33 @@ import {
   CAMERA_VIEWMODEL_AIMING_OFFSET,
   CAMERA_VIEWMODEL_CROUCHING_OFFSET,
   CAMERA_VIEWMODEL_STANDING_OFFSET,
+  CAMERA_VIEWMODEL_PARTIAL_LOWER_SCALE,
   CAMERA_VIEWMODEL_SWITCH_DROP_Y,
-  CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS,
+  CAMERA_VIEWMODEL_TRAVERSAL_LOWER_EASING_PASSES,
   CAMERA_VIEWMODEL_TRAVERSAL_LOWER_SPEED_MULTIPLIER,
-  CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
   createCameraMotionDamper,
   resolveCameraAccelerationPitch,
   resolveCameraAccelerationRoll,
+  resolveCameraLocalAccelerationFromVelocityDelta,
+  resolveCameraLocalAccelerationFromWorld,
+  resolveCameraWorldAccelerationFromVelocityDelta,
   resolveCameraGaitAngularFrequency,
   resolveCameraGaitAmount,
   resolveCameraGaitOffsets,
   resolveCameraGaitStepFrequency,
+  resolveCameraMeleeContactImpulse,
   resolveCameraWeaponShotImpulse,
   resolveCameraViewmodelOffset,
   resolveCameraViewmodelTransition,
   resolveCameraTraversalLoweringDuration,
   resolveCameraTraversalLoweringProgress,
-  resolveCameraTraversalLoweringScale,
-  resolveLandingWeightImpulse,
+  resolveCameraVerticalWeightImpulse,
 } from "./camera-motion.js";
 import { O2_WALL_BRACE_STABILITY_FACTOR } from "./o2-stability.js";
 
 const idleInput = {
   deltaSeconds: 1 / 60,
-  localAcceleration: { right: 0, forward: 0 },
+  localAcceleration: { right: 0, forward: 0, up: 0 },
   movementMagnitude: 0,
   movementSpeedRatio: 0,
   oxygenRatio: 1,
@@ -57,12 +64,64 @@ const idleInput = {
 } as const;
 
 describe("camera motion damper", () => {
+  it("projects one measured acceleration into all signed local directions", () => {
+    const acceleration = resolveCameraLocalAccelerationFromWorld(
+      { x: -3, y: -4, z: -5 },
+      {
+        right: { x: 1, y: 0, z: 0 },
+        forward: { x: 0, y: 0, z: -1 },
+        up: { x: 0, y: 1, z: 0 },
+      },
+    );
+
+    expect(acceleration).toEqual({ right: -3, forward: 5, up: -4 });
+  });
+
+  it("keeps horizontal braking horizontal when the view is pitched", () => {
+    const acceleration = resolveCameraLocalAccelerationFromWorld(
+      { x: 0, y: 0, z: -10 },
+      {
+        right: { x: 1, y: 0, z: 0 },
+        forward: { x: 0, y: -0.6, z: -0.8 },
+        up: { x: 0, y: 1, z: 0 },
+      },
+    );
+
+    expect(acceleration.forward).toBeCloseTo(8, 8);
+    expect(acceleration.up).toBe(0);
+  });
+
+  it("derives a large stop from the actual resolved velocity delta", () => {
+    const acceleration = resolveCameraWorldAccelerationFromVelocityDelta(
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 0, z: -10 },
+      1 / 60,
+    );
+
+    expect(acceleration.z).toBeCloseTo(600, 8);
+  });
+
+  it("projects the complete velocity delta without a caller dropping an axis", () => {
+    const acceleration = resolveCameraLocalAccelerationFromVelocityDelta(
+      { x: -3, y: -4, z: -5 },
+      { x: 0, y: 0, z: 0 },
+      1,
+      {
+        right: { x: 1, y: 0, z: 0 },
+        forward: { x: 0, y: 0, z: -1 },
+        up: { x: 0, y: 1, z: 0 },
+      },
+    );
+
+    expect(acceleration).toEqual({ right: -3, forward: 5, up: -4 });
+  });
+
   it("keeps gait bob and weight impulses in one output", () => {
     const damper = createCameraMotionDamper();
 
-    damper.applyJumpImpulse(12);
     const lifted = damper.update({
       ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: 60 },
       movementMagnitude: 1,
       movementSpeedRatio: 1 / 3,
     });
@@ -196,6 +255,30 @@ describe("camera motion damper", () => {
     expect(aimSwayPeak / normalAimSwayPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
   });
 
+  it("composes a damped lateral lean and roll only for active cover", () => {
+    const damper = createCameraMotionDamper();
+    const left = damper.update({
+      ...idleInput,
+      aimingDownSights: true,
+      stabilizedByWall: true,
+      coverMode: true,
+      coverLean: -1,
+    });
+    expect(left.coverLeanOffset).toBeLessThan(0);
+    expect(left.coverLeanOffset).toBeGreaterThan(-CAMERA_COVER_LEAN_OFFSET_METERS);
+    expect(left.roll).toBeGreaterThan(0);
+    expect(left.roll).toBeLessThan(CAMERA_COVER_LEAN_ROLL_RADIANS);
+
+    const neutral = damper.update({
+      ...idleInput,
+      aimingDownSights: true,
+      stabilizedByWall: true,
+      coverMode: false,
+      coverLean: -1,
+    });
+    expect(neutral.coverLeanOffset).toBeGreaterThan(left.coverLeanOffset);
+  });
+
   it("stacks wall bracing and held breath into quarter camera motion", () => {
     const restedDamper = createCameraMotionDamper();
     const combinedDamper = createCameraMotionDamper();
@@ -241,12 +324,16 @@ describe("camera motion damper", () => {
 
   it("pushes the camera up for take-off and down for landing", () => {
     const damper = createCameraMotionDamper();
-    damper.applyJumpImpulse(12);
-    const jumpFrame = damper.update(idleInput);
+    const jumpFrame = damper.update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: 60 },
+    });
 
     damper.reset();
-    damper.applyLandingImpulse({ downwardVelocity: 13.2, downwardAcceleration: 792 });
-    const landingFrame = damper.update(idleInput);
+    const landingFrame = damper.update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: -180 },
+    });
 
     expect(jumpFrame.weightShift).toBeGreaterThan(0);
     expect(landingFrame.weightShift).toBeLessThan(0);
@@ -255,12 +342,16 @@ describe("camera motion damper", () => {
 
   it("turns jump take-off and landing deceleration into a shared pitch response", () => {
     const damper = createCameraMotionDamper();
-    damper.applyJumpImpulse(12);
-    const jumpFrame = damper.update(idleInput);
+    const jumpFrame = damper.update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: 60 },
+    });
 
     damper.reset();
-    damper.applyLandingImpulse({ downwardVelocity: 13.2, downwardAcceleration: 792 });
-    const landingFrame = damper.update(idleInput);
+    const landingFrame = damper.update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: -180 },
+    });
 
     expect(jumpFrame.headBobPitch).toBeLessThan(0);
     expect(landingFrame.headBobPitch).toBeGreaterThan(0);
@@ -268,23 +359,39 @@ describe("camera motion damper", () => {
     expect(Math.abs(landingFrame.headBobPitch)).toBeLessThanOrEqual(CAMERA_WEIGHT_PITCH_MAX);
   });
 
+  it("keeps vertical traversal response when horizontal acceleration is disabled", () => {
+    const damper = createCameraMotionDamper();
+    const frame = damper.update({
+      ...idleInput,
+      shiftEnabled: false,
+      localAcceleration: { right: 60, forward: 60, up: 60 },
+    });
+
+    expect(frame.roll).toBe(0);
+    expect(frame.headBobPitch).toBeLessThan(0);
+    expect(frame.weightShift).toBeGreaterThan(0);
+  });
+
   it("matches the lateral shift with a damped front/back acceleration pitch", () => {
     const accelerating = createCameraMotionDamper();
     const braking = createCameraMotionDamper();
     const forwardFrame = accelerating.update({
       ...idleInput,
-      localAcceleration: { right: 0, forward: 60 },
+      localAcceleration: { right: 0, forward: 60, up: 0 },
     });
     const brakingFrame = braking.update({
       ...idleInput,
-      localAcceleration: { right: 0, forward: -60 },
+      localAcceleration: { right: 0, forward: -60, up: 0 },
     });
 
     expect(resolveCameraAccelerationPitch(60)).toBeLessThan(0);
     expect(resolveCameraAccelerationPitch(-60)).toBeGreaterThan(0);
     expect(resolveCameraAccelerationPitch(-600)).toBeCloseTo(
-      Math.abs(resolveCameraAccelerationPitch(60)),
+      CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
       8,
+    );
+    expect(Math.abs(resolveCameraAccelerationPitch(-600))).toBeGreaterThan(
+      Math.abs(resolveCameraAccelerationPitch(-60)),
     );
     expect(forwardFrame.headBobPitch).toBeLessThan(0);
     expect(brakingFrame.headBobPitch).toBeGreaterThan(0);
@@ -297,16 +404,30 @@ describe("camera motion damper", () => {
     expect(Math.abs(settled.headBobPitch)).toBeLessThan(Math.abs(forwardFrame.headBobPitch) * 0.2);
   });
 
+  it("makes a high-energy stop visible on the first damper frame", () => {
+    const ordinary = createCameraMotionDamper().update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: -60, up: 0 },
+    });
+    const hardStop = createCameraMotionDamper().update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: -600, up: 0 },
+    });
+
+    expect(hardStop.headBobPitch).toBeGreaterThan(ordinary.headBobPitch);
+    expect(hardStop.headBobPitch).toBeGreaterThan(CAMERA_WEIGHT_PITCH_MAX * 0.9);
+  });
+
   it("uses the right component of the local acceleration vector for roll", () => {
     const acceleratingRight = createCameraMotionDamper();
     const acceleratingLeft = createCameraMotionDamper();
     const rightFrame = acceleratingRight.update({
       ...idleInput,
-      localAcceleration: { right: 60, forward: 0 },
+      localAcceleration: { right: 60, forward: 0, up: 0 },
     });
     const leftFrame = acceleratingLeft.update({
       ...idleInput,
-      localAcceleration: { right: -60, forward: 0 },
+      localAcceleration: { right: -60, forward: 0, up: 0 },
     });
 
     expect(resolveCameraAccelerationRoll(60)).toBeLessThan(0);
@@ -345,9 +466,9 @@ describe("camera motion damper", () => {
       });
     }
 
-    damper.applyJumpImpulse(12);
     const airborne = damper.update({
       ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: 60 },
       grounded: false,
       movementMagnitude: 1,
       movementSpeedRatio: 1,
@@ -419,45 +540,35 @@ describe("camera motion damper", () => {
   });
 
   it("makes a harder deceleration dip further for the same fall speed", () => {
-    const gentleStop = resolveLandingWeightImpulse({
-      downwardVelocity: 8,
-      downwardAcceleration: 120,
-    });
-    const hardStop = resolveLandingWeightImpulse({
-      downwardVelocity: 8,
-      downwardAcceleration: 720,
-    });
+    const gentleStop = resolveCameraVerticalWeightImpulse(120, 1 / 60);
+    const hardStop = resolveCameraVerticalWeightImpulse(720, 1 / 60);
 
     expect(hardStop).toBeGreaterThan(gentleStop);
   });
 
   it("makes a building-height fall stronger than a normal jump landing", () => {
-    const normalJump = resolveLandingWeightImpulse({
-      downwardVelocity: 13.2,
-      downwardAcceleration: 792,
-    });
-    const buildingFall = resolveLandingWeightImpulse({
-      downwardVelocity: 40,
-      downwardAcceleration: 2400,
-    });
+    const normalJump = Math.abs(resolveCameraVerticalWeightImpulse(-792, 1 / 60));
+    const buildingFall = Math.abs(resolveCameraVerticalWeightImpulse(-2400, 1 / 60));
 
     expect(buildingFall).toBeGreaterThan(normalJump);
   });
 
   it("does not create an impulse for a stationary contact", () => {
-    expect(resolveLandingWeightImpulse({ downwardVelocity: 0, downwardAcceleration: 0 })).toBe(0);
+    expect(resolveCameraVerticalWeightImpulse(0, 1 / 60)).toBe(0);
     const damper = createCameraMotionDamper();
-    damper.applyLandingImpulse({ downwardVelocity: 0, downwardAcceleration: 0 });
     expect(damper.update(idleInput).weightShift).toBe(0);
   });
 
   it("uses the configured jump lift scale", () => {
     const damper = createCameraMotionDamper();
-    damper.applyJumpImpulse(1);
-    const frame = damper.update({ ...idleInput, deltaSeconds: 0.001 });
+    const frame = damper.update({
+      ...idleInput,
+      deltaSeconds: 0.001,
+      localAcceleration: { right: 0, forward: 0, up: 1 },
+    });
 
     expect(frame.weightShift).toBeGreaterThan(0);
-    expect(frame.weightShift).toBeLessThan(CAMERA_JUMP_LIFT_SCALE);
+    expect(frame.weightShift).toBeLessThan(CAMERA_VERTICAL_ACCELERATION_WEIGHT_SCALE);
   });
 
   it("scales shot recoil with per-projectile damage", () => {
@@ -517,6 +628,35 @@ describe("camera motion damper", () => {
     );
   });
 
+  it("kicks the camera opposite the target's lateral melee impulse", () => {
+    const targetKnockedLeft = resolveCameraMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: -1, y: 0, z: 0 },
+    });
+    const targetKnockedRight = resolveCameraMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: 1, y: 0, z: 0 },
+    });
+    const targetKnockedUp = resolveCameraMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: 0, y: 1, z: 0 },
+    });
+    const forwardOnlyContact = resolveCameraMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: 0, y: 0, z: -1 },
+    });
+
+    expect(targetKnockedLeft.yaw).toBeGreaterThan(0);
+    expect(targetKnockedRight.yaw).toBeLessThan(0);
+    expect(targetKnockedLeft.pitch).toBe(0);
+    expect(targetKnockedUp.pitch).toBeGreaterThan(0);
+    expect(forwardOnlyContact).toEqual({
+      yaw: 0,
+      pitch: 0,
+      depth: -CAMERA_MELEE_RECOIL_DEPTH_METERS,
+    });
+  });
+
   it("returns shot recoil through the same damper output and lets it settle", () => {
     const damper = createCameraMotionDamper();
     damper.applyWeaponShotImpulse({ damage: 100, reticleOffset: { x: 36, y: 36 } });
@@ -530,6 +670,26 @@ describe("camera motion damper", () => {
     }
     expect(Math.abs(settled.recoilYaw)).toBeLessThan(0.0001);
     expect(Math.abs(settled.recoilPitch)).toBeLessThan(0.0001);
+  });
+
+  it("routes a successful melee contact through the same recoil output", () => {
+    const damper = createCameraMotionDamper();
+    damper.applyMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: -1, y: 0, z: 0 },
+    });
+
+    expect(damper.update(idleInput).recoilYaw).toBeGreaterThan(0);
+  });
+
+  it("moves the camera back for a straight-on melee contact", () => {
+    const damper = createCameraMotionDamper();
+    damper.applyMeleeContactImpulse({
+      damage: 100,
+      targetImpulseDirection: { x: 0, y: 0, z: -1 },
+    });
+
+    expect(damper.update(idleInput).recoilDepth).toBeLessThan(0);
   });
 
   it("returns every damage-scaled shot kick swiftly through the reticle rest point", () => {
@@ -606,10 +766,9 @@ describe("camera motion damper", () => {
 
   it("resets roll, bob, and weight together", () => {
     const damper = createCameraMotionDamper();
-    damper.applyJumpImpulse(12);
     damper.update({
       ...idleInput,
-      localAcceleration: { right: 60, forward: 0 },
+      localAcceleration: { right: 60, forward: 0, up: 60 },
       movementMagnitude: 1,
       movementSpeedRatio: 1,
     });
@@ -618,6 +777,8 @@ describe("camera motion damper", () => {
 
     expect(damper.getOffsets()).toEqual({
       roll: 0,
+      coverLeanRoll: 0,
+      coverLeanOffset: 0,
       headBob: 0,
       headBobLateral: 0,
       headBobDepth: 0,
@@ -626,6 +787,7 @@ describe("camera motion damper", () => {
       verticalOffset: 0,
       recoilYaw: 0,
       recoilPitch: 0,
+      recoilDepth: 0,
       viewmodelOffset: CAMERA_VIEWMODEL_STANDING_OFFSET,
       viewmodelTransition: {
         phase: "idle",
@@ -697,7 +859,7 @@ describe("camera motion damper", () => {
     expect(aiming.z).toBeCloseTo(CAMERA_VIEWMODEL_AIMING_OFFSET.z, 8);
   });
 
-  it("drops the outgoing weapon, then raises the next weapon from below the frame", () => {
+  it("uses the partial lower pose for weapon switching", () => {
     const lowering = resolveCameraViewmodelTransition(CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS / 2);
     const raising = resolveCameraViewmodelTransition(
       CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS + CAMERA_VIEWMODEL_SWITCH_RAISE_SECONDS / 2,
@@ -708,6 +870,9 @@ describe("camera motion damper", () => {
 
     expect(lowering.phase).toBe("lowering");
     expect(lowering.offset.y).toBeLessThan(0);
+    expect(lowering.offset.y).toBeGreaterThan(
+      CAMERA_VIEWMODEL_SWITCH_DROP_Y * CAMERA_VIEWMODEL_PARTIAL_LOWER_SCALE,
+    );
     expect(lowering.pitchRadians).toBeLessThan(0);
     expect(raising.phase).toBe("raising");
     expect(raising.offset.y).toBeLessThan(0);
@@ -743,18 +908,26 @@ describe("camera motion damper", () => {
     expect(raising.viewmodelTransition.phase).toBe("idle");
   });
 
-  it("holds the weapon lowered through traversal, then raises it after release", () => {
+  it("uses one partial traversal pose and raises from the exact reached amount", () => {
     const damper = createCameraMotionDamper();
+    const traversalInput = {
+      ...idleInput,
+      traversalActive: true,
+      traversalDurationSeconds: 0.8,
+    };
 
-    let lowering = damper.update({ ...idleInput, traversalActive: true });
+    let lowering = damper.update(traversalInput);
     expect(lowering.viewmodelTransition.phase).toBe("lowering");
 
-    for (let index = 0; index < 60; index += 1) {
-      lowering = damper.update({ ...idleInput, traversalActive: true });
+    for (let index = 0; index < 47; index += 1) {
+      lowering = damper.update(traversalInput);
     }
     expect(lowering.viewmodelTransition.phase).toBe("lowering");
     expect(lowering.viewmodelTransition.progress).toBe(1);
-    expect(lowering.viewmodelTransition.offset.y).toBeLessThan(0);
+    expect(lowering.viewmodelTransition.offset.y).toBeCloseTo(
+      CAMERA_VIEWMODEL_SWITCH_DROP_Y * CAMERA_VIEWMODEL_PARTIAL_LOWER_SCALE,
+      6,
+    );
     expect(lowering.viewmodelTransition.pitchRadians).toBeLessThan(0);
 
     const raising = damper.update({ ...idleInput, traversalActive: false });
@@ -772,20 +945,20 @@ describe("camera motion damper", () => {
     expect(settled.viewmodelTransition.offset.y).toBe(0);
   });
 
-  it("lowers only a shallow amount over the resolved vault duration", () => {
+  it("continues lowering past the partial pose instead of clamping", () => {
     const damper = createCameraMotionDamper();
     const traversalInput = {
       ...idleInput,
       traversalActive: true,
       traversalDurationSeconds: 0.8,
-      traversalKind: "vault" as const,
-      traversalHeightMeters: 2,
     };
 
     expect(CAMERA_VIEWMODEL_TRAVERSAL_LOWER_SPEED_MULTIPLIER).toBe(2);
+    expect(CAMERA_VIEWMODEL_TRAVERSAL_LOWER_EASING_PASSES).toBe(2);
     expect(resolveCameraTraversalLoweringDuration(0.8)).toBeCloseTo(0.8, 8);
-    expect(resolveCameraTraversalLoweringProgress(0.4, 0.8)).toBeCloseTo(0.75, 8);
+    expect(resolveCameraTraversalLoweringProgress(0.4, 0.8)).toBeCloseTo(0.9375, 8);
     expect(resolveCameraTraversalLoweringProgress(0.8, 0.8)).toBe(1);
+    expect(resolveCameraTraversalLoweringProgress(2.4, 0.8)).toBeCloseTo(9, 8);
 
     let halfway = damper.update(traversalInput);
     for (let index = 1; index < 24; index += 1) {
@@ -794,49 +967,21 @@ describe("camera motion damper", () => {
 
     expect(halfway.viewmodelTransition.progress).toBeCloseTo(0.5, 2);
     expect(halfway.viewmodelTransition.offset.y).toBeGreaterThan(
-      CAMERA_VIEWMODEL_SWITCH_DROP_Y * CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
+      CAMERA_VIEWMODEL_SWITCH_DROP_Y * CAMERA_VIEWMODEL_PARTIAL_LOWER_SCALE,
     );
 
-    let settled = halfway;
-    for (let index = 0; index < 40; index += 1) {
-      settled = damper.update(traversalInput);
+    let extended = halfway;
+    for (let index = 0; index < 120; index += 1) {
+      extended = damper.update(traversalInput);
     }
-    expect(settled.viewmodelTransition.progress).toBe(1);
-    expect(settled.viewmodelTransition.offset.y).toBeCloseTo(
-      CAMERA_VIEWMODEL_SWITCH_DROP_Y * CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
-      6,
-    );
-    expect(settled.viewmodelTransition.pitchRadians).toBeCloseTo(
-      CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS * CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
-      6,
-    );
-  });
+    expect(extended.viewmodelTransition.phase).toBe("lowering");
+    expect(extended.viewmodelTransition.offset.y).toBeLessThan(CAMERA_VIEWMODEL_SWITCH_DROP_Y);
 
-  it("uses the full lower pose for a four-metre wall climb", () => {
-    expect(resolveCameraTraversalLoweringScale("vault", 2)).toBe(
-      CAMERA_VIEWMODEL_TRAVERSAL_VAULT_LOWER_SCALE,
-    );
-    expect(resolveCameraTraversalLoweringScale("wall-climb", 2)).toBeCloseTo(0.5, 8);
-    expect(resolveCameraTraversalLoweringScale("wall-climb", 4)).toBe(1);
-
-    const damper = createCameraMotionDamper();
-    const traversalInput = {
-      ...idleInput,
-      traversalActive: true,
-      traversalDurationSeconds: 0.8,
-      traversalKind: "wall-climb" as const,
-      traversalHeightMeters: 4,
-    };
-    let lowered = damper.update(traversalInput);
-    for (let index = 0; index < 60; index += 1) {
-      lowered = damper.update(traversalInput);
-    }
-
-    expect(lowered.viewmodelTransition.progress).toBe(1);
-    expect(lowered.viewmodelTransition.offset.y).toBeCloseTo(CAMERA_VIEWMODEL_SWITCH_DROP_Y, 6);
-    expect(lowered.viewmodelTransition.pitchRadians).toBeCloseTo(
-      CAMERA_VIEWMODEL_SWITCH_DOWN_PITCH_RADIANS,
-      6,
+    const raising = damper.update({ ...idleInput, traversalActive: false });
+    expect(raising.viewmodelTransition.phase).toBe("raising");
+    expect(raising.viewmodelTransition.offset.y).toBeCloseTo(
+      extended.viewmodelTransition.offset.y,
+      8,
     );
   });
 });

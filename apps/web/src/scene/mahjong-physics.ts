@@ -42,6 +42,8 @@ export interface PhysicsMovement {
 export interface PhysicsBodyState {
   readonly dynamicId: number;
   readonly center: PhysicsVector;
+  readonly linearVelocity: PhysicsVector;
+  readonly angularVelocity: PhysicsVector;
   readonly rotation: {
     readonly x: number;
     readonly y: number;
@@ -399,6 +401,7 @@ export const createMahjongPhysics = async (
       };
     },
     setDynamicBoxes: (boxes) => {
+      const previousDynamicBodies = [...dynamicBodies.values()];
       for (const collider of streamedStaticColliders) {
         world.removeCollider(collider, true);
       }
@@ -407,6 +410,9 @@ export const createMahjongPhysics = async (
         world.removeCollider(collider, true);
       }
       dynamicColliders.length = 0;
+      for (const body of previousDynamicBodies) {
+        world.removeRigidBody(body);
+      }
       dynamicBodies.clear();
       for (const box of boxes) {
         if (box.dynamic !== true) {
@@ -439,6 +445,14 @@ export const createMahjongPhysics = async (
             y: bodyPosition.y,
             z: bodyPosition.z,
           },
+          linearVelocity: (() => {
+            const velocity = body.linvel();
+            return { x: velocity.x, y: velocity.y, z: velocity.z };
+          })(),
+          angularVelocity: (() => {
+            const velocity = body.angvel();
+            return { x: velocity.x, y: velocity.y, z: velocity.z };
+          })(),
           rotation: {
             x: bodyRotation.x,
             y: bodyRotation.y,
@@ -482,6 +496,10 @@ export const createMahjongPhysics = async (
       ]) {
         world.removeCollider(collider, true);
       }
+      for (const body of dynamicBodies.values()) {
+        world.removeRigidBody(body);
+      }
+      dynamicBodies.clear();
       world.free();
     },
   };
