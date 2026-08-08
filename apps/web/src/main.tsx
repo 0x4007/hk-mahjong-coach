@@ -24,7 +24,7 @@ import {
   SHIELD_RECHARGE_DELAY_SECONDS,
   createPlayerVitals,
 } from "./scene/player-vitals.js";
-import { createEmptyWeaponStateSnapshot } from "./scene/weapons.js";
+import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
@@ -1677,15 +1677,15 @@ const App = (): React.JSX.Element => {
         : isCrouched
           ? { label: "Crouched", tone: "crouched" }
           : { label: "Ready", tone: "ready" };
-  const activeSlotIndex = weaponState.activeSlotIndex;
+  const activeWeaponDefinition =
+    weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
   const activeWeaponSlot =
-    activeSlotIndex === null || activeSlotIndex < 0
+    weaponState.activeWeapon === null
       ? null
-      : (weaponState.slots[activeSlotIndex] ?? null);
-  const activeWeaponLabel = activeWeaponSlot?.displayName ?? null;
-  const nearbyWeaponPickup = weaponState.nearbyPickup;
-  const hasOwnedWeapon = weaponState.slots.some((slot) => slot.owned);
-  const inventoryFull = weaponState.slots.every((slot) => slot.owned);
+      : (weaponState.inventory.find((slot) => slot.weapon === weaponState.activeWeapon) ?? null);
+  const nearbyWeaponDefinition =
+    weaponState.nearbyPickup === null ? null : WEAPON_DEFINITIONS[weaponState.nearbyPickup];
+  const hasOwnedWeapon = weaponState.inventory.some((slot) => slot.owned);
 
   return (
     <main id="main" className="immersive-shell">
@@ -1956,40 +1956,31 @@ const App = (): React.JSX.Element => {
               </small>
             </div>
             <div className="scene-weapons-heading">
-              <span>{activeWeaponLabel ?? "No weapon"}</span>
+              <span>{activeWeaponDefinition?.label ?? "No weapon"}</span>
               <strong>
                 {activeWeaponSlot === null
                   ? "—"
                   : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
               </strong>
             </div>
-            {nearbyWeaponPickup !== null ? (
+            {nearbyWeaponDefinition !== null ? (
               <p className="scene-weapons-pickup">
-                {inventoryFull && activeSlotIndex !== null
-                  ? "Walk over to ignore · press E to swap "
-                  : activeSlotIndex !== null
-                    ? "Walk over to store · press E to equip "
-                    : "Walk into or press E to equip "}
-                {nearbyWeaponPickup.displayName}
+                Walk into or press <kbd>E</kbd> to equip {nearbyWeaponDefinition.label}
               </p>
             ) : null}
             <div className="scene-weapon-slots">
-              {weaponState.slots.map((slot) => {
-                const shortLabel = slot.shortLabel ?? "—";
-                const isOwned = slot.owned;
-                const isActive = slot.slotIndex === activeSlotIndex;
+              {weaponState.inventory.map((slot, index) => {
+                const definition = WEAPON_DEFINITIONS[slot.weapon];
                 return (
                   <span
-                    aria-label={`${slot.displayName ?? "Empty slot"}${
-                      isOwned ? `, ${String(slot.ammoInMagazine)} rounds` : ", not collected"
-                    }`}
+                    aria-label={`${definition.label}${slot.owned ? `, ${String(slot.ammoInMagazine)} rounds` : ", not collected"}`}
                     className="scene-weapon-slot"
-                    data-active={isActive ? "true" : "false"}
-                    data-owned={isOwned ? "true" : "false"}
-                    key={slot.slotIndex}
+                    data-active={slot.weapon === weaponState.activeWeapon ? "true" : "false"}
+                    data-owned={slot.owned ? "true" : "false"}
+                    key={slot.weapon}
                   >
-                    <b>{slot.slotIndex + 1}</b>
-                    <i>{shortLabel}</i>
+                    <b>{index + 1}</b>
+                    <i>{definition.shortLabel}</i>
                   </span>
                 );
               })}
@@ -1997,65 +1988,12 @@ const App = (): React.JSX.Element => {
             <small>
               {weaponState.reloading
                 ? "Reloading…"
-                : activeWeaponSlot === null
+                : activeWeaponDefinition === null
                   ? hasOwnedWeapon
-                    ? "1–2 equip · Q throw"
+                    ? "1–6 equip"
                     : "Find a glowing pickup"
-                  : "Click fire · R reload · 0 holster · Q throw"}
+                  : "Click fire · R reload · 0 holster · 1–6 switch"}
             </small>
-            {weaponState.profileInspection !== null ? (
-              <details
-                className="scene-weapon-inspection"
-                data-profile-hash={weaponState.profileInspection.profileHash}
-              >
-                <summary>Inspect generated profile</summary>
-                <dl>
-                  <div>
-                    <dt>Profile</dt>
-                    <dd>{weaponState.profileInspection.displayName}</dd>
-                  </div>
-                  <div>
-                    <dt>Hash / seed</dt>
-                    <dd>
-                      {weaponState.profileInspection.profileHash} ·{" "}
-                      {weaponState.profileInspection.generatorSeed}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Damage / sustained</dt>
-                    <dd>
-                      {weaponState.profileInspection.groupDamage.toFixed(1)} /{" "}
-                      {weaponState.profileInspection.sustainedDamagePerSecond.toFixed(1)} dps
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Spread hip / zoom</dt>
-                    <dd>
-                      {weaponState.profileInspection.hipSpreadRadians.toFixed(3)} /{" "}
-                      {weaponState.profileInspection.zoomSpreadRadians.toFixed(3)} rad
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Reload / O₂ per shot</dt>
-                    <dd>
-                      {weaponState.profileInspection.reloadSeconds.toFixed(2)} s /{" "}
-                      {weaponState.profileInspection.oxygenCostPerGroup.toFixed(1)}
-                    </dd>
-                  </div>
-                </dl>
-                {weaponState.telemetry !== null ? (
-                  <p>
-                    {weaponState.telemetry.acceptedShots} shots ·{" "}
-                    {weaponState.telemetry.hitRate.toFixed(0)}% hits ·{" "}
-                    {weaponState.telemetry.totalDamage.toFixed(0)} damage ·{" "}
-                    {weaponState.telemetry.oxygenConsumed.toFixed(1)} O₂ ·{" "}
-                    {weaponState.telemetry.peakMovementSpeedMetersPerSecond.toFixed(1)} m/s ·{" "}
-                    {(weaponState.telemetry.reloadInterruptionRate * 100).toFixed(0)}% reload
-                    interruptions
-                  </p>
-                ) : null}
-              </details>
-            ) : null}
           </div>
           {isMobile && (
             <div className="mobile-touch-controls" aria-label="Mobile movement controls">
@@ -2120,7 +2058,7 @@ const App = (): React.JSX.Element => {
             <p>
               {isMobile
                 ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · R reload · 0 holster · 1–2 equip · Q throw · Shift crouch · Space jump · Esc releases pointer"}
+                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · R reload · 0 holster · 1–6 equip · Shift crouch · Space jump · Esc releases pointer"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

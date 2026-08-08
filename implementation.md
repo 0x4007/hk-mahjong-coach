@@ -3,15 +3,29 @@
 ## Canonical state
 
 - Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
-- Worktree:
-  `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
-- Branch: `implementation-takeover-019fc5b7-g06506cba54`
-- Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
-- Implementation lane: this canonical worktree, with one writer.
-- The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
-  Four coherent natural-simulation workflow files were integrated into canonical. The natural
-  lane's two unrelated, inert `matchIndexOffset` runner variants were rejected from canonical
-  because the workflow does not use them and they have no focused regression coverage.
+- Worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/8-august-checkpoint`
+- Branch: `august-8-checkpoint`
+- Reconciliation base: `9e52fd01e76ead42dae3ddea102a307a2e4b121e`.
+- Implementation lane: one writer in this checkpoint worktree. The pre-existing `main`, `parametric-guns`,
+  `visual-table`, and other worktrees remain preserved and are not reset or cleaned.
+
+## 2026-08-08 — 8 August combat checkpoint
+
+- This checkpoint is the isolated worktree `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/8-august-checkpoint`
+  on branch `august-8-checkpoint`, based at `9e52fd0` (`parametric-guns-g513f524b51`).
+- The selected blend keeps parametric-guns movement, Rapier/fallback traversal, acceleration presentation, and
+  wall/vault behavior. It uses visual-table's fixed weapon models, six-weapon combat runtime, pickups, spatial shot
+  audio, bullet pass-by audio, scope/recoil presentation, Celsius barrel glow/cooling, and HUD.
+- Weapon generation is disabled at the profile/stat level. The roster is exactly six fixed weapons with six persistent
+  inventory slots and number-row selection `1`–`6`; `0` holsters. The old parametric drop hook remains a compatibility
+  no-op and is not advertised in the HUD.
+- A deterministic red simulant is spawned at a safe distance, charges the player, takes hits from the weapon ray, deals
+  close-range damage, and respawns after defeat. This is a local presentation target, not authoritative game state.
+- The checkpoint test-bus run recorded 463/468 passing assertions. The five failures were the pre-existing core-engine
+  and simulation property cases that also fail in the occupied parametric-guns lane; all weapon and scene focused
+  assertions passed. The final powder/thermal smoke split was applied after that snapshot; the follow-up strict
+  typecheck and web production build passed. Browser/audio acceptance was not run because another worktree owns port
+  4173 and the repository forbids opening a second browser session.
 
 ## Current milestone
 

@@ -13,15 +13,7 @@ import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahj
 import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
 import {
   generateWeaponPickups,
-  generateParametricGunPickupsV1,
-  DEFAULT_PARAMETRIC_GUN_CATALOG_COUNT,
-  createGunInstance,
   canInterruptWeaponReload,
-  DEFAULT_GUN_SLOT_COUNT,
-  findFirstFreeGunSlot,
-  GUN_PROFILES,
-  createGunPlaytestTelemetryV1,
-  recordGunPlaytestTelemetryEventV1,
   resolveWeaponEffectOpacity,
   WEAPON_DEFINITIONS,
   WEAPON_CHART_ENTRIES,
@@ -35,26 +27,28 @@ import {
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
   WEAPON_BARREL_SMOKE_MAX_RATE,
   WEAPON_BARREL_SMOKE_POOL_SIZE,
+  shouldClearWeaponSmoke,
+  WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
   resolveWeaponBarrelSmokeRatio,
-  type GunInstance,
-  type GunPlaytestTelemetryV1,
-  type GunProfileInspectionSnapshot,
-  type GunResolvedProfileV1,
-  type GunSpreadResolutionContextV1,
-  type NearbyGunPickupSnapshot,
+  WEAPON_IDS,
+  type WeaponId,
   type WeaponEffectKind,
   type WeaponIronSightProfile,
   type WeaponInventorySnapshot,
   type WeaponPickupSpawn,
-  type ParametricGunPickupPlacementV1,
   resolveWeaponReloadPose,
   resolveWeaponRoundReloadPose,
   resolveWeaponRecoilAmount,
-  resolveGunSpreadRadiansV1,
+  resolveWeaponSpreadRadians,
   resolveWeaponHotkey,
-  resolveWeaponBarrelHeatDamage,
-  resolveWeaponBarrelHeatRatio,
-  resolveGunThrowVelocityV1,
+  resolveGunAudioProfile,
+  GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+  resolveWeaponAudioProximity,
+  WEAPON_AUDIO_MAX_DISTANCE_METERS,
+  WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
+  WEAPON_AUDIO_ROLLOFF_FACTOR,
+  resolveWeaponBarrelTemperatureC,
+  resolveWeaponBarrelGlowRatio,
   type WeaponSpawnRect,
   type WeaponStateSnapshot,
 } from "./weapons.js";
@@ -351,6 +345,15 @@ export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
 
 const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
 const VISUAL_SCENE_FALL_RESET_Y = -2;
+const SIMULANT_STOP_DISTANCE_METERS = 2.4;
+const SIMULANT_MIN_START_DISTANCE_METERS = 32;
+const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.09;
+const SIMULANT_BODY_TARGET_HEIGHT_METERS = 1.8;
+const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.15;
+const SIMULANT_MOVE_SPEED_METERS_PER_SECOND = 2.8;
+const SIMULANT_ATTACK_DISTANCE_METERS = 2.7;
+const SIMULANT_ATTACK_DAMAGE_PER_SECOND = 7;
+const SIMULANT_RESPAWN_DELAY_MS = 3000;
 // Keep the FPS world compact: five 50 m chunks per axis make an exact
 // 250 m × 250 m navigable square while retaining a useful amount of seeded
 // neighbourhood variation around the authored play areas.
@@ -911,7 +914,7 @@ export interface MahjongTableMount {
   readonly reload: () => void;
   readonly interact: () => void;
   readonly cycleWeapon: (direction?: 1 | -1) => void;
-  readonly cycleWeaponTo: (slotIndex: number) => void;
+  readonly cycleWeaponTo: (weapon: WeaponId) => void;
   readonly dropActiveWeapon: () => void;
   readonly setReticlePosition: (reticlePosition: ReticlePosition) => void;
   readonly getReticleBobbingOffset: () => ReticleBobbingOffset;
@@ -1575,9 +1578,7 @@ const PARAMETRIC_TARGET_RANGE_WIDTH_METERS = 42;
 const PARAMETRIC_TARGET_RANGE_DEPTH_METERS = 48;
 const PARAMETRIC_TARGET_RANGE_ORIGIN = PLAY_AREA_ORIGINS.targetRange;
 const PARAMETRIC_TARGET_RANGE_START_Z = PARAMETRIC_TARGET_RANGE_ORIGIN.z + 19;
-const PARAMETRIC_GUN_RACK_COLUMNS = 6;
 const PARAMETRIC_GUN_RACK_ROWS = 4;
-const PARAMETRIC_GUN_RACK_SPACING_X = 3.55;
 const PARAMETRIC_GUN_RACK_SPACING_Z = 4.2;
 
 type ClimbingGymObstacleMaterial = "base" | "ledge" | "rail";
@@ -4169,6 +4170,48 @@ const addHand = (
   parent.add(hand);
 };
 
+const createSimulantBody = (color: THREE.Color): THREE.Group => {
+  const root = new THREE.Group();
+  root.name = "SimulantBody";
+  const bodyScale = SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS;
+  root.scale.setScalar(bodyScale);
+  root.position.y = SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS * bodyScale;
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.48,
+    metalness: 0.08,
+    emissive: color,
+    emissiveIntensity: 0.2,
+  });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), bodyMaterial);
+  head.position.set(0, 0.86, 0);
+  root.add(head);
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.52, 8, 8), bodyMaterial);
+  torso.position.set(0, 0.44, 0);
+  root.add(torso);
+  const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  leftArm.position.set(-0.28, 0.52, 0.02);
+  leftArm.rotation.z = 0.25;
+  root.add(leftArm);
+  const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  rightArm.position.set(0.28, 0.52, 0.02);
+  rightArm.rotation.z = -0.25;
+  root.add(rightArm);
+  const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  leftLeg.position.set(-0.12, 0.05, 0);
+  root.add(leftLeg);
+  const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  rightLeg.position.set(0.12, 0.05, 0);
+  root.add(rightLeg);
+  root.traverse((node) => {
+    if (node instanceof THREE.Mesh) {
+      node.castShadow = true;
+      node.receiveShadow = true;
+    }
+  });
+  return root;
+};
+
 const addOpenMeld = (
   parent: THREE.Object3D,
   cache: TileTextureCache,
@@ -4324,6 +4367,7 @@ interface WeaponSmokeParticle {
   readonly material: THREE.SpriteMaterial;
   readonly velocity: THREE.Vector3;
   readonly phase: number;
+  thermal: boolean;
   age: number;
   lifetime: number;
   startScale: number;
@@ -4355,15 +4399,12 @@ interface WeaponPickupVisual {
   readonly root: THREE.Group;
   readonly baseY: number;
   readonly barrels: readonly WeaponBarrelResources[];
-  readonly velocity: THREE.Vector3;
   collected: boolean;
-  angularVelocity: number;
-  autoPickupBlockedUntilOutsideRange: boolean;
 }
 
 interface WeaponSwitchAnimation {
-  readonly fromGunInstanceId: string | null;
-  readonly toGunInstanceId: string | null;
+  readonly fromWeapon: WeaponId | null;
+  readonly toWeapon: WeaponId | null;
 }
 
 interface WeaponEffect {
@@ -4382,19 +4423,29 @@ interface WeaponRuntime {
     viewActive: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
-    spreadContext: GunSpreadResolutionContextV1,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
+  readonly fireFrom: (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options?: WeaponFireFromOptions,
+  ) => void;
   readonly reload: () => void;
   readonly interruptReload: () => void;
   readonly isReloading: () => boolean;
   readonly interact: () => void;
   readonly holster: () => void;
   readonly cycleWeapon: (direction?: 1 | -1) => void;
-  readonly cycleWeaponTo: (slotIndex: number) => void;
+  readonly cycleWeaponTo: (weapon: WeaponId) => void;
   readonly dropActiveWeapon: (playerVelocity?: PhysicsVector) => void;
   readonly recordDeath: () => void;
+  readonly getWeaponScopeLens: () => {
+    readonly anchor: THREE.Object3D;
+    readonly radius: number;
+    readonly magnification: number;
+  } | null;
   readonly getSniperScopeLens: () => {
     readonly anchor: THREE.Object3D;
     readonly radius: number;
@@ -4404,8 +4455,26 @@ interface WeaponRuntime {
   readonly dispose: () => void;
 }
 
-const getWeaponAccent = (profile: GunResolvedProfileV1): string =>
-  `#${new THREE.Color(profile.accentColor).getHexString()}`;
+interface WeaponFireFromOptions {
+  readonly random?: { readonly nextFloat: () => number };
+  readonly spreadRadians?: number;
+  readonly maxDistance?: number;
+  readonly showWorldEffects?: boolean;
+  readonly showCameraMuzzle?: boolean;
+  readonly playAudio?: boolean;
+  readonly playPassByAudio?: boolean;
+  readonly trackShotHits?: boolean;
+  readonly onHit?: (hitObject: THREE.Object3D, damage: number) => void;
+  readonly onTargetHit?: () => void;
+}
+
+interface WeaponAudioSpatialOutput {
+  readonly destination: GainNode;
+  readonly cleanup: () => void;
+}
+
+const getWeaponAccent = (weapon: WeaponId): string =>
+  `#${new THREE.Color(WEAPON_DEFINITIONS[weapon].color).getHexString()}`;
 
 /** Shared near-black finish for every procedural gun body and sight detail. */
 const WEAPON_BLACK = 0x050607;
@@ -4425,6 +4494,61 @@ const WEAPON_SMOKE_LONGEST_BARREL_LENGTH = 1.35;
 const WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE = 0.6;
 const WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION = 0.45;
 const WEAPON_MUZZLE_SMOKE_LOG_STRENGTH = 24;
+/** The parametric-guns gunpowder plume: denser, whiter, and slower to clear than thermal wisps. */
+const WEAPON_POWDER_SMOKE_LIFETIME_MIN_SECONDS = 9.2;
+const WEAPON_POWDER_SMOKE_LIFETIME_VARIANCE_SECONDS = 1.6;
+const WEAPON_POWDER_SMOKE_MIN_PUFFS = 3;
+const WEAPON_POWDER_SMOKE_MAX_PUFFS = 8;
+const WEAPON_POWDER_SMOKE_DAMAGE_PER_PUFF = 24;
+const WEAPON_POWDER_SMOKE_OUTWARD_SPEED = 0.12;
+const WEAPON_THERMAL_SMOKE_RATE_MULTIPLIER = 2;
+const WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS = 0.05;
+const WEAPON_SHOT_SOUND_CRACK_DURATION_SECONDS = 0.006;
+const WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS = 0.01;
+const WEAPON_SHOT_SOUND_NOISE_BUFFER_SECONDS = 0.3;
+const WEAPON_SHOT_SOUND_MASTER_GAIN = 0.08;
+const WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ = 3200;
+const WEAPON_SHOT_SOUND_CRACK_FILTER_Q = 0.7;
+const WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ = 190;
+const WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND = 343;
+const WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS = 6;
+const WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS = 0.2;
+const WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS = 0.028;
+const WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS = 0.1;
+const WEAPON_BULLET_WHIZZ_PAN_SCALE = 0.95;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ = 5000;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ = 2200;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ = 2500;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ = 700;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ = 2000;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ = 6000;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_Q = 2;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_Q = 10;
+const WEAPON_BULLET_WHIZZ_NOISE_MIX = 0.8;
+const WEAPON_BULLET_WHIZZ_WHISTLE_MIX = 0.2;
+const WEAPON_BULLET_WHIZZ_VOLUME_SCALE = 1.1;
+
+const createWeaponShotSaturationCurve = (): Float32Array => {
+  const curve = new Float32Array(256);
+  const drive = 1.35;
+  for (let index = 0; index < curve.length; index += 1) {
+    const input = (index * 2) / (curve.length - 1) - 1;
+    curve[index] = Math.tanh(input * drive);
+  }
+  return curve;
+};
+
+const WEAPON_SHOT_SATURATION_CURVE = createWeaponShotSaturationCurve();
+
+const fillWeaponShotNoiseBuffer = (data: Float32Array): void => {
+  let state = 0x6d2b79f5;
+  for (let index = 0; index < data.length; index += 1) {
+    state = Math.imul(state ^ (state >>> 16), 0x45d9f3b);
+    state = Math.imul(state ^ (state >>> 16), 0x45d9f3b);
+    state ^= state >>> 16;
+    data[index] = ((state >>> 0) / 0xffffffff) * 2 - 1;
+  }
+};
 
 /** Normalize a logistic curve so its exact endpoints remain transparent/opaque. */
 const resolveNormalizedSigmoid = (progress: number): number => {
@@ -4448,14 +4572,13 @@ const addWeaponBox = (
   position: readonly [number, number, number],
   material: THREE.Material,
   radius = 0.025,
-): THREE.Mesh => {
+): void => {
   const [width, height, depth] = size;
   const mesh = new THREE.Mesh(new RoundedBoxGeometry(width, height, depth, 3, radius), material);
   mesh.position.set(position[0], position[1], position[2]);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   root.add(mesh);
-  return mesh;
 };
 
 const addWeaponBarrel = (
@@ -4578,6 +4701,7 @@ const createWeaponSmokeParticles = (
       material,
       velocity: new THREE.Vector3(),
       phase: index * 1.913,
+      thermal: false,
       age: 0,
       lifetime: 0,
       startScale: 0,
@@ -4620,116 +4744,137 @@ const createRightHandViewModel = (): THREE.Group => {
 };
 
 const createWeaponModel = (
-  profile: GunResolvedProfileV1,
+  weapon: WeaponId,
   scale: number,
   held = false,
   smokeTexture?: THREE.Texture,
 ): WeaponModelResources => {
+  const definition = WEAPON_DEFINITIONS[weapon];
   const root = new THREE.Group();
-  root.name = `GunModel:${profile.profileId}`;
+  root.name = `WeaponModel:${weapon}`;
   root.scale.setScalar(scale);
   root.userData = { weaponVisual: true, dofFocusTarget: true };
   const bodyMaterial = createMaterial(WEAPON_BLACK, 0.28, 0.68);
   const darkMaterial = createMaterial(WEAPON_BLACK, 0.4, 0.58);
-  const accentMaterial = createAccentMaterial(profile.accentColor, 0.26, 0.25, 0.6);
+  const accentMaterial = createAccentMaterial(WEAPON_BLACK, 0.26, 0.25, 0.6);
   const barrels: WeaponBarrelResources[] = [];
   let muzzleSmokeRoot: THREE.Group | null = null;
   let smokeParticles: WeaponSmokeParticle[] = [];
-  const receiverLength = Math.max(0.28, profile.receiverLengthMeters);
-  const receiverWidth = Math.max(0.12, profile.receiverWidthMeters);
-  const receiverHeight = Math.max(0.1, profile.receiverHeightMeters);
-  const barrelLength = Math.max(0.18, profile.hotBarrelLengthMeters);
-  const barrelRadius = Math.max(0.018, profile.barrelRadiusMeters);
-  const muzzleZ = -(receiverLength * 0.5 + barrelLength);
+  let muzzleZ: number;
   let scopeLensAnchor: THREE.Object3D | null = null;
   let scopeLensRadius = 0;
-  addWeaponBox(
-    root,
-    [receiverWidth, receiverHeight, receiverLength],
-    [0, -receiverHeight * 0.16, 0],
-    bodyMaterial,
-    Math.min(0.06, receiverWidth * 0.18),
-  );
-  const grip = addWeaponBox(
-    root,
-    [receiverWidth * 0.58, receiverHeight * 1.65, receiverLength * 0.42],
-    [0, -receiverHeight * 0.95, receiverLength * 0.18],
-    darkMaterial,
-    0.025,
-  );
-  grip.rotation.x = THREE.MathUtils.clamp(profile.gripAngleRadians, -Math.PI / 2, Math.PI / 2);
-  addWeaponBox(
-    root,
-    [receiverWidth * 0.74, receiverHeight * 0.24, receiverLength * 0.38],
-    [receiverWidth * 0.58, receiverHeight * 0.02, -receiverLength * 0.08],
-    accentMaterial,
-    0.012,
-  );
-  barrels.push(
-    addWeaponBarrel(
-      root,
-      barrelLength,
-      barrelRadius,
-      -(receiverLength * 0.5 + barrelLength * 0.5),
-      darkMaterial,
-    ),
-  );
-  if (profile.opticMagnification !== null) {
-    // Optic geometry is derived from the sight-line dimensions for every
-    // profile. It is not selected by a weapon id.
+  if (weapon === "pistol") {
+    // Keep the receiver below the sight line. The old full-width orange cap
+    // sat directly behind the front post and covered the reticle while zoomed.
+    addWeaponBox(root, [0.2, 0.14, 0.4], [0, -0.015, 0], bodyMaterial, 0.035);
+    addWeaponBox(root, [0.12, 0.28, 0.16], [0, -0.19, 0.12], darkMaterial, 0.025);
+    barrels.push(addWeaponBarrel(root, 0.34, 0.043, -0.35, darkMaterial));
+    // Retain a coloured detail as a narrow side plate, never across the
+    // central sight channel.
+    addWeaponBox(root, [0.05, 0.035, 0.18], [0.08, 0.015, -0.04], accentMaterial, 0.01);
+    muzzleZ = -0.53;
+  } else if (weapon === "shotgun") {
+    addWeaponBox(root, [0.23, 0.17, 0.72], [0, -0.015, 0.12], bodyMaterial, 0.04);
+    addWeaponBox(root, [0.24, 0.15, 0.4], [0, -0.035, 0.62], darkMaterial, 0.04);
+    barrels.push(addWeaponBarrel(root, 1.05, 0.055, -0.65, darkMaterial));
+    addWeaponBox(root, [0.16, 0.22, 0.3], [0, -0.2, 0.26], accentMaterial, 0.025);
+    muzzleZ = -1.2;
+  } else if (weapon === "machineGun") {
+    // The receiver is deliberately flat; its old raised top cap filled the
+    // entire crouched sight picture before the front post could be read.
+    addWeaponBox(root, [0.28, 0.17, 0.62], [0, -0.015, 0.08], bodyMaterial, 0.04);
+    addWeaponBox(root, [0.13, 0.3, 0.2], [0, -0.21, 0.2], darkMaterial, 0.025);
+    addWeaponBox(root, [0.16, 0.34, 0.22], [0, -0.25, -0.08], accentMaterial, 0.03);
+    barrels.push(addWeaponBarrel(root, 0.62, 0.05, -0.55, darkMaterial));
+    // Move the orange status rail to the receiver side so the centre notch
+    // remains open when the weapon is raised into the sight line.
+    addWeaponBox(root, [0.06, 0.04, 0.2], [0.11, 0.03, -0.14], accentMaterial, 0.012);
+    muzzleZ = -0.88;
+  } else if (weapon === "carbine") {
+    addWeaponBox(root, [0.25, 0.17, 0.76], [0, -0.015, 0.16], bodyMaterial, 0.04);
+    addWeaponBox(root, [0.24, 0.14, 0.38], [0, -0.035, 0.7], darkMaterial, 0.035);
+    addWeaponBox(root, [0.13, 0.26, 0.2], [0, -0.18, 0.2], accentMaterial, 0.025);
+    barrels.push(addWeaponBarrel(root, 0.92, 0.046, -0.72, darkMaterial));
+    addWeaponBox(root, [0.06, 0.035, 0.28], [0.11, 0.025, -0.18], accentMaterial, 0.01);
+    muzzleZ = -1.22;
+  } else if (weapon === "submachineGun") {
+    addWeaponBox(root, [0.25, 0.16, 0.5], [0, -0.015, 0.08], bodyMaterial, 0.035);
+    addWeaponBox(root, [0.12, 0.28, 0.19], [0, -0.2, 0.2], darkMaterial, 0.024);
+    addWeaponBox(root, [0.14, 0.24, 0.2], [0, -0.19, -0.08], accentMaterial, 0.025);
+    barrels.push(addWeaponBarrel(root, 0.46, 0.043, -0.48, darkMaterial));
+    addWeaponBox(root, [0.05, 0.03, 0.16], [0.1, 0.025, -0.1], accentMaterial, 0.01);
+    muzzleZ = -0.74;
+  } else {
+    addWeaponBox(root, [0.22, 0.16, 0.92], [0, -0.01, 0.16], bodyMaterial, 0.035);
+    addWeaponBox(root, [0.24, 0.15, 0.38], [0, -0.035, 0.72], darkMaterial, 0.04);
+    barrels.push(addWeaponBarrel(root, 1.35, 0.045, -0.98, darkMaterial));
+    addWeaponBox(root, [0.12, 0.12, 0.4], [0, 0.19, -0.2], accentMaterial, 0.03);
+    barrels.push(addWeaponBarrel(root, 0.34, 0.055, -0.19, accentMaterial));
+    muzzleZ = -1.68;
+  }
+  const scope = definition.scope;
+  if (scope !== undefined) {
     const scopeRoot = new THREE.Group();
-    scopeRoot.name = "GunOpticBody";
-    scopeRoot.position.set(0, receiverHeight * 0.76, profile.stockLengthMeters * 0.2);
+    scopeRoot.name = `${weapon}ScopeBody`;
+    // The optic is a camera child and therefore inherits the centralized
+    // viewmodel damper, recoil, reload, and reticule alignment.
+    scopeRoot.position.set(0, scope.modelY, -0.05);
     scopeRoot.userData = { weaponVisual: true, dofIgnore: true };
-    const opticLength = Math.max(0.28, profile.stockLengthMeters * 0.72);
-    const opticRadius = Math.max(0.035, receiverWidth * 0.34);
     const scopeBody = new THREE.Mesh(
-      new THREE.CylinderGeometry(opticRadius, opticRadius * 1.08, opticLength, 16, 1, true),
+      new THREE.CylinderGeometry(
+        scope.bodyRadius * 0.95,
+        scope.bodyRadius,
+        scope.bodyLength,
+        16,
+        1,
+        true,
+      ),
       darkMaterial,
     );
-    scopeBody.name = "GunOpticTube";
+    scopeBody.name = `${weapon}ScopeTube`;
     scopeBody.rotation.x = Math.PI / 2;
     scopeBody.castShadow = true;
     scopeBody.userData = { weaponVisual: true, dofIgnore: true };
     scopeRoot.add(scopeBody);
-    for (const z of [-opticLength * 0.38, opticLength * 0.38] as const) {
+    const ringOffset = scope.bodyLength * 0.45;
+    for (const z of [-ringOffset, ringOffset] as const) {
       const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(opticRadius * 1.1, opticRadius * 0.16, 8, 20),
+        new THREE.TorusGeometry(scope.ringRadius, scope.ringTubeRadius, 8, 20),
         accentMaterial,
       );
-      ring.name = "GunOpticRing";
+      ring.name = `${weapon}ScopeRing`;
       ring.position.z = z;
       ring.userData = { weaponVisual: true, dofIgnore: true };
       scopeRoot.add(ring);
     }
     const lensMaterial = new THREE.MeshBasicMaterial({
-      color: profile.accentColor,
+      color: scope.lensColor,
       transparent: true,
       opacity: 0.09,
       depthWrite: false,
       side: THREE.DoubleSide,
       toneMapped: false,
     });
-    const lens = new THREE.Mesh(new THREE.CircleGeometry(opticRadius, 32), lensMaterial);
-    lens.name = "GunOpticGlass";
-    // Put the glass just ahead of the open rear rim so it cannot z-fight with
-    // the tube and remains visible from the camera side.
-    lens.position.z = opticLength * 0.5 + 0.015;
+    const lens = new THREE.Mesh(new THREE.CircleGeometry(scope.lensRadius, 32), lensMaterial);
+    lens.name = `${weapon}ScopeGlass`;
+    // Keep the glass just ahead of the open rear rim so it remains visible
+    // while the hidden scope camera samples the world through this anchor.
+    lens.position.z = scope.bodyLength * 0.5 + 0.01;
     lens.userData = { weaponVisual: true, dofIgnore: true };
     scopeRoot.add(lens);
     scopeLensAnchor = new THREE.Object3D();
-    scopeLensAnchor.name = "GunOpticLensAnchor";
+    scopeLensAnchor.name = `${weapon}ScopeLensAnchor`;
     scopeLensAnchor.position.copy(lens.position);
     scopeLensAnchor.userData = { weaponVisual: true, dofIgnore: true };
     scopeRoot.add(scopeLensAnchor);
-    scopeLensRadius = opticRadius;
+    scopeLensRadius = scope.lensRadius;
     root.add(scopeRoot);
   }
-  addWeaponIronSights(root, profile.ironSight, darkMaterial, accentMaterial);
+  addWeaponIronSights(root, definition.ironSight, darkMaterial, accentMaterial);
   const muzzleFlash = new THREE.Mesh(
     new THREE.SphereGeometry(0.11, 10, 6),
     new THREE.MeshBasicMaterial({
-      color: profile.accentColor,
+      color: definition.color,
       transparent: true,
       opacity: 0.92,
       depthTest: false,
@@ -4772,9 +4917,9 @@ const createWeaponModel = (
   };
 };
 
-/** Apply one weapon's normalized heat response to every visible model copy. */
-const applyWeaponBarrelHeatVisual = (barrel: WeaponBarrelResources, heatRatio: number): void => {
-  const ratio = THREE.MathUtils.clamp(Number.isFinite(heatRatio) ? heatRatio : 0, 0, 1);
+/** Apply one weapon's normalized glow response to every visible model copy. */
+const applyWeaponBarrelGlowVisual = (barrel: WeaponBarrelResources, glowRatio: number): void => {
+  const ratio = THREE.MathUtils.clamp(Number.isFinite(glowRatio) ? glowRatio : 0, 0, 1);
   barrel.material.color.copy(barrel.baseColor).lerp(WEAPON_BARREL_HEAT_COLOR, ratio);
   barrel.material.emissive.copy(barrel.baseEmissive).lerp(WEAPON_BARREL_HEAT_EMISSIVE, ratio);
   barrel.material.emissiveIntensity = THREE.MathUtils.lerp(
@@ -4783,7 +4928,7 @@ const applyWeaponBarrelHeatVisual = (barrel: WeaponBarrelResources, heatRatio: n
     ratio,
   );
   barrel.material.needsUpdate = true;
-  barrel.mesh.userData.weaponBarrelHeat = ratio;
+  barrel.mesh.userData.weaponBarrelGlowRatio = ratio;
 };
 
 const isWeaponVisual = (object: THREE.Object3D): boolean => {
@@ -4797,20 +4942,23 @@ const isWeaponVisual = (object: THREE.Object3D): boolean => {
   return false;
 };
 
+interface WindowWithLegacyAudioContext extends Window {
+  readonly AudioContext?: typeof AudioContext;
+  readonly webkitAudioContext?: typeof AudioContext;
+}
+
+type WeaponShotAudioContextConstructor = new () => AudioContext;
+
+const resolveWeaponShotAudioContextConstructor = ():
+  WeaponShotAudioContextConstructor | undefined => {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  const browserWindow = window as WindowWithLegacyAudioContext;
+  return browserWindow.AudioContext ?? browserWindow.webkitAudioContext;
+};
+
 const WEAPON_VIEWMODEL_AIM_DISTANCE = 64;
-/** World height used when a dropped instance is placed in front of the player. */
-const DROPPED_PICKUP_HEIGHT = 0.72;
-/** Keep a dropped pickup out of the player's capsule and just before a wall. */
-const DROPPED_PICKUP_MIN_DISTANCE = 0.95;
-const DROPPED_PICKUP_SURFACE_CLEARANCE = 0.62;
-const DROPPED_PICKUP_STATIONARY_DISTANCE = 1.05;
-const DROPPED_PICKUP_THROW_SPEED = 7.2;
-const DROPPED_PICKUP_STATIONARY_THROW_SPEED = 1.8;
-const DROPPED_PICKUP_GRAVITY = 13.5;
-const DROPPED_PICKUP_BOUNCE_DAMPING = 0.28;
-const DROPPED_PICKUP_HORIZONTAL_DAMPING = 0.74;
-const DROPPED_PICKUP_AUTO_PICKUP_RELEASE_DISTANCE = WEAPON_PICKUP_RANGE_METERS + 0.35;
-const DROPPED_PICKUP_REST_SPEED = 0.08;
 
 const createWeaponRuntime = (
   scene: THREE.Scene,
@@ -4818,7 +4966,8 @@ const createWeaponRuntime = (
   roomSeed: string,
   pickups: readonly WeaponPickupSpawn[],
   onStateChange?: (state: WeaponStateSnapshot) => void,
-  onWeaponShot?: (damage: number, projectileCount: number) => number,
+  onWeaponShot?: (damage: number, projectileCount: number) => void,
+  onWeaponHit?: (hitObject: THREE.Object3D, damage: number) => void,
   onWeaponSwitch?: (hasOutgoingWeapon: boolean) => void,
 ): WeaponRuntime => {
   const pickupRoot = new THREE.Group();
@@ -4847,30 +4996,16 @@ const createWeaponRuntime = (
   // separate overlay like the short-lived tracer and muzzle effects.
   bulletHoleRoot.userData = { weaponVisual: true, bulletHoleRoot: true };
   scene.add(bulletHoleRoot);
-  const profileByHash = new Map<string, GunResolvedProfileV1>();
-  for (const profile of Object.values(GUN_PROFILES)) {
-    profileByHash.set(profile.profileHash, profile);
-  }
-  const gunInstances = new Map<string, GunInstance>();
-  const playtestTelemetryByInstance = new Map<string, GunPlaytestTelemetryV1>();
+  const pickupVisuals: WeaponPickupVisual[] = [];
   for (const spawn of pickups) {
-    const validatedGun = createGunInstance(spawn.profile, spawn.gunInstanceId, {
-      loadedAmmo: spawn.gun.loadedAmmo,
-      reserveAmmo: spawn.gun.reserveAmmo,
-      temperatureC: spawn.gun.temperatureC,
-    });
-    profileByHash.set(validatedGun.profileHash, validatedGun.profile);
-    gunInstances.set(validatedGun.instanceId, validatedGun);
-  }
-  const createPickupVisual = (spawn: WeaponPickupSpawn): WeaponPickupVisual => {
-    const profile = spawn.profile;
+    const definition = WEAPON_DEFINITIONS[spawn.weapon];
     const pickup = new THREE.Group();
     pickup.name = `WeaponPickup:${spawn.id}`;
     pickup.position.set(spawn.position[0], spawn.position[1], spawn.position[2]);
     pickup.rotation.y = spawn.rotation;
     pickup.userData = { weaponVisual: true, dofFocusTarget: true };
     const padMaterial = new THREE.MeshBasicMaterial({
-      color: profile.accentColor,
+      color: definition.color,
       transparent: true,
       opacity: 0.68,
       depthWrite: false,
@@ -4882,7 +5017,7 @@ const createWeaponRuntime = (
     pad.userData = { weaponVisual: true, dofIgnore: true };
     pickup.add(pad);
     const ringMaterial = new THREE.MeshBasicMaterial({
-      color: profile.accentColor,
+      color: definition.color,
       transparent: true,
       opacity: 0.82,
       depthWrite: false,
@@ -4894,40 +5029,27 @@ const createWeaponRuntime = (
     ring.position.y = -0.52;
     ring.userData = { weaponVisual: true, dofIgnore: true };
     pickup.add(ring);
-    const model = createWeaponModel(profile, 0.82);
+    const model = createWeaponModel(spawn.weapon, 0.82);
     model.root.position.y = -0.02;
     pickup.add(model.root);
-    const label = createLabelSprite(`${profile.displayName} · E`, getWeaponAccent(profile));
+    const label = createLabelSprite(`${definition.shortLabel} · E`, getWeaponAccent(spawn.weapon));
     label.name = "WeaponPickupLabel";
     label.position.set(0, 0.86, 0);
-    const labelWidth = THREE.MathUtils.clamp(
-      14 / Math.max(1, profile.displayName.length),
-      0.48,
-      0.86,
-    );
-    label.scale.set(labelWidth, 0.2, 1);
+    label.scale.set(0.86, 0.2, 1);
     pickup.add(label);
     pickupRoot.add(pickup);
-    return {
+    pickupVisuals.push({
       spawn,
       root: pickup,
       baseY: spawn.position[1],
       barrels: model.barrels,
-      velocity: new THREE.Vector3(),
       collected: false,
-      angularVelocity: 0,
-      autoPickupBlockedUntilOutsideRange: false,
-    };
-  };
-  const pickupVisuals: WeaponPickupVisual[] = pickups.map(createPickupVisual);
+    });
+  }
 
-  const viewModels = new Map<string, WeaponModelResources>();
-  const ensureViewModel = (profile: GunResolvedProfileV1): WeaponModelResources => {
-    const existing = viewModels.get(profile.profileHash);
-    if (existing !== undefined) {
-      return existing;
-    }
-    const model = createWeaponModel(profile, 0.92, true, weaponSmokeTexture);
+  const viewModels = new Map<WeaponId, WeaponModelResources>();
+  for (const weapon of WEAPON_IDS) {
+    const model = createWeaponModel(weapon, 0.92, true, weaponSmokeTexture);
     // Smoke is a world effect, not a camera-child decoration. Detach the
     // pooled particle root once so every sprite can keep its captured world
     // position while the player turns, walks, holsters, or switches weapons.
@@ -4946,83 +5068,49 @@ const createWeaponRuntime = (
     model.root.visible = false;
     model.root.userData = { weaponVisual: true, dofIgnore: true };
     camera.add(model.root);
-    viewModels.set(profile.profileHash, model);
-    return model;
-  };
-  for (const profile of profileByHash.values()) {
-    ensureViewModel(profile);
+    viewModels.set(weapon, model);
   }
 
-  interface WeaponSlotState {
-    readonly slotIndex: number;
-    gunInstanceId: string | null;
+  const inventory = new Map<
+    WeaponId,
+    { owned: boolean; ammoInMagazine: number; reserveAmmo: number }
+  >();
+  for (const weapon of WEAPON_IDS) {
+    inventory.set(weapon, { owned: false, ammoInMagazine: 0, reserveAmmo: 0 });
   }
-  const slots = Array.from({ length: DEFAULT_GUN_SLOT_COUNT }, (_, slotIndex): WeaponSlotState => ({
-    slotIndex,
-    gunInstanceId: null,
-  }));
-  const resolveActiveInstance = (): GunInstance | null => {
-    const instanceId = activeSlotIndex === null ? null : slots[activeSlotIndex]?.gunInstanceId;
-    return instanceId === undefined || instanceId === null
-      ? null
-      : (gunInstances.get(instanceId) ?? null);
-  };
-  const resolveActiveProfile = (): GunResolvedProfileV1 | null =>
-    resolveActiveInstance()?.profile ?? null;
-  const resolveTelemetryForInstance = (instance: GunInstance): GunPlaytestTelemetryV1 => {
-    const existing = playtestTelemetryByInstance.get(instance.instanceId);
-    if (existing !== undefined) {
-      return existing;
-    }
-    const created = createGunPlaytestTelemetryV1(instance.profile, `${roomSeed}|playtest|v1`);
-    playtestTelemetryByInstance.set(instance.instanceId, created);
-    return created;
-  };
-  const recordActiveTelemetry = (
-    event: Parameters<typeof recordGunPlaytestTelemetryEventV1>[1],
-  ): void => {
-    const instance = resolveActiveInstance();
-    if (instance === null) {
-      return;
-    }
-    const previous = resolveTelemetryForInstance(instance);
-    playtestTelemetryByInstance.set(
-      instance.instanceId,
-      recordGunPlaytestTelemetryEventV1(previous, event),
-    );
-  };
-  const resolveInstanceForSlot = (slot: WeaponSlotState | null): GunInstance | null =>
-    slot?.gunInstanceId === null || slot?.gunInstanceId === undefined
-      ? null
-      : (gunInstances.get(slot.gunInstanceId) ?? null);
-  let activeSlotIndex: number | null = null;
+  const barrelTemperatureC = new Map<WeaponId, number>(
+    WEAPON_IDS.map((weapon) => [weapon, WEAPON_BARREL_AMBIENT_TEMPERATURE_C]),
+  );
+  let activeWeapon: WeaponId | null = null;
   let switchAnimation: WeaponSwitchAnimation | null = null;
   let switchStartedSinceLastUpdate = false;
   let viewmodelTransitionActive = false;
-  let nearbyPickup: NearbyGunPickupSnapshot | null = null;
+  let nearbyPickup: WeaponId | null = null;
   let reloadingSeconds = 0;
   let roundReloadLiftElapsedSeconds = 0;
   let roundReloadReturnElapsedSeconds: number | null = null;
   let reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
   let reloadInsertionPending = false;
   let fireCooldownSeconds = 0;
+  let burstShotsRemaining = 0;
   let muzzleFlashSeconds = 0;
   let recoilAmount = 0;
   let shotsFired = 0;
   let shotsHit = 0;
-  let telemetryClockSeconds = 0;
   let fireHeld = false;
   let controlsActive = false;
   let viewActive = false;
   let pickupPositionInitialized = false;
   let smokeSpawnAccumulator = 0;
-  let smokeAccumulatorInstanceId: string | null = null;
+  let smokeAccumulatorWeapon: WeaponId | null = null;
   let latestAimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 } | null =
     null;
-  let latestSpreadContext: GunSpreadResolutionContextV1 = {};
   let lastSnapshotSerialized = "";
   const shotRandom = createSeededRandom(`${roomSeed}|weapons|combat|v1`);
   const smokeRandom = createSeededRandom(`${roomSeed}|weapons|smoke|v1`);
+  let shotAudioContext: AudioContext | null = null;
+  let shotAudioMasterGain: GainNode | null = null;
+  let shotAudioNoiseBuffer: AudioBuffer | null = null;
   const shotRaycaster = new THREE.Raycaster();
   // Sprite.raycast requires a camera even when the sprite is later filtered
   // out as a non-surface target. Supplying it also keeps label sprites from
@@ -5033,6 +5121,14 @@ const createWeaponRuntime = (
   const pelletDirection = new THREE.Vector3();
   const effectEnd = new THREE.Vector3();
   const effectStart = new THREE.Vector3();
+  const passByDirection = new THREE.Vector3();
+  const passByToListener = new THREE.Vector3();
+  const passByClosestPoint = new THREE.Vector3();
+  const passByRightAxis = new THREE.Vector3();
+  const audioListenerPosition = new THREE.Vector3();
+  const audioListenerForward = new THREE.Vector3();
+  const audioListenerUp = new THREE.Vector3();
+  const audioListenerQuaternion = new THREE.Quaternion();
   const hitColor = new THREE.Color();
   const surfaceNormal = new THREE.Vector3();
   const bulletHoleForward = new THREE.Vector3(0, 0, 1);
@@ -5056,82 +5152,450 @@ const createWeaponRuntime = (
   const smokeSpawnWorld = new THREE.Vector3();
   const smokeFallbackAxis = new THREE.Vector3(1, 0, 0);
 
-  const isReloadPresentationActive = (): boolean =>
-    reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null;
+  const ensureShotAudio = (): {
+    readonly context: AudioContext;
+    readonly output: GainNode;
+    readonly noiseBuffer: AudioBuffer;
+  } | null => {
+    const AudioContextConstructor = resolveWeaponShotAudioContextConstructor();
+    if (AudioContextConstructor === undefined) {
+      return null;
+    }
+    if (shotAudioContext === null || shotAudioContext.state === "closed") {
+      try {
+        shotAudioContext = new AudioContextConstructor();
+        shotAudioMasterGain = shotAudioContext.createGain();
+        shotAudioMasterGain.gain.value = WEAPON_SHOT_SOUND_MASTER_GAIN;
+        shotAudioMasterGain.connect(shotAudioContext.destination);
+        const noiseLength = Math.max(
+          1,
+          Math.ceil(shotAudioContext.sampleRate * WEAPON_SHOT_SOUND_NOISE_BUFFER_SECONDS),
+        );
+        shotAudioNoiseBuffer = shotAudioContext.createBuffer(
+          1,
+          noiseLength,
+          shotAudioContext.sampleRate,
+        );
+        const noiseData = shotAudioNoiseBuffer.getChannelData(0);
+        fillWeaponShotNoiseBuffer(noiseData);
+      } catch {
+        shotAudioContext = null;
+        shotAudioMasterGain = null;
+        shotAudioNoiseBuffer = null;
+        return null;
+      }
+    }
+    const output = shotAudioMasterGain;
+    const noiseBuffer = shotAudioNoiseBuffer;
+    if (output === null || noiseBuffer === null) {
+      return null;
+    }
+    if (shotAudioContext.state === "suspended") {
+      void shotAudioContext.resume().catch(() => undefined);
+    }
+    return { context: shotAudioContext, output, noiseBuffer };
+  };
 
-  const resolveReloadPresentationDuration = (profile: GunResolvedProfileV1): number =>
-    profile.reloadMode === "clip" ? profile.reloadSeconds : profile.reloadIntervalSeconds;
+  const updateShotAudioListener = (context: AudioContext): void => {
+    camera.getWorldPosition(audioListenerPosition);
+    camera.getWorldDirection(audioListenerForward);
+    camera.getWorldQuaternion(audioListenerQuaternion);
+    audioListenerUp.set(0, 1, 0).applyQuaternion(audioListenerQuaternion).normalize();
+    const listener = context.listener;
+    const when = context.currentTime;
+    try {
+      listener.positionX.setValueAtTime(audioListenerPosition.x, when);
+      listener.positionY.setValueAtTime(audioListenerPosition.y, when);
+      listener.positionZ.setValueAtTime(audioListenerPosition.z, when);
+      listener.forwardX.setValueAtTime(audioListenerForward.x, when);
+      listener.forwardY.setValueAtTime(audioListenerForward.y, when);
+      listener.forwardZ.setValueAtTime(audioListenerForward.z, when);
+      listener.upX.setValueAtTime(audioListenerUp.x, when);
+      listener.upY.setValueAtTime(audioListenerUp.y, when);
+      listener.upZ.setValueAtTime(audioListenerUp.z, when);
+    } catch {
+      // Unsupported listener positioning should not block visual firing. The
+      // shared proximity gain remains active even without HRTF placement.
+    }
+  };
 
-  const toNearbyPickupSnapshot = (visual: WeaponPickupVisual): NearbyGunPickupSnapshot => {
-    const gun = visual.spawn.gun;
-    const profile = gun.profile;
+  const createWeaponAudioSpatialOutput = (
+    audio: { readonly context: AudioContext; readonly output: GainNode },
+    sourcePosition: THREE.Vector3,
+    when: number,
+  ): WeaponAudioSpatialOutput => {
+    updateShotAudioListener(audio.context);
+    const proximity = resolveWeaponAudioProximity(sourcePosition.distanceTo(audioListenerPosition));
+    const proximityGain = audio.context.createGain();
+    proximityGain.gain.setValueAtTime(proximity, when);
+    let panner: PannerNode | null = null;
+    try {
+      panner = audio.context.createPanner();
+      panner.panningModel = "HRTF";
+      panner.distanceModel = "inverse";
+      panner.refDistance = WEAPON_AUDIO_REFERENCE_DISTANCE_METERS;
+      panner.maxDistance = WEAPON_AUDIO_MAX_DISTANCE_METERS;
+      panner.rolloffFactor = WEAPON_AUDIO_ROLLOFF_FACTOR;
+      panner.positionX.setValueAtTime(sourcePosition.x, when);
+      panner.positionY.setValueAtTime(sourcePosition.y, when);
+      panner.positionZ.setValueAtTime(sourcePosition.z, when);
+      proximityGain.connect(panner);
+      panner.connect(audio.output);
+    } catch {
+      panner?.disconnect();
+      // The gain still applies the bounded proximity envelope when a browser
+      // lacks a usable PannerNode implementation.
+      proximityGain.connect(audio.output);
+      panner = null;
+    }
+    let cleaned = false;
     return {
-      pickupId: visual.spawn.id,
-      gunInstanceId: gun.instanceId,
-      profileHash: gun.profileHash,
-      profileId: profile.profileId,
-      displayName: profile.displayName,
-      shortLabel: profile.shortLabel,
-      accentColor: profile.accentColor,
-      loadedAmmo: gun.loadedAmmo,
-      reserveAmmo: gun.reserveAmmo,
-      temperatureC: gun.temperatureC,
-      generatorSeed: gun.generatorSeed,
+      destination: proximityGain,
+      cleanup: (): void => {
+        if (cleaned) {
+          return;
+        }
+        cleaned = true;
+        proximityGain.disconnect();
+        panner?.disconnect();
+      },
     };
   };
 
-  const getSnapshot = (): WeaponStateSnapshot => ({
-    activeSlotIndex,
-    nearbyPickup,
-    profileInspection: (() => {
-      const profile = resolveActiveProfile();
-      if (profile === null) {
-        return null;
+  const playWeaponShotSound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    sourcePosition: THREE.Vector3,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    const now = audio.context.currentTime;
+    updateShotAudioListener(audio.context);
+    const muzzlePropagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const startAt = now + Math.max(0, muzzlePropagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, startAt);
+    const scheduleNoiseLayer = (options: {
+      readonly durationSeconds: number;
+      readonly gain: number;
+      readonly playbackRate: number;
+      readonly filterType: BiquadFilterType;
+      readonly filterFrequencyHz: number;
+      readonly filterQ: number;
+      readonly destination: AudioNode;
+      readonly onEnded?: () => void;
+    }): void => {
+      let source: AudioBufferSourceNode | null = null;
+      let filter: BiquadFilterNode | null = null;
+      let envelope: GainNode | null = null;
+      try {
+        source = audio.context.createBufferSource();
+        filter = audio.context.createBiquadFilter();
+        envelope = audio.context.createGain();
+        source.buffer = audio.noiseBuffer;
+        source.playbackRate.setValueAtTime(options.playbackRate, startAt);
+        filter.type = options.filterType;
+        filter.frequency.setValueAtTime(options.filterFrequencyHz, startAt);
+        filter.Q.setValueAtTime(options.filterQ, startAt);
+        envelope.gain.setValueAtTime(Math.max(0.0001, options.gain), startAt);
+        envelope.gain.exponentialRampToValueAtTime(0.0001, startAt + options.durationSeconds);
+        source.connect(filter);
+        filter.connect(envelope);
+        envelope.connect(options.destination);
+        source.onended = (): void => {
+          source?.disconnect();
+          filter?.disconnect();
+          envelope?.disconnect();
+          options.onEnded?.();
+        };
+        source.start(startAt);
+        source.stop(startAt + options.durationSeconds);
+      } catch {
+        source?.disconnect();
+        filter?.disconnect();
+        envelope?.disconnect();
       }
-      const inspection: GunProfileInspectionSnapshot = {
-        profileHash: profile.profileHash,
-        profileId: profile.profileId,
-        displayName: profile.displayName,
-        generatorSeed: profile.generatorSeed,
-        damagePerProjectile: profile.damagePerProjectile,
-        groupDamage: profile.groupDamage,
-        burstDps: profile.burstDps,
-        sustainedDamagePerSecond: profile.sustainedDamagePerSecond,
-        hipSpreadRadians: profile.hipSpreadRadians,
-        zoomSpreadRadians: profile.zoomSpreadRadians,
-        handling: profile.handling,
-        movementPenalty: profile.movementPenalty,
-        reloadSeconds: profile.reloadSeconds,
-        oxygenCostPerGroup: profile.oxygenCostPerGroup,
-        heatSpreadFactor: profile.heatSpreadFactor,
-        audioEffectPower: profile.audio.effectPower,
+    };
+
+    const muzzleCompressor = audio.context.createDynamicsCompressor();
+    muzzleCompressor.threshold.setValueAtTime(-24, startAt);
+    muzzleCompressor.knee.setValueAtTime(12, startAt);
+    muzzleCompressor.ratio.setValueAtTime(2, startAt);
+    muzzleCompressor.attack.setValueAtTime(0.001, startAt);
+    muzzleCompressor.release.setValueAtTime(0.05, startAt);
+    const muzzleSaturation = audio.context.createWaveShaper();
+    muzzleSaturation.curve = WEAPON_SHOT_SATURATION_CURVE as unknown as Float32Array<ArrayBuffer>;
+    muzzleSaturation.oversample = "2x";
+    muzzleCompressor.connect(muzzleSaturation);
+    muzzleSaturation.connect(spatialOutput.destination);
+    scheduleNoiseLayer({
+      durationSeconds: WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS,
+      gain: profile.damageVolume,
+      playbackRate: profile.damagePitch,
+      filterType: "lowpass",
+      filterFrequencyHz: profile.muzzleCutoffFrequencyHz,
+      filterQ: 0.7,
+      destination: muzzleCompressor,
+      onEnded: (): void => {
+        muzzleCompressor.disconnect();
+        muzzleSaturation.disconnect();
+      },
+    });
+
+    scheduleNoiseLayer({
+      durationSeconds: WEAPON_SHOT_SOUND_CRACK_DURATION_SECONDS,
+      gain: profile.crackVolume,
+      playbackRate: 1,
+      filterType: "highpass",
+      filterFrequencyHz: WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ,
+      filterQ: WEAPON_SHOT_SOUND_CRACK_FILTER_Q,
+      destination: spatialOutput.destination,
+    });
+
+    try {
+      const clickOscillator = audio.context.createOscillator();
+      const clickEnvelope = audio.context.createGain();
+      clickOscillator.type = "square";
+      clickOscillator.frequency.setValueAtTime(WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ, startAt);
+      clickEnvelope.gain.setValueAtTime(0.1, startAt);
+      clickEnvelope.gain.exponentialRampToValueAtTime(
+        0.0001,
+        startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS,
+      );
+      clickOscillator.connect(clickEnvelope);
+      clickEnvelope.connect(spatialOutput.destination);
+      clickOscillator.onended = (): void => {
+        clickOscillator.disconnect();
+        clickEnvelope.disconnect();
       };
-      return inspection;
-    })(),
-    slots: slots.map((slot): WeaponInventorySnapshot => {
-      const gun = resolveInstanceForSlot(slot);
-      const profile = gun?.profile ?? null;
+      clickOscillator.start(startAt);
+      clickOscillator.stop(startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS);
+    } catch {
+      // Web Audio is optional; visual firing must continue if a node fails.
+    }
+
+    scheduleNoiseLayer({
+      durationSeconds: profile.tailDurationSeconds,
+      gain: profile.tailVolume,
+      playbackRate: profile.damagePitch,
+      filterType: "lowpass",
+      filterFrequencyHz: profile.tailCutoffFrequencyHz,
+      filterQ: 0.8,
+      destination: spatialOutput.destination,
+      onEnded: spatialOutput.cleanup,
+    });
+  };
+
+  const playWeaponPassBySound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    distance: number,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    updateShotAudioListener(audio.context);
+    if (distance <= 0 || !Number.isFinite(distance)) {
+      return;
+    }
+    const safeDirection = passByDirection.copy(direction).normalize();
+    if (safeDirection.lengthSq() <= 0) {
+      return;
+    }
+    passByToListener.copy(audioListenerPosition).sub(origin);
+    const projection = passByToListener.dot(safeDirection);
+    if (projection < WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS) {
+      return;
+    }
+    const clampedProjection = Math.max(0, Math.min(distance, projection));
+    passByClosestPoint.copy(origin).addScaledVector(safeDirection, clampedProjection);
+    const closestDistance = passByClosestPoint.distanceTo(audioListenerPosition);
+    if (
+      !Number.isFinite(closestDistance) ||
+      closestDistance > WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS
+    ) {
+      return;
+    }
+    const nearDistanceSpan = Math.max(
+      0.05,
+      WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS - closestDistance,
+    );
+    const startProjection = Math.max(0, clampedProjection - nearDistanceSpan);
+    const endProjection = Math.min(distance, clampedProjection + nearDistanceSpan);
+    passByToListener.copy(origin).addScaledVector(safeDirection, startProjection);
+    const startSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    passByToListener.copy(origin).addScaledVector(safeDirection, endProjection);
+    const endSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    const now = audio.context.currentTime;
+    const start =
+      now +
+      startProjection / profile.bulletSpeedMetersPerSecond +
+      startSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const end =
+      now +
+      endProjection / profile.bulletSpeedMetersPerSecond +
+      endSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const duration = Math.max(
+      WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS,
+      Math.min(WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS, end - start),
+    );
+    const travelRatio = THREE.MathUtils.clamp(
+      1 - closestDistance / WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS,
+      0,
+      1,
+    );
+    const damageRatio = THREE.MathUtils.clamp((profile.damageVolume - 0.8) / 0.5, 0, 1);
+    const lightDamageStartPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ;
+    const heavyDamageStartPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ;
+    const lightDamageEndPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ;
+    const heavyDamageEndPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ;
+    const baseStartPitch = THREE.MathUtils.lerp(
+      lightDamageStartPitch,
+      heavyDamageStartPitch,
+      damageRatio,
+    );
+    const baseEndPitch = THREE.MathUtils.lerp(
+      lightDamageEndPitch,
+      heavyDamageEndPitch,
+      damageRatio,
+    );
+    const sweepDepth = 0.35 + travelRatio * 0.65;
+    const startPitch = baseStartPitch;
+    const endPitch = THREE.MathUtils.lerp(baseStartPitch, baseEndPitch, sweepDepth);
+    const noiseStartFrequency = THREE.MathUtils.clamp(
+      startPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseEndFrequency = THREE.MathUtils.clamp(
+      endPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ * 0.75,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseStartQ = THREE.MathUtils.lerp(
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_Q,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_Q,
+      travelRatio,
+    );
+    const noiseEndQ = Math.max(1.4, noiseStartQ * 0.72);
+    const peakGain = Math.max(
+      0.0001,
+      profile.damageVolume * WEAPON_BULLET_WHIZZ_VOLUME_SCALE * (0.08 + travelRatio * 0.92),
+    );
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, passByClosestPoint, start);
+
+    let turbulenceSource: AudioBufferSourceNode | null = null;
+    let turbulenceFilter: BiquadFilterNode | null = null;
+    let turbulenceGain: GainNode | null = null;
+    let whistleOscillator: OscillatorNode | null = null;
+    let whistleGain: GainNode | null = null;
+    let passByPan: StereoPannerNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      turbulenceSource?.disconnect();
+      turbulenceFilter?.disconnect();
+      turbulenceGain?.disconnect();
+      whistleOscillator?.disconnect();
+      whistleGain?.disconnect();
+      passByPan?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 2) {
+        cleanup();
+      }
+    };
+    try {
+      turbulenceSource = audio.context.createBufferSource();
+      turbulenceFilter = audio.context.createBiquadFilter();
+      turbulenceGain = audio.context.createGain();
+      whistleOscillator = audio.context.createOscillator();
+      whistleGain = audio.context.createGain();
+      turbulenceSource.buffer = audio.noiseBuffer;
+      turbulenceFilter.type = "bandpass";
+      turbulenceFilter.frequency.setValueAtTime(noiseStartFrequency, start);
+      turbulenceFilter.frequency.exponentialRampToValueAtTime(noiseEndFrequency, start + duration);
+      turbulenceFilter.Q.setValueAtTime(noiseStartQ, start);
+      turbulenceFilter.Q.exponentialRampToValueAtTime(noiseEndQ, start + duration);
+      whistleOscillator.type = "sine";
+      whistleOscillator.frequency.setValueAtTime(startPitch, start);
+      whistleOscillator.frequency.exponentialRampToValueAtTime(endPitch, start + duration);
+      const peakTime = start + Math.min(0.005, duration * 0.2);
+      turbulenceGain.gain.setValueAtTime(0.0001, start);
+      turbulenceGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_NOISE_MIX,
+        peakTime,
+      );
+      turbulenceGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      whistleGain.gain.setValueAtTime(0.0001, start);
+      whistleGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_WHISTLE_MIX,
+        peakTime,
+      );
+      whistleGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      turbulenceSource.connect(turbulenceFilter);
+      turbulenceFilter.connect(turbulenceGain);
+      whistleOscillator.connect(whistleGain);
+      passByToListener.copy(audioListenerPosition).sub(passByClosestPoint);
+      if (audio.context.createStereoPanner === undefined) {
+        turbulenceGain.connect(spatialOutput.destination);
+        whistleGain.connect(spatialOutput.destination);
+      } else {
+        passByPan = audio.context.createStereoPanner();
+        passByRightAxis.set(1, 0, 0).applyQuaternion(audioListenerQuaternion);
+        const rawPan = passByToListener.normalize().dot(passByRightAxis);
+        passByPan.pan.setValueAtTime(
+          THREE.MathUtils.clamp(rawPan * WEAPON_BULLET_WHIZZ_PAN_SCALE, -1, 1),
+          start,
+        );
+        turbulenceGain.connect(passByPan);
+        whistleGain.connect(passByPan);
+        passByPan.connect(spatialOutput.destination);
+      }
+      turbulenceSource.onended = (): void => {
+        finishLayer();
+      };
+      whistleOscillator.onended = (): void => {
+        finishLayer();
+      };
+      turbulenceSource.start(start);
+      turbulenceSource.stop(start + duration);
+      whistleOscillator.start(start);
+      whistleOscillator.stop(start + duration);
+    } catch {
+      cleanup();
+    }
+  };
+
+  const isReloadPresentationActive = (): boolean =>
+    reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null;
+
+  const getSnapshot = (): WeaponStateSnapshot => ({
+    activeWeapon,
+    nearbyPickup,
+    inventory: WEAPON_IDS.map((weapon): WeaponInventorySnapshot => {
+      const slot = inventory.get(weapon);
       return {
-        slotIndex: slot.slotIndex,
-        gunInstanceId: gun?.instanceId ?? null,
-        profileHash: gun?.profileHash ?? null,
-        profileId: profile?.profileId ?? null,
-        displayName: profile?.displayName ?? null,
-        shortLabel: profile?.shortLabel ?? null,
-        owned: gun !== null,
-        ammoInMagazine: gun?.loadedAmmo ?? 0,
-        reserveAmmo: gun?.reserveAmmo ?? 0,
-        temperatureC: gun?.temperatureC ?? 0,
+        weapon,
+        owned: slot?.owned ?? false,
+        ammoInMagazine: slot?.ammoInMagazine ?? 0,
+        reserveAmmo: slot?.reserveAmmo ?? 0,
       };
     }),
     reloading: isReloadPresentationActive(),
     shotsFired,
     shotsHit,
     bulletHoleCount: bulletHoleEffects.length,
-    telemetry: (() => {
-      const active = resolveActiveInstance();
-      return active === null ? null : resolveTelemetryForInstance(active);
-    })(),
   });
   const emitState = (force = false): void => {
     const snapshot = getSnapshot();
@@ -5152,8 +5616,7 @@ const createWeaponRuntime = (
     reloadInsertionPending = true;
   };
   const beginRoundReloadReturn = (): void => {
-    const activeProfile = resolveActiveProfile();
-    if (activeProfile !== null && activeProfile.reloadMode === "round") {
+    if (activeWeapon !== null && WEAPON_DEFINITIONS[activeWeapon].reloadMode === "round") {
       if (reloadInsertionPending) {
         reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
         reloadInsertionPending = false;
@@ -5161,24 +5624,23 @@ const createWeaponRuntime = (
       roundReloadReturnElapsedSeconds = 0;
     }
   };
-  const showWeaponViewModel = (profileHash: string | null): void => {
+  const showWeaponViewModel = (weapon: WeaponId | null): void => {
     for (const [entry, model] of viewModels) {
-      model.root.visible = viewActive && entry === profileHash;
+      model.root.visible = viewActive && entry === weapon;
     }
   };
-  const applyWeaponBarrelHeat = (instanceId: string, damage: number): void => {
-    const heatRatio = resolveWeaponBarrelHeatRatio(damage);
-    const instance = gunInstances.get(instanceId);
-    const viewModel = instance === undefined ? undefined : viewModels.get(instance.profileHash);
+  const applyWeaponBarrelTemperature = (weapon: WeaponId, temperatureC: number): void => {
+    const glowRatio = resolveWeaponBarrelGlowRatio(temperatureC);
+    const viewModel = viewModels.get(weapon);
     for (const barrel of viewModel?.barrels ?? []) {
-      applyWeaponBarrelHeatVisual(barrel, heatRatio);
+      applyWeaponBarrelGlowVisual(barrel, glowRatio);
     }
     for (const pickup of pickupVisuals) {
-      if (pickup.spawn.gunInstanceId !== instanceId) {
+      if (pickup.spawn.weapon !== weapon) {
         continue;
       }
       for (const barrel of pickup.barrels) {
-        applyWeaponBarrelHeatVisual(barrel, heatRatio);
+        applyWeaponBarrelGlowVisual(barrel, glowRatio);
       }
     }
   };
@@ -5195,6 +5657,10 @@ const createWeaponRuntime = (
     const safeDamage = Number.isFinite(damagePerRound) ? Math.max(0, damagePerRound) : 0;
     return Math.max(0.45, safeDamage / 32);
   };
+  const resolveThermalSmokePower = (smokePower: number): number => {
+    const safePower = Number.isFinite(smokePower) ? Math.max(0.45, smokePower) : 0.45;
+    return Math.sqrt(safePower);
+  };
   const resolveThermalSmokeBarrelLengthScale = (model: WeaponModelResources): number => {
     const barrelLengthProgress = THREE.MathUtils.clamp(
       (model.hotBarrelLength - WEAPON_SMOKE_REFERENCE_BARREL_LENGTH) /
@@ -5204,15 +5670,14 @@ const createWeaponRuntime = (
     );
     return 1 + barrelLengthProgress * WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE;
   };
-  /** Keep short-barrel steam frequent while long-barrel steam stays large. */
-  const resolveThermalSmokeRate = (barrelLengthScale: number): number => {
-    const safeScale = THREE.MathUtils.clamp(
-      barrelLengthScale,
-      1,
-      1 + WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE,
+  /** Emit more often when the same parametric function produces a smaller plume. */
+  const resolveThermalSmokeRate = (model: WeaponModelResources, smokePower: number): number => {
+    const sizeFactor =
+      resolveThermalSmokePower(smokePower) * resolveThermalSmokeBarrelLengthScale(model);
+    return (
+      (WEAPON_BARREL_SMOKE_MAX_RATE * WEAPON_THERMAL_SMOKE_RATE_MULTIPLIER) /
+      Math.max(0.001, sizeFactor)
     );
-    const largestBarrelScale = 1 + WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE;
-    return (WEAPON_BARREL_SMOKE_MAX_RATE * largestBarrelScale) / safeScale;
   };
   const updateWeaponSmokeWorldFrame = (model: WeaponModelResources, deltaSeconds = 0): void => {
     model.root.updateMatrixWorld(true);
@@ -5255,7 +5720,7 @@ const createWeaponRuntime = (
     const safePower = Number.isFinite(smokePower) ? Math.max(0.45, smokePower) : 0.45;
     // Thermal size still follows round power, but its square-root response
     // stops shotgun/sniper steam from dominating the room.
-    const powerForSmoke = thermal ? Math.sqrt(safePower) : safePower;
+    const powerForSmoke = thermal ? resolveThermalSmokePower(safePower) : safePower;
     const thermalBarrelLengthScale = resolveThermalSmokeBarrelLengthScale(model);
     const powerSpread = Math.min(3, powerForSmoke);
     const lateralSpread = (thermal ? 0.06 : 0.09) * (0.8 + powerSpread * 0.2);
@@ -5266,20 +5731,25 @@ const createWeaponRuntime = (
     }
     smokeRightWorld.normalize();
     particle.active = true;
+    particle.thermal = thermal;
     particle.age = 0;
-    // Keep the first frame dense at the captured muzzle point, then expand
-    // the billboard and push it outward for a five-second diffusion fade.
-    particle.lifetime = WEAPON_SMOKE_LIFETIME_SECONDS;
-    const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 5;
+    // Keep the first frame dense at the captured muzzle point. Powder uses
+    // the older parametric plume's longer white diffusion; thermal wisps keep
+    // the visual-table five-second heat response.
+    particle.lifetime = thermal
+      ? WEAPON_SMOKE_LIFETIME_SECONDS
+      : WEAPON_POWDER_SMOKE_LIFETIME_MIN_SECONDS +
+        random() * WEAPON_POWDER_SMOKE_LIFETIME_VARIANCE_SECONDS;
+    const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 1;
     particle.startScale =
       (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) *
       powerForSmoke *
       smokeScaleMultiplier;
     particle.endScale =
       particle.startScale * (thermal ? 5.2 + random() * 1.6 : 4.8 + random() * 1.5);
-    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.94 + random() * 0.06;
+    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.86 + random() * 0.14;
     particle.riseAcceleration = thermal ? 0.1 + random() * 0.06 : 0.08 + random() * 0.06;
-    particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0.38 + random() * 0.12;
+    particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0;
     particle.spin = (random() - 0.5) * (thermal ? 2.2 : 3.6);
     smokeSpawnWorld
       .copy(model.muzzleWorldPosition)
@@ -5287,20 +5757,19 @@ const createWeaponRuntime = (
       .addScaledVector(smokeWorldUp, (random() - 0.5) * concentratedSpread * 0.45)
       .addScaledVector(model.muzzleWorldForward, random() * (thermal ? 0.025 : 0.045));
     particle.sprite.position.copy(smokeSpawnWorld);
-    const outwardSpeed = thermal ? 0.045 * (0.85 + powerSpread * 0.25) : 0.42 + powerSpread * 0.3;
+    const outwardSpeed = thermal
+      ? 0.045 * (0.85 + powerSpread * 0.25)
+      : WEAPON_POWDER_SMOKE_OUTWARD_SPEED * (0.85 + powerSpread * 0.25);
     const upwardSpeed = (thermal ? 0.08 : 0.1) + random() * (thermal ? 0.08 : 0.12);
     particle.velocity
       .copy(model.muzzleWorldVelocity)
       .addScaledVector(model.muzzleWorldForward, outwardSpeed)
       .addScaledVector(smokeRightWorld, (random() - 0.5) * lateralSpread)
       .addScaledVector(smokeWorldUp, upwardSpeed);
-    // The muzzle plume is dense gray; hot-barrel steam keeps its pale white
-    // material. The alpha mask supplies a soft edge while forward velocity
-    // makes the muzzle cloud expand along the firing direction.
-    particle.material.color.setHex(thermal ? 0xf1f4ef : 0x7f8985);
-    // Begin fully transparent so overlapping shot puffs build into a cloud
-    // without a visible sprite pop on the spawn frame.
-    particle.material.opacity = 0;
+    // Parametric gunpowder is bright white; hot-barrel steam keeps its pale
+    // white material. Powder starts opaque so its denser burst reads on fire.
+    particle.material.color.setHex(thermal ? 0xf1f4ef : 0xffffff);
+    particle.material.opacity = thermal ? 0 : particle.startOpacity;
     particle.sprite.rotation.set(0, 0, random() * Math.PI * 2);
     particle.sprite.scale.set(
       particle.startScale,
@@ -5311,8 +5780,7 @@ const createWeaponRuntime = (
   };
   const updateWeaponSmoke = (
     model: WeaponModelResources,
-    instanceId: string,
-    profile: GunResolvedProfileV1,
+    weapon: WeaponId,
     deltaSeconds: number,
     emitThermal = true,
   ): void => {
@@ -5322,15 +5790,14 @@ const createWeaponRuntime = (
     const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
     if (emitThermal) {
       updateWeaponSmokeWorldFrame(model, safeDelta);
-      const heatDamage = gunInstances.get(instanceId)?.temperatureC ?? 0;
-      const heatRatio = resolveWeaponBarrelHeatRatio(heatDamage);
-      const thermalRatio = resolveWeaponBarrelSmokeRatio(heatRatio);
-      const smokePower = resolveWeaponSmokePower(profile.groupDamage);
-      const thermalBarrelLengthScale = resolveThermalSmokeBarrelLengthScale(model);
-      const thermalSmokeRate = resolveThermalSmokeRate(thermalBarrelLengthScale);
+      const temperatureC = barrelTemperatureC.get(weapon) ?? WEAPON_BARREL_AMBIENT_TEMPERATURE_C;
+      const glowRatio = resolveWeaponBarrelGlowRatio(temperatureC);
+      const thermalRatio = resolveWeaponBarrelSmokeRatio(glowRatio);
+      const smokePower = resolveWeaponSmokePower(WEAPON_DEFINITIONS[weapon].totalDamagePerShot);
+      const thermalSmokeRate = resolveThermalSmokeRate(model, smokePower);
       smokeSpawnAccumulator += safeDelta * thermalSmokeRate * thermalRatio;
       let thermalSpawns = 0;
-      while (smokeSpawnAccumulator >= 1 && thermalSpawns < 4) {
+      while (smokeSpawnAccumulator >= 1 && thermalSpawns < 8) {
         smokeSpawnAccumulator -= 1;
         spawnWeaponSmoke(model, true, smokePower);
         thermalSpawns += 1;
@@ -5355,24 +5822,47 @@ const createWeaponRuntime = (
       particle.sprite.position.z +=
         Math.cos(particle.phase + particle.age * 3.4) * 0.008 * safeDelta;
       particle.sprite.rotation.z += particle.spin * safeDelta;
-      const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
-      const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
-      const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
-      const muzzleExpansionProgress = Math.min(
-        1,
-        Math.max(
-          0,
-          (particle.age - fadeInDuration) /
-            (Math.max(0.001, particle.lifetime - fadeInDuration) *
-              WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
-        ),
-      );
-      const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
-      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
-      particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
-      // Both plumes follow their expansion: bright at source scale, then
-      // transparent while the max-size cloud lingers.
-      particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
+      if (particle.thermal) {
+        const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
+        const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
+        const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
+        const muzzleExpansionProgress = Math.min(
+          1,
+          Math.max(
+            0,
+            (particle.age - fadeInDuration) /
+              (Math.max(0.001, particle.lifetime - fadeInDuration) *
+                WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
+          ),
+        );
+        const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
+        const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
+        particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
+        // Visual-table thermal wisps fade after their rapid expansion and can
+        // return to the pool as soon as they are no longer visible.
+        particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
+        if (
+          shouldClearWeaponSmoke(
+            particle.material.opacity,
+            particle.age,
+            particle.lifetime,
+            fadeInDuration,
+          )
+        ) {
+          particle.active = false;
+          particle.sprite.visible = false;
+          particle.material.opacity = 0;
+        }
+        continue;
+      }
+
+      // Parametric-guns powder smoke uses a longer, eased diffusion rather
+      // than the thermal emitter's early clear-out. It stays dense at the
+      // muzzle, expands smoothly, then fades through the full lifetime.
+      const easedProgress = progress * progress * (3 - 2 * progress);
+      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, easedProgress);
+      particle.sprite.scale.set(scale, scale * (0.84 + easedProgress * 0.26), 1);
+      particle.material.opacity = particle.startOpacity * (1 - progress) ** 1.25;
       if (progress >= 1) {
         particle.active = false;
         particle.sprite.visible = false;
@@ -5380,325 +5870,138 @@ const createWeaponRuntime = (
       }
     }
   };
-  const addWeaponHitHeat = (instanceId: string, damage: number): void => {
-    const instance = gunInstances.get(instanceId);
-    if (instance === undefined) {
-      return;
-    }
-    const nextDamage = resolveWeaponBarrelHeatDamage(instance.temperatureC, damage);
-    instance.temperatureC = nextDamage;
-    applyWeaponBarrelHeat(instanceId, nextDamage);
+  const addWeaponHitHeat = (weapon: WeaponId, damage: number): void => {
+    const currentTemperatureC =
+      barrelTemperatureC.get(weapon) ?? WEAPON_BARREL_AMBIENT_TEMPERATURE_C;
+    const nextTemperatureC = resolveWeaponBarrelTemperatureC(currentTemperatureC, damage);
+    barrelTemperatureC.set(weapon, nextTemperatureC);
+    applyWeaponBarrelTemperature(weapon, nextTemperatureC);
   };
   const coolWeaponBarrels = (deltaSeconds: number): void => {
-    for (const instance of gunInstances.values()) {
-      const currentDamage = instance.temperatureC;
-      if (currentDamage <= 0) {
+    for (const weapon of WEAPON_IDS) {
+      const currentTemperatureC =
+        barrelTemperatureC.get(weapon) ?? WEAPON_BARREL_AMBIENT_TEMPERATURE_C;
+      if (currentTemperatureC <= WEAPON_BARREL_AMBIENT_TEMPERATURE_C) {
         continue;
       }
-      const nextDamage = resolveWeaponBarrelHeatDamage(currentDamage, 0, deltaSeconds);
-      if (nextDamage === currentDamage) {
+      const nextTemperatureC = resolveWeaponBarrelTemperatureC(
+        currentTemperatureC,
+        0,
+        deltaSeconds,
+      );
+      if (nextTemperatureC === currentTemperatureC) {
         continue;
       }
-      instance.temperatureC = nextDamage;
-      applyWeaponBarrelHeat(instance.instanceId, nextDamage);
+      barrelTemperatureC.set(weapon, nextTemperatureC);
+      applyWeaponBarrelTemperature(weapon, nextTemperatureC);
     }
   };
-  const setActiveSlot = (slotIndex: number | null): void => {
-    const slot = slotIndex === null ? null : slots[slotIndex];
-    const instance = resolveInstanceForSlot(slot ?? null);
-    const profileHash = instance?.profileHash ?? null;
-    if (slotIndex !== null && (slot === undefined || instance === null)) {
+  const setActiveWeapon = (weapon: WeaponId | null): void => {
+    if (weapon !== null && inventory.get(weapon)?.owned !== true) {
       return;
     }
-    const previousInstance = resolveActiveInstance();
-    const previousProfileHash = previousInstance?.profileHash ?? null;
-    activeSlotIndex = slotIndex;
+    const previousWeapon = activeWeapon;
+    activeWeapon = weapon;
     reloadingSeconds = 0;
+    burstShotsRemaining = 0;
     resetRoundReloadPresentation();
-    if (previousInstance?.instanceId !== instance?.instanceId) {
-      switchAnimation = {
-        fromGunInstanceId: previousInstance?.instanceId ?? null,
-        toGunInstanceId: instance?.instanceId ?? null,
-      };
+    if (previousWeapon !== weapon) {
+      switchAnimation = { fromWeapon: previousWeapon, toWeapon: weapon };
       switchStartedSinceLastUpdate = true;
-      onWeaponSwitch?.(previousInstance !== null);
-      showWeaponViewModel(previousProfileHash);
+      onWeaponSwitch?.(previousWeapon !== null);
+      showWeaponViewModel(previousWeapon);
     } else {
       switchAnimation = null;
-      showWeaponViewModel(profileHash);
+      showWeaponViewModel(activeWeapon);
     }
+  };
+  const equipWeapon = (weapon: WeaponId): void => {
+    setActiveWeapon(weapon);
   };
   const holsterWeapon = (): void => {
-    setActiveSlot(null);
+    setActiveWeapon(null);
     emitState(true);
   };
-  const dropRandom = createSeededRandom(`${roomSeed}|weapons|drops|v1`);
-  let dropSequence = 0;
-  const resolveDropDirection = (): THREE.Vector3 => {
-    const direction = latestAimRay?.direction.clone() ?? new THREE.Vector3(0, 0, -1);
-    direction.y = 0;
-    if (direction.lengthSq() < 0.0001) {
-      direction.set(0, 0, -1);
-    }
-    return direction.normalize();
-  };
-  const resolveDroppedPickupPosition = (
-    forward: THREE.Vector3,
-    stationary: boolean,
-  ): readonly [number, number, number] => {
-    const desiredDistance = stationary
-      ? DROPPED_PICKUP_STATIONARY_DISTANCE
-      : 0.82 + dropRandom.nextFloat() * 0.24;
-    const candidateDirections = [
-      forward,
-      forward.clone().applyAxisAngle(smokeWorldUp, Math.PI / 4),
-      forward.clone().applyAxisAngle(smokeWorldUp, -Math.PI / 4),
-      forward.clone().applyAxisAngle(smokeWorldUp, Math.PI / 2),
-      forward.clone().applyAxisAngle(smokeWorldUp, -Math.PI / 2),
-    ];
-    scene.updateMatrixWorld(true);
-    for (const direction of candidateDirections) {
-      shotRaycaster.set(camera.position, direction);
-      shotRaycaster.near = 0.25;
-      shotRaycaster.far = desiredDistance + DROPPED_PICKUP_SURFACE_CLEARANCE;
-      const blockingHit = shotRaycaster
-        .intersectObjects(scene.children, true)
-        .find(
-          (intersection) =>
-            !isWeaponVisual(intersection.object) && !(intersection.object instanceof THREE.Sprite),
-        );
-      const safeDistance =
-        blockingHit === undefined
-          ? desiredDistance
-          : Math.min(desiredDistance, blockingHit.distance - DROPPED_PICKUP_SURFACE_CLEARANCE);
-      if (safeDistance < DROPPED_PICKUP_MIN_DISTANCE) {
-        continue;
-      }
-      return [
-        camera.position.x + direction.x * safeDistance,
-        DROPPED_PICKUP_HEIGHT,
-        camera.position.z + direction.z * safeDistance,
-      ];
-    }
-    // The camera itself is already in a walkable volume. Keep the fallback
-    // reachable even if every horizontal ray is enclosed by scene geometry.
-    return [
-      camera.position.x + forward.x * DROPPED_PICKUP_MIN_DISTANCE,
-      DROPPED_PICKUP_HEIGHT,
-      camera.position.z + forward.z * DROPPED_PICKUP_MIN_DISTANCE,
-    ];
-  };
-  interface DroppedPickupOptions {
-    readonly playerVelocity?: PhysicsVector;
-    readonly position?: readonly [number, number, number];
-    readonly direction?: THREE.Vector3;
-    readonly velocity?: PhysicsVector;
-    readonly rotation?: number;
-    readonly autoPickupBlockedUntilOutsideRange?: boolean;
-  }
-  const spawnDroppedPickup = (gun: GunInstance, options: DroppedPickupOptions = {}): void => {
-    const playerVelocity = options.playerVelocity ?? { x: 0, y: 0, z: 0 };
-    const playerHorizontalSpeed = Math.hypot(playerVelocity.x, playerVelocity.z);
-    const direction = (options.direction?.clone() ?? resolveDropDirection()).setY(0);
-    if (direction.lengthSq() < 0.0001) {
-      direction.set(0, 0, -1);
-    }
-    direction.normalize();
-    const position =
-      options.position ??
-      resolveDroppedPickupPosition(direction, playerHorizontalSpeed <= DROPPED_PICKUP_REST_SPEED);
-    const throwSpeed =
-      playerHorizontalSpeed > DROPPED_PICKUP_REST_SPEED
-        ? DROPPED_PICKUP_THROW_SPEED
-        : DROPPED_PICKUP_STATIONARY_THROW_SPEED;
-    const velocity =
-      options.velocity ?? resolveGunThrowVelocityV1(direction, playerVelocity, throwSpeed);
-    dropSequence += 1;
-    const spawn: WeaponPickupSpawn = {
-      id: `dropped-gun-${String(dropSequence)}-${gun.instanceId}`,
-      gun,
-      gunInstanceId: gun.instanceId,
-      profile: gun.profile,
-      profileHash: gun.profileHash,
-      profileId: gun.profile.profileId,
-      generatorSeed: gun.generatorSeed,
-      loadedAmmo: gun.loadedAmmo,
-      reserveAmmo: gun.reserveAmmo,
-      temperatureC: gun.temperatureC,
-      position,
-      rotation: options.rotation ?? Math.atan2(direction.x, direction.z) + Math.PI,
-    };
-    profileByHash.set(gun.profileHash, gun.profile);
-    gunInstances.set(gun.instanceId, gun);
-    const visual = createPickupVisual(spawn);
-    visual.velocity.set(velocity.x, velocity.y, velocity.z);
-    visual.angularVelocity = options.velocity === undefined ? 8 : 0;
-    visual.autoPickupBlockedUntilOutsideRange = options.autoPickupBlockedUntilOutsideRange ?? true;
-    pickupVisuals.push(visual);
-    applyWeaponBarrelHeat(gun.instanceId, gun.temperatureC);
-  };
-  const dropActiveWeapon = (playerVelocity: PhysicsVector = { x: 0, y: 0, z: 0 }): void => {
-    if (switchAnimation !== null || viewmodelTransitionActive) {
-      return;
-    }
-    const instance = resolveActiveInstance();
-    if (instance === null || activeSlotIndex === null) {
-      return;
-    }
-    const slot = slots[activeSlotIndex];
+  const collectPickup = (visual: WeaponPickupVisual): void => {
+    const definition = WEAPON_DEFINITIONS[visual.spawn.weapon];
+    const slot = inventory.get(visual.spawn.weapon);
     if (slot === undefined) {
       return;
     }
-    // Preserve the exact instance object and metadata in the spawned pickup.
-    spawnDroppedPickup(instance, { playerVelocity });
-    slot.gunInstanceId = null;
-    activeSlotIndex = null;
-    switchAnimation = null;
-    switchStartedSinceLastUpdate = false;
-    reloadingSeconds = 0;
-    resetRoundReloadPresentation();
-    showWeaponViewModel(null);
-    nearbyPickup = null;
-    emitState(true);
-  };
-  const collectPickup = (visual: WeaponPickupVisual, equip = true): void => {
-    if (switchAnimation !== null || viewmodelTransitionActive) {
-      return;
+    if (!slot.owned) {
+      slot.owned = true;
+      slot.ammoInMagazine = definition.magazineSize;
+      slot.reserveAmmo = definition.reserveAmmo;
+    } else {
+      slot.reserveAmmo = Math.min(
+        definition.reserveAmmo * 2,
+        slot.reserveAmmo + definition.magazineSize,
+      );
     }
-    const slotIndex = findFirstFreeGunSlot(slots);
-    if (slotIndex === null) {
-      // A full inventory leaves the pickup in the world. There is no silent
-      // replacement and no hidden destruction of an existing instance.
-      return;
-    }
-    const slot = slots[slotIndex];
-    if (slot === undefined) {
-      return;
-    }
-    const gun = visual.spawn.gun;
-    gunInstances.set(gun.instanceId, gun);
-    profileByHash.set(gun.profileHash, gun.profile);
-    slot.gunInstanceId = gun.instanceId;
     visual.collected = true;
     visual.root.visible = false;
-    if (equip) {
-      setActiveSlot(slot.slotIndex);
-    }
-    applyWeaponBarrelHeat(gun.instanceId, gun.temperatureC);
-    nearbyPickup = null;
-    emitState(true);
-  };
-  const swapActiveWeaponWithPickup = (visual: WeaponPickupVisual): void => {
-    if (switchAnimation !== null || viewmodelTransitionActive || activeSlotIndex === null) {
-      return;
-    }
-    const activeSlot = slots[activeSlotIndex];
-    const outgoing = resolveActiveInstance();
-    if (activeSlot === undefined || outgoing === null) {
-      return;
-    }
-    const incoming = visual.spawn.gun;
-    if (incoming.instanceId === outgoing.instanceId) {
-      return;
-    }
-    const outgoingPosition: readonly [number, number, number] = [
-      visual.root.position.x,
-      DROPPED_PICKUP_HEIGHT,
-      visual.root.position.z,
-    ];
-    const outgoingRotation = visual.root.rotation.y;
-    visual.collected = true;
-    visual.root.visible = false;
-    spawnDroppedPickup(outgoing, {
-      position: outgoingPosition,
-      direction: resolveDropDirection(),
-      velocity: { x: 0, y: 0, z: 0 },
-      rotation: outgoingRotation,
-      // The player is standing on the swap location. Keep the displaced gun
-      // out of walk-over collection until they leave the pickup radius; E can
-      // still deliberately swap back immediately.
-      autoPickupBlockedUntilOutsideRange: true,
-    });
-    gunInstances.set(incoming.instanceId, incoming);
-    profileByHash.set(incoming.profileHash, incoming.profile);
-    const previousProfileHash = outgoing.profileHash;
-    activeSlot.gunInstanceId = incoming.instanceId;
-    reloadingSeconds = 0;
-    resetRoundReloadPresentation();
-    switchAnimation = {
-      fromGunInstanceId: outgoing.instanceId,
-      toGunInstanceId: incoming.instanceId,
-    };
-    switchStartedSinceLastUpdate = true;
-    onWeaponSwitch?.(true);
-    showWeaponViewModel(previousProfileHash);
-    applyWeaponBarrelHeat(incoming.instanceId, incoming.temperatureC);
+    equipWeapon(visual.spawn.weapon);
     nearbyPickup = null;
     emitState(true);
   };
   const findNearestPickup = (
     position: THREE.Vector3,
-    forWalkOver = false,
   ): { readonly visual: WeaponPickupVisual; readonly distance: number } | undefined =>
     pickupVisuals
-      .filter(
-        (visual) =>
-          !visual.collected && (!forWalkOver || !visual.autoPickupBlockedUntilOutsideRange),
-      )
+      .filter((visual) => !visual.collected)
       .map((visual) => ({ visual, distance: visual.root.position.distanceTo(position) }))
       .filter(({ distance }) => distance <= WEAPON_PICKUP_RANGE_METERS)
       .sort((left, right) => left.distance - right.distance)[0];
   const interact = (): void => {
     const candidate = findNearestPickup(camera.position);
-    if (candidate === undefined) {
-      return;
-    }
-    if (findFirstFreeGunSlot(slots) !== null) {
-      // E is intentional: unlike a walk-over, it equips the chosen pickup.
-      collectPickup(candidate.visual, true);
-    } else {
-      // A full inventory makes E a deliberate hand swap. Walk-over remains a
-      // no-op, so sprinting past a candidate never destroys the held gun.
-      swapActiveWeaponWithPickup(candidate.visual);
+    if (candidate !== undefined) {
+      collectPickup(candidate.visual);
     }
   };
   const cycleWeapon = (direction: 1 | -1 = 1): void => {
-    const owned = slots.filter((slot) => slot.gunInstanceId !== null).map((slot) => slot.slotIndex);
+    const owned = WEAPON_IDS.filter((weapon) => inventory.get(weapon)?.owned === true);
     if (owned.length === 0) {
       return;
     }
-    const currentIndex = activeSlotIndex === null ? -1 : owned.indexOf(activeSlotIndex);
+    const currentIndex = activeWeapon === null ? -1 : owned.indexOf(activeWeapon);
     const nextIndex =
       currentIndex < 0
         ? direction > 0
           ? 0
           : owned.length - 1
         : (currentIndex + direction + owned.length) % owned.length;
-    const nextSlotIndex = owned[nextIndex];
-    if (nextSlotIndex === undefined) {
+    const nextWeapon = owned[nextIndex] ?? owned[0];
+    if (nextWeapon === undefined) {
       return;
     }
-    setActiveSlot(nextSlotIndex);
+    equipWeapon(nextWeapon);
     emitState(true);
   };
-  const selectWeapon = (slotIndex: number): void => {
-    setActiveSlot(slotIndex);
+  const selectWeapon = (weapon: WeaponId): void => {
+    equipWeapon(weapon);
     emitState(true);
   };
-  const getSniperScopeLens = (): {
+  const getWeaponScopeLens = (): {
     readonly anchor: THREE.Object3D;
     readonly radius: number;
     readonly magnification: number;
   } | null => {
-    const profile = resolveActiveProfile();
-    const model = profile === null ? undefined : viewModels.get(profile.profileHash);
+    if (activeWeapon === null) {
+      return null;
+    }
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const scope = definition.scope;
+    if (scope === undefined) {
+      return null;
+    }
+    const model = viewModels.get(activeWeapon);
     if (model?.scopeLensAnchor === null || model?.scopeLensAnchor === undefined) {
       return null;
     }
     return {
       anchor: model.scopeLensAnchor,
       radius: model.scopeLensRadius,
-      magnification: profile?.opticMagnification ?? 1,
+      magnification: scope.magnification,
     };
   };
   const removeEffect = (effect: WeaponEffect): void => {
@@ -5752,49 +6055,25 @@ const createWeaponRuntime = (
     }
   };
   const reload = (): void => {
-    const activeInstance = resolveActiveInstance();
-    const activeProfile = activeInstance?.profile ?? null;
     if (
-      activeInstance === null ||
-      activeProfile === null ||
+      activeWeapon === null ||
       reloadingSeconds > 0 ||
       switchAnimation !== null ||
       viewmodelTransitionActive
     ) {
       return;
     }
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const slot = inventory.get(activeWeapon);
     if (
-      activeInstance.loadedAmmo >= activeProfile.magazineSize ||
-      activeInstance.reserveAmmo <= 0
+      slot === undefined ||
+      slot.ammoInMagazine >= definition.magazineSize ||
+      slot.reserveAmmo <= 0
     ) {
       return;
     }
-    reloadingSeconds =
-      activeProfile.reloadMode === "clip"
-        ? activeProfile.reloadSeconds
-        : activeProfile.reloadIntervalSeconds;
-    resetRoundReloadPresentation();
-    emitState(true);
-  };
-
-  /** Cancel the active reload when sprinting takes priority over weapon handling. */
-  const interruptReload = (): void => {
-    const activeInstance = resolveActiveInstance();
-    const definition = activeInstance?.profile ?? null;
-    if (activeInstance === null || definition === null || !isReloadPresentationActive()) {
-      return;
-    }
-    if (reloadingSeconds > 0) {
-      recordActiveTelemetry({
-        type: "reload",
-        durationSeconds: Math.max(
-          0,
-          resolveReloadPresentationDuration(definition) - reloadingSeconds,
-        ),
-        interrupted: true,
-      });
-    }
-    reloadingSeconds = 0;
+    reloadingSeconds = definition.reloadSeconds;
+    burstShotsRemaining = 0;
     resetRoundReloadPresentation();
     emitState(true);
   };
@@ -5805,42 +6084,42 @@ const createWeaponRuntime = (
    * until the magazine is full or the reserve is empty.
    */
   const completeReloadOperation = (): void => {
-    const activeInstance = resolveActiveInstance();
-    const definition = activeInstance?.profile ?? null;
-    if (activeInstance === null || definition === null) {
+    if (activeWeapon === null) {
       reloadingSeconds = 0;
       reloadInsertionPending = false;
       return;
     }
-    const needed = definition.magazineSize - activeInstance.loadedAmmo;
-    if (needed <= 0 || activeInstance.reserveAmmo <= 0) {
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const slot = inventory.get(activeWeapon);
+    if (slot === undefined) {
+      reloadingSeconds = 0;
+      reloadInsertionPending = false;
+      return;
+    }
+    const needed = definition.magazineSize - slot.ammoInMagazine;
+    if (needed <= 0 || slot.reserveAmmo <= 0) {
       reloadingSeconds = 0;
       reloadInsertionPending = false;
       return;
     }
     if (definition.reloadMode === "clip") {
-      const loaded = Math.min(needed, activeInstance.reserveAmmo);
-      activeInstance.loadedAmmo += loaded;
-      activeInstance.reserveAmmo -= loaded;
+      const loaded = Math.min(needed, slot.reserveAmmo);
+      slot.ammoInMagazine += loaded;
+      slot.reserveAmmo -= loaded;
       reloadingSeconds = 0;
       reloadInsertionPending = false;
     } else {
-      activeInstance.loadedAmmo += 1;
-      activeInstance.reserveAmmo -= 1;
+      slot.ammoInMagazine += 1;
+      slot.reserveAmmo -= 1;
       reloadInsertionPending = false;
       reloadingSeconds =
-        activeInstance.loadedAmmo < definition.magazineSize && activeInstance.reserveAmmo > 0
-          ? definition.reloadIntervalSeconds
+        slot.ammoInMagazine < definition.magazineSize && slot.reserveAmmo > 0
+          ? definition.reloadSeconds
           : 0;
       if (reloadingSeconds === 0) {
         beginRoundReloadReturn();
       }
     }
-    recordActiveTelemetry({
-      type: "reload",
-      durationSeconds: definition.reloadIntervalSeconds,
-      interrupted: false,
-    });
     emitState(true);
   };
   const addTracer = (
@@ -5983,11 +6262,13 @@ const createWeaponRuntime = (
   const findWeaponHit = (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
+    maxDistance?: number,
   ): THREE.Intersection | undefined => {
     shotRaycaster.set(origin, direction);
     // Shots are hitscan and continue until the first render surface. Keep the
     // raycaster unbounded instead of applying a weapon-specific distance cap.
-    shotRaycaster.far = Number.POSITIVE_INFINITY;
+    shotRaycaster.far =
+      maxDistance === undefined || maxDistance < 0 ? Number.POSITIVE_INFINITY : maxDistance;
     try {
       // Chunks and other streamed render roots can be added after weapon
       // construction. Resolve the current scene children for every shot so
@@ -6008,184 +6289,170 @@ const createWeaponRuntime = (
       return undefined;
     }
   };
-  const tryFire = (): void => {
-    const activeInstance = resolveActiveInstance();
-    const definition = activeInstance?.profile ?? null;
+  const fireFrom = (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options: WeaponFireFromOptions = {},
+  ): void => {
+    const definition = WEAPON_DEFINITIONS[weapon];
+    const spreadRadians = options.spreadRadians ?? resolveWeaponSpreadRadians(definition);
+    const random = options.random ?? shotRandom;
+    const maxDistance = options.maxDistance;
+    const baseDirection = direction.clone().normalize();
+    if (baseDirection.lengthSq() <= 0) {
+      return;
+    }
+    const useCameraMuzzle = options.showCameraMuzzle ?? false;
+    const useWorldEffects = options.showWorldEffects ?? true;
+    const shouldPlayAudio = options.playAudio === true;
+    const shouldPlayPassByAudio = options.playPassByAudio !== false;
+    const shouldTrackShotHits = options.trackShotHits === true;
+    const onHit = options.onHit ?? null;
+    const onTargetHit = options.onTargetHit ?? null;
+    const applyTargetHit = onTargetHit !== null;
+    const weaponModel = viewModels.get(weapon);
+    const viewModel = useCameraMuzzle ? weaponModel : undefined;
+    const shotProfile = resolveGunAudioProfile({
+      damage: definition.damage,
+      barrelLength: weaponModel?.hotBarrelLength ?? GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+    });
+    if (useCameraMuzzle) {
+      scene.updateMatrixWorld(true);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      updateWeaponSmokeWorldFrame(viewModel, 0);
+    }
+    if (shouldPlayAudio) {
+      const soundOrigin = viewModel?.muzzleWorldPosition ?? origin;
+      playWeaponShotSound(shotProfile, soundOrigin);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      viewModel.muzzleFlash.visible = true;
+      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
+      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
+      const puffCount = Math.min(
+        WEAPON_POWDER_SMOKE_MAX_PUFFS,
+        Math.max(
+          WEAPON_POWDER_SMOKE_MIN_PUFFS,
+          Math.ceil(definition.totalDamagePerShot / WEAPON_POWDER_SMOKE_DAMAGE_PER_PUFF),
+        ),
+      );
+      for (let puff = 0; puff < puffCount; puff += 1) {
+        spawnWeaponSmoke(viewModel, false, smokePower);
+      }
+    }
+    let targetWasHit = false;
+    for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
+      pelletDirection.copy(baseDirection);
+      if (spreadRadians > 0) {
+        const angle = random.nextFloat() * Math.PI * 2;
+        const radius = Math.sqrt(random.nextFloat()) * spreadRadians;
+        rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
+        if (rightVector.lengthSq() < 0.0001) {
+          rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
+        }
+        rightVector.normalize();
+        upVector.crossVectors(rightVector, baseDirection).normalize();
+        pelletDirection
+          .addScaledVector(rightVector, Math.cos(angle) * radius)
+          .addScaledVector(upVector, Math.sin(angle) * radius)
+          .normalize();
+      }
+      const hit = findWeaponHit(origin, pelletDirection, maxDistance);
+      const distance = hit?.distance ?? maxDistance ?? camera.far;
+      // Audio follows the intended projectile path rather than stopping at an
+      // intervening render surface. Otherwise a table or wall can swallow an
+      // incoming near-miss before the listener ever hears the whizz.
+      const passByDistance = maxDistance ?? distance;
+      if (useWorldEffects) {
+        addTracer(origin, pelletDirection, distance, definition.color);
+      }
+      if (shouldPlayPassByAudio) {
+        playWeaponPassBySound(shotProfile, origin, pelletDirection, passByDistance);
+      }
+      if (hit !== undefined) {
+        if (shouldTrackShotHits) {
+          shotsHit += 1;
+        }
+        addWeaponHitHeat(definition.id, definition.damage);
+        onHit?.(hit.object, definition.damage);
+        if (useWorldEffects) {
+          addImpact(hit.point, definition.color);
+          addBulletHole(hit, pelletDirection, definition.color);
+        }
+        hitColor.set(definition.color);
+        hit.object.userData.lastWeaponHit = {
+          weapon: definition.id,
+          damage: definition.damage,
+          color: hitColor.getHexString(),
+        };
+      } else if (applyTargetHit && maxDistance !== undefined && !targetWasHit) {
+        targetWasHit = true;
+        onTargetHit();
+      }
+    }
+  };
+
+  const tryFire = (canStartBurst: boolean): void => {
     if (
       !controlsActive ||
-      activeInstance === null ||
-      definition === null ||
+      activeWeapon === null ||
       switchAnimation !== null ||
       viewmodelTransitionActive ||
       fireCooldownSeconds > 0
     ) {
       return;
     }
-    if (activeInstance.loadedAmmo <= 0) {
-      recordActiveTelemetry({ type: "emptyMagazine" });
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const startingBurst = burstShotsRemaining <= 0;
+    if (startingBurst && !canStartBurst) {
+      return;
+    }
+    const slot = inventory.get(activeWeapon);
+    if (slot === undefined) {
+      return;
+    }
+    if (slot.ammoInMagazine <= 0) {
+      burstShotsRemaining = 0;
       reload();
       return;
     }
     if (latestAimRay === null) {
       return;
     }
-    if (reloadingSeconds > 0 && !canInterruptWeaponReload(definition, activeInstance.loadedAmmo)) {
+    if (reloadingSeconds > 0 && !canInterruptWeaponReload(definition, slot.ammoInMagazine)) {
       return;
+    }
+    if (startingBurst) {
+      burstShotsRemaining = definition.burstSize;
     }
     // A held fire input cancels a round reload as soon as a shell or bullet
     // has been chambered. Clip reloads remain atomic and cannot be cancelled.
     if (reloadingSeconds > 0) {
-      recordActiveTelemetry({
-        type: "reload",
-        durationSeconds: Math.max(
-          0,
-          resolveReloadPresentationDuration(definition) - reloadingSeconds,
-        ),
-        interrupted: true,
-      });
       beginRoundReloadReturn();
     }
     reloadingSeconds = 0;
-    activeInstance.loadedAmmo -= 1;
-    fireCooldownSeconds = definition.fireIntervalSeconds;
+    slot.ammoInMagazine -= 1;
+    burstShotsRemaining = Math.max(0, burstShotsRemaining - 1);
+    fireCooldownSeconds =
+      burstShotsRemaining > 0 ? definition.fireIntervalSeconds : definition.burstCooldownSeconds;
     muzzleFlashSeconds = 0.055;
-    recoilAmount = Math.min(
-      1,
-      recoilAmount + resolveWeaponRecoilAmount(definition.damagePerProjectile),
-    );
-    const oxygenConsumed =
-      onWeaponShot?.(definition.damagePerProjectile, definition.projectilesPerShot) ??
-      definition.oxygenCostPerGroup;
+    recoilAmount = Math.min(1, recoilAmount + resolveWeaponRecoilAmount(definition.damage));
+    onWeaponShot?.(definition.damage, definition.pellets);
     shotsFired += 1;
-    scene.updateMatrixWorld(true);
     const baseDirection = latestAimRay.direction.clone().normalize();
-    const viewModel = viewModels.get(definition.profileHash);
-    if (viewModel !== undefined) {
-      updateWeaponSmokeWorldFrame(viewModel, 0);
-      viewModel.muzzleFlash.visible = true;
-      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
-      const smokePower = resolveWeaponSmokePower(definition.groupDamage);
-      const puffCount = Math.min(
-        WEAPON_BARREL_SMOKE_POOL_SIZE,
-        // Each puff is now five times larger, so one machine-gun sprite per
-        // shot is enough while shotgun and sniper damage still add puffs.
-        Math.max(1, Math.ceil(definition.groupDamage / 32)),
-      );
-      for (let puff = 0; puff < puffCount; puff += 1) {
-        spawnWeaponSmoke(viewModel, false, smokePower);
-      }
-    }
-    const spreadRadians = resolveGunSpreadRadiansV1(definition, {
-      ...latestSpreadContext,
-      heatRatio: resolveWeaponBarrelHeatRatio(activeInstance.temperatureC),
-      unresolvedRecoil: recoilAmount,
-    });
-    if (spreadRadians > 0) {
-      rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
-      if (rightVector.lengthSq() < 0.0001) {
-        rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
-      }
-      rightVector.normalize();
-      upVector.crossVectors(rightVector, baseDirection).normalize();
-    }
-    const pelletResults: {
-      readonly direction: THREE.Vector3;
-      readonly hit: THREE.Intersection | undefined;
-    }[] = [];
-    for (let pellet = 0; pellet < definition.projectilesPerShot; pellet += 1) {
-      pelletDirection.copy(baseDirection);
-      if (spreadRadians > 0) {
-        const angle = shotRandom.nextFloat() * Math.PI * 2;
-        const radius = Math.sqrt(shotRandom.nextFloat()) * spreadRadians;
-        pelletDirection
-          .addScaledVector(rightVector, Math.cos(angle) * radius)
-          .addScaledVector(upVector, Math.sin(angle) * radius)
-          .normalize();
-      }
-      pelletResults.push({
-        direction: pelletDirection.clone(),
-        hit: findWeaponHit(latestAimRay.origin, pelletDirection),
-      });
-    }
-    const hitDistances = pelletResults.flatMap(({ hit }) =>
-      hit === undefined ? [] : [hit.distance],
-    );
-    const engagementRangeMeters =
-      hitDistances.length === 0
-        ? undefined
-        : hitDistances.reduce((sum, distance) => sum + distance, 0) / hitDistances.length;
-    recordActiveTelemetry({
-      type: "shotAccepted",
-      timestampSeconds: telemetryClockSeconds,
-      projectileCount: definition.projectilesPerShot,
-      ammunitionConsumed: 1,
-      oxygenConsumed,
-      recoilDisplacement: recoilAmount,
-      movementAimPenalty: (latestSpreadContext.movementFactor ?? 0) * definition.movementPenalty,
-      posture: (latestSpreadContext.postureFactor ?? 1) <= 0.5 ? "crouched" : "standing",
-      ...(latestSpreadContext.speedMetersPerSecond === undefined
-        ? {}
-        : { movementSpeedMetersPerSecond: latestSpreadContext.speedMetersPerSecond }),
-      ...(engagementRangeMeters === undefined ? {} : { distanceMeters: engagementRangeMeters }),
-    });
-    for (const { direction, hit } of pelletResults) {
-      // A miss has no surface to terminate the tracer. Use the camera's far
-      // plane only for finite effect geometry; it is not a gameplay range.
-      const distance = hit?.distance ?? camera.far;
-      addTracer(latestAimRay.origin, direction, distance, definition.accentColor);
-      if (hit !== undefined) {
-        shotsHit += 1;
-        addWeaponHitHeat(activeInstance.instanceId, definition.damagePerProjectile);
-        recordActiveTelemetry({
-          type: "hit",
-          timestampSeconds: telemetryClockSeconds,
-          damage: definition.damagePerProjectile,
-          distanceMeters: hit.distance,
-          heatRatio: resolveWeaponBarrelHeatRatio(activeInstance.temperatureC),
-          burstDamage: definition.burstDamage,
-          posture: (latestSpreadContext.postureFactor ?? 1) <= 0.5 ? "crouched" : "standing",
-        });
-        addImpact(hit.point, definition.accentColor);
-        addBulletHole(hit, direction, definition.accentColor);
-        hitColor.set(definition.accentColor);
-        hit.object.userData.lastWeaponHit = {
-          profileId: definition.profileId,
-          damage: definition.damagePerProjectile,
-          color: hitColor.getHexString(),
-        };
-      }
-    }
+    const fireOptions: WeaponFireFromOptions = {
+      random: shotRandom,
+      spreadRadians: resolveWeaponSpreadRadians(definition),
+      showCameraMuzzle: true,
+      playAudio: true,
+      showWorldEffects: true,
+      trackShotHits: true,
+      ...(onWeaponHit === undefined ? {} : { onHit: onWeaponHit }),
+    };
+    fireFrom(latestAimRay.origin, baseDirection, activeWeapon, fireOptions);
     emitState(true);
-  };
-  const updateDroppedPickupPhysics = (visual: WeaponPickupVisual, deltaSeconds: number): void => {
-    if (visual.velocity.lengthSq() < DROPPED_PICKUP_REST_SPEED ** 2) {
-      visual.velocity.set(0, 0, 0);
-      visual.angularVelocity = 0;
-      return;
-    }
-    visual.velocity.y -= DROPPED_PICKUP_GRAVITY * deltaSeconds;
-    const nextPosition = visual.root.position
-      .clone()
-      .addScaledVector(visual.velocity, deltaSeconds);
-    if (nextPosition.y <= visual.baseY) {
-      nextPosition.y = visual.baseY;
-      if (Math.abs(visual.velocity.y) > DROPPED_PICKUP_REST_SPEED) {
-        visual.velocity.y = Math.abs(visual.velocity.y) * DROPPED_PICKUP_BOUNCE_DAMPING;
-        visual.velocity.x *= DROPPED_PICKUP_HORIZONTAL_DAMPING;
-        visual.velocity.z *= DROPPED_PICKUP_HORIZONTAL_DAMPING;
-      } else {
-        visual.velocity.y = 0;
-      }
-    }
-    nextPosition.x = THREE.MathUtils.clamp(nextPosition.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX);
-    nextPosition.z = THREE.MathUtils.clamp(nextPosition.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ);
-    visual.root.position.copy(nextPosition);
-    visual.angularVelocity = THREE.MathUtils.damp(visual.angularVelocity, 0, 8, deltaSeconds);
-    visual.root.rotation.y += visual.angularVelocity * deltaSeconds;
-    if (visual.velocity.lengthSq() < DROPPED_PICKUP_REST_SPEED ** 2) {
-      visual.velocity.set(0, 0, 0);
-      visual.angularVelocity = 0;
-    }
   };
   const update = (
     deltaSeconds: number,
@@ -6195,42 +6462,34 @@ const createWeaponRuntime = (
     visibleInView: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
-    spreadContext: GunSpreadResolutionContextV1,
   ): void => {
     controlsActive = active;
     viewActive = visibleInView;
     latestAimRay = aimRay;
-    latestSpreadContext = spreadContext;
-    // Traversal and weapon switches both keep weapon handling locked until the
-    // shared camera-damper transition returns to its idle pose.
+    if (shotAudioContext !== null && shotAudioContext.state !== "closed") {
+      // Keep active tails and pass-by voices attached to the moving listener,
+      // not just to the camera pose from the frame that spawned them.
+      updateShotAudioListener(shotAudioContext);
+    }
+    // Traversal state arrives from the shared camera damper before firing or
+    // reload input is processed for this frame.
     viewmodelTransitionActive = viewmodelTransition.phase !== "idle";
     coolWeaponBarrels(deltaSeconds);
     fireCooldownSeconds = Math.max(0, fireCooldownSeconds - deltaSeconds);
     const reloadDeltaSeconds = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
-    const activeInstance = resolveActiveInstance();
-    const activeProfile = activeInstance?.profile ?? null;
-    telemetryClockSeconds += reloadDeltaSeconds;
-    if (activeInstance !== null && activeProfile !== null) {
-      recordActiveTelemetry({
-        type: "time",
-        deltaSeconds: reloadDeltaSeconds,
-        heatRatio: resolveWeaponBarrelHeatRatio(activeInstance.temperatureC),
-        thermalSmokeRate: activeProfile.audio.effectPower,
-      });
-    }
     if (Number.isFinite(reloadInsertionImpulseElapsedSeconds)) {
       reloadInsertionImpulseElapsedSeconds += reloadDeltaSeconds;
       if (reloadInsertionImpulseElapsedSeconds >= WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS) {
         reloadInsertionImpulseElapsedSeconds = Number.POSITIVE_INFINITY;
       }
     }
-    const activeReloadDefinition = activeProfile;
+    const activeReloadDefinition = activeWeapon === null ? null : WEAPON_DEFINITIONS[activeWeapon];
     const reloadInsertionLeadSeconds =
       activeReloadDefinition === null
         ? 0
         : Math.min(
             WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
-            resolveReloadPresentationDuration(activeReloadDefinition),
+            activeReloadDefinition.reloadSeconds,
           );
     if (
       activeReloadDefinition !== null &&
@@ -6248,7 +6507,7 @@ const createWeaponRuntime = (
       roundReloadReturnElapsedSeconds === null
     ) {
       const liftDurationSeconds =
-        resolveReloadPresentationDuration(activeReloadDefinition) * WEAPON_RELOAD_LIFT_FRACTION;
+        activeReloadDefinition.reloadSeconds * WEAPON_RELOAD_LIFT_FRACTION;
       roundReloadLiftElapsedSeconds = Math.min(
         liftDurationSeconds,
         roundReloadLiftElapsedSeconds + reloadDeltaSeconds,
@@ -6275,35 +6534,21 @@ const createWeaponRuntime = (
         : remainingReloadDeltaSeconds;
       roundReloadReturnElapsedSeconds += returnDeltaSeconds;
       const returnDurationSeconds =
-        resolveReloadPresentationDuration(activeReloadDefinition) * WEAPON_RELOAD_RETURN_FRACTION;
+        activeReloadDefinition.reloadSeconds * WEAPON_RELOAD_RETURN_FRACTION;
       if (roundReloadReturnElapsedSeconds >= returnDurationSeconds) {
         resetRoundReloadPresentation();
       }
     }
-    if (fireHeld) {
-      tryFire();
+    if (fireHeld || burstShotsRemaining > 0) {
+      tryFire(fireHeld || burstShotsRemaining > 0);
     }
     for (const visual of pickupVisuals) {
       if (visual.collected) {
         continue;
       }
-      if (
-        visual.autoPickupBlockedUntilOutsideRange &&
-        visual.root.position.distanceTo(cameraPosition) >
-          DROPPED_PICKUP_AUTO_PICKUP_RELEASE_DISTANCE
-      ) {
-        visual.autoPickupBlockedUntilOutsideRange = false;
-      }
-      if (
-        visual.velocity.lengthSq() >= DROPPED_PICKUP_REST_SPEED ** 2 ||
-        Math.abs(visual.angularVelocity) >= DROPPED_PICKUP_REST_SPEED
-      ) {
-        updateDroppedPickupPhysics(visual, reloadDeltaSeconds);
-      } else {
-        visual.root.rotation.y += deltaSeconds * 0.65;
-        visual.root.position.y =
-          visual.baseY + Math.sin(performance.now() * 0.002 + visual.root.id) * 0.055;
-      }
+      visual.root.rotation.y += deltaSeconds * 0.65;
+      visual.root.position.y =
+        visual.baseY + Math.sin(performance.now() * 0.002 + visual.root.id) * 0.055;
     }
     const horizontalDistanceMoved = pickupPositionInitialized
       ? Math.hypot(
@@ -6313,17 +6558,14 @@ const createWeaponRuntime = (
       : 0;
     lastPickupCheckPosition.copy(cameraPosition);
     pickupPositionInitialized = true;
-    const nearest = findNearestPickup(cameraPosition, true);
-    // Walking through the expanded pickup radius stores the closest gun. A
-    // held weapon stays in hand when this fills the second slot; E remains the
-    // deliberate equip/swap action.
+    const nearest = findNearestPickup(cameraPosition);
+    // Walking through the expanded pickup radius equips the closest gun. The
+    // manual E interaction remains available for players who stop nearby.
     if (controlsActive && horizontalDistanceMoved > 0.001 && nearest !== undefined) {
-      collectPickup(nearest.visual, activeSlotIndex === null);
+      collectPickup(nearest.visual);
     }
-    const nextNearbyVisual = findNearestPickup(cameraPosition)?.visual;
-    const nextNearby =
-      nextNearbyVisual === undefined ? null : toNearbyPickupSnapshot(nextNearbyVisual);
-    if (JSON.stringify(nextNearby) !== JSON.stringify(nearbyPickup)) {
+    const nextNearby = findNearestPickup(cameraPosition)?.visual.spawn.weapon ?? null;
+    if (nextNearby !== nearbyPickup) {
       nearbyPickup = nextNearby;
       emitState();
     }
@@ -6337,76 +6579,64 @@ const createWeaponRuntime = (
       viewmodelTransition.phase === "idle" &&
       switchStartedSinceLastUpdate &&
       switchAnimation !== null
-        ? resolveCameraViewmodelTransition(0, switchAnimation.fromGunInstanceId !== null)
+        ? resolveCameraViewmodelTransition(0, switchAnimation.fromWeapon !== null)
         : viewmodelTransition;
     viewmodelTransitionActive = effectiveViewmodelTransition.phase !== "idle";
     switchStartedSinceLastUpdate = false;
-    let visibleGunInstanceId = activeInstance?.instanceId ?? null;
+    let visibleWeapon = activeWeapon;
     if (switchAnimation !== null) {
       if (effectiveViewmodelTransition.phase === "lowering") {
-        visibleGunInstanceId = switchAnimation.fromGunInstanceId;
+        visibleWeapon = switchAnimation.fromWeapon;
       } else if (effectiveViewmodelTransition.phase === "raising") {
-        visibleGunInstanceId = switchAnimation.toGunInstanceId;
+        visibleWeapon = switchAnimation.toWeapon;
       } else {
         switchAnimation = null;
       }
     }
-    const visibleProfileHash =
-      visibleGunInstanceId === null
-        ? null
-        : (gunInstances.get(visibleGunInstanceId)?.profileHash ?? null);
     // Weapon switches and traversal both use the same camera-damper pose. A
     // traversal has no switchAnimation, but its lower/raise output still must
     // reach the camera-child model.
     const viewmodelPose =
       effectiveViewmodelTransition.phase === "idle" ? null : effectiveViewmodelTransition;
-    if (smokeAccumulatorInstanceId !== visibleGunInstanceId) {
-      smokeAccumulatorInstanceId = visibleGunInstanceId;
+    if (smokeAccumulatorWeapon !== visibleWeapon) {
+      smokeAccumulatorWeapon = visibleWeapon;
       smokeSpawnAccumulator = 0;
     }
-    for (const [profileHash, model] of viewModels) {
-      const profile = profileByHash.get(profileHash);
-      if (profile === undefined) {
-        continue;
-      }
-      const visible = viewActive && profileHash === visibleProfileHash;
+    for (const [weapon, model] of viewModels) {
+      const visible = viewActive && weapon === visibleWeapon;
       model.root.visible = visible;
       if (!visible) {
         model.muzzleFlash.visible = false;
         // Existing world smoke continues diffusing after a switch, holster,
         // or camera move. Do not emit new thermal wisps from a hidden barrel.
-        updateWeaponSmoke(model, activeInstance?.instanceId ?? "", profile, deltaSeconds, false);
+        updateWeaponSmoke(model, weapon, deltaSeconds, false);
         continue;
       }
+      const definition = WEAPON_DEFINITIONS[weapon];
       const insertionImpulseElapsedSeconds = Number.isFinite(reloadInsertionImpulseElapsedSeconds)
         ? reloadInsertionImpulseElapsedSeconds
         : undefined;
       const isActiveRoundReload =
-        activeInstance?.profileHash === profileHash &&
-        profile.reloadMode === "round" &&
+        weapon === activeWeapon &&
+        definition.reloadMode === "round" &&
         (reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null);
       const reloadPose = isActiveRoundReload
         ? resolveWeaponRoundReloadPose(
             roundReloadLiftElapsedSeconds,
-            resolveReloadPresentationDuration(profile),
+            definition.reloadSeconds,
             roundReloadReturnElapsedSeconds,
             insertionImpulseElapsedSeconds,
           )
-        : activeInstance?.profileHash === profileHash && reloadingSeconds > 0
+        : weapon === activeWeapon && reloadingSeconds > 0
           ? resolveWeaponReloadPose(
-              resolveReloadPresentationDuration(profile) - reloadingSeconds,
-              resolveReloadPresentationDuration(profile),
+              definition.reloadSeconds - reloadingSeconds,
+              definition.reloadSeconds,
               { insertionImpulseElapsedSeconds },
             )
-          : activeInstance?.profileHash === profileHash &&
-              insertionImpulseElapsedSeconds !== undefined
-            ? resolveWeaponReloadPose(
-                resolveReloadPresentationDuration(profile),
-                resolveReloadPresentationDuration(profile),
-                {
-                  insertionImpulseElapsedSeconds,
-                },
-              )
+          : weapon === activeWeapon && insertionImpulseElapsedSeconds !== undefined
+            ? resolveWeaponReloadPose(definition.reloadSeconds, definition.reloadSeconds, {
+                insertionImpulseElapsedSeconds,
+              })
             : null;
       model.root.position.x =
         viewmodelOffset.x + (viewmodelPose?.offset.x ?? 0) + (reloadPose?.lateralOffset ?? 0);
@@ -6440,9 +6670,7 @@ const createWeaponRuntime = (
         // oscillator here or the sights will drift away from that ray.
       }
       model.muzzleFlash.visible = muzzleFlashSeconds > 0;
-      if (activeInstance !== null) {
-        updateWeaponSmoke(model, activeInstance.instanceId, profile, deltaSeconds);
-      }
+      updateWeaponSmoke(model, weapon, deltaSeconds);
     }
     const bulletHoleCountBeforeCleanup = bulletHoleEffects.length;
     for (let index = effects.length - 1; index >= 0; index -= 1) {
@@ -6469,9 +6697,23 @@ const createWeaponRuntime = (
       muzzleFlashSeconds = Math.min(muzzleFlashSeconds, 0.035);
     }
   };
+  const interruptReload = (): void => {
+    if (reloadingSeconds <= 0) {
+      return;
+    }
+    if (activeWeapon !== null && WEAPON_DEFINITIONS[activeWeapon].reloadMode === "round") {
+      beginRoundReloadReturn();
+    }
+    reloadingSeconds = 0;
+  };
+  const dropActiveWeapon = (): void => {
+    // Fixed weapons remain in the six-slot armory. The old parametric toss
+    // action is intentionally inactive while this roster is selected.
+  };
   const recordDeath = (): void => {
-    recordActiveTelemetry({ type: "death" });
-    emitState(true);
+    fireHeld = false;
+    burstShotsRemaining = 0;
+    interruptReload();
   };
   const dispose = (): void => {
     pickupRoot.removeFromParent();
@@ -6490,12 +6732,22 @@ const createWeaponRuntime = (
     weaponSmokeTexture.dispose();
     effects.length = 0;
     bulletHoleEffects.length = 0;
+    const audioContext = shotAudioContext;
+    shotAudioContext = null;
+    shotAudioMasterGain = null;
+    shotAudioNoiseBuffer = null;
+    if (audioContext !== null) {
+      void audioContext.close().catch(() => undefined);
+    }
   };
   emitState(true);
   return {
     update,
     setFireHeld,
-    fire: tryFire,
+    fire: () => tryFire(true),
+    fireFrom: (origin, direction, weapon, options) => {
+      fireFrom(origin, direction, weapon, options);
+    },
     reload,
     interruptReload,
     isReloading: isReloadPresentationActive,
@@ -6505,7 +6757,8 @@ const createWeaponRuntime = (
     cycleWeaponTo: selectWeapon,
     dropActiveWeapon,
     recordDeath,
-    getSniperScopeLens,
+    getWeaponScopeLens,
+    getSniperScopeLens: getWeaponScopeLens,
     getSnapshot,
     dispose,
   };
@@ -6779,7 +7032,6 @@ const createFocusCalibrationHallway = (
 };
 
 interface ParametricGunCampusResources {
-  readonly placements: readonly ParametricGunPickupPlacementV1[];
   readonly labels: readonly THREE.Sprite[];
 }
 
@@ -6896,10 +7148,7 @@ const createParametricGunCampus = (
     shelf.receiveShadow = true;
     barracks.add(shelf);
   }
-  const barracksTitle = createLabelSprite(
-    `PARAMETRIC BARRACKS  ·  ${String(DEFAULT_PARAMETRIC_GUN_CATALOG_COUNT)} SEEDED PROFILES`,
-    "#e1a64d",
-  );
+  const barracksTitle = createLabelSprite("FIXED ARMORY  ·  SIX WEAPONS", "#e1a64d");
   barracksTitle.name = "ParametricGunBarracksTitle";
   barracksTitle.position.set(
     PARAMETRIC_BARRACKS_ORIGIN.x,
@@ -6910,23 +7159,6 @@ const createParametricGunCampus = (
   barracks.add(barracksTitle);
   labels.push(barracksTitle);
 
-  const placements: readonly ParametricGunPickupPlacementV1[] = Array.from(
-    { length: DEFAULT_PARAMETRIC_GUN_CATALOG_COUNT },
-    (_, index): ParametricGunPickupPlacementV1 => {
-      const column = index % PARAMETRIC_GUN_RACK_COLUMNS;
-      const row = Math.floor(index / PARAMETRIC_GUN_RACK_COLUMNS);
-      return {
-        position: [
-          PARAMETRIC_BARRACKS_ORIGIN.x +
-            (column - (PARAMETRIC_GUN_RACK_COLUMNS - 1) / 2) * PARAMETRIC_GUN_RACK_SPACING_X,
-          0.72,
-          PARAMETRIC_BARRACKS_ORIGIN.z +
-            (row - (PARAMETRIC_GUN_RACK_ROWS - 1) / 2) * PARAMETRIC_GUN_RACK_SPACING_Z,
-        ],
-        rotation: column % 2 === 0 ? 0.16 : -0.16,
-      };
-    },
-  );
   scene.add(barracks);
 
   const targetRange = new THREE.Group();
@@ -7085,7 +7317,7 @@ const createParametricGunCampus = (
   labels.push(rangeTitle);
   scene.add(targetRange);
 
-  return { placements, labels };
+  return { labels };
 };
 
 const addDice = (scene: THREE.Scene): void => {
@@ -10543,6 +10775,12 @@ export const createMahjongTableScene = (
   const lastMovementTapAtByKey = new Map<string, number>();
   let lastSceneStateSaveAt = Number.NEGATIVE_INFINITY;
   let lastSceneStateSerialized: string | null = null;
+  const simulantRandom = createSeededRandom(`${roomSeed}|simulant-combat-v1`);
+  let simulantMarker: THREE.Group | null = null;
+  let simulantRespawnTimer = 0;
+  const simulantPosition = new THREE.Vector3();
+  let simulantVitals = createPlayerVitals();
+  let simulantAttackCooldown = 0;
   let playerVitals = createPlayerVitals();
   let vitalsPublishElapsed = 0;
   let speedPublishElapsed = 0;
@@ -10902,7 +11140,7 @@ export const createMahjongTableScene = (
       event.code === "KeyE" ||
       event.code === "KeyR" ||
       event.code === "KeyQ" ||
-      /^Digit[0-4]$/u.test(event.code)
+      /^Digit[0-6]$/u.test(event.code)
     ) {
       event.preventDefault();
       if (event.code === "KeyE") {
@@ -10917,13 +11155,13 @@ export const createMahjongTableScene = (
         if (!event.repeat) {
           weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
         }
-      } else if (/^Digit[0-4]$/u.test(event.code)) {
+      } else if (/^Digit[0-6]$/u.test(event.code)) {
         if (!event.repeat) {
-          const slotIndex = resolveWeaponHotkey(event.code);
-          if (slotIndex === null) {
+          const selectedWeapon = resolveWeaponHotkey(event.code);
+          if (selectedWeapon === null) {
             weaponRuntime?.holster();
-          } else if (slotIndex !== undefined) {
-            weaponRuntime?.cycleWeaponTo(slotIndex);
+          } else if (selectedWeapon !== undefined) {
+            weaponRuntime?.cycleWeaponTo(selectedWeapon);
           }
         }
       } else if (crouchKeys.has(event.code)) {
@@ -11204,6 +11442,99 @@ export const createMahjongTableScene = (
     resetMotionCalibration();
     syncPhysicsCharacterToCamera();
     saveSceneState(true);
+  };
+
+  const resolveSimulantSpawnPosition = (): PhysicsVector => {
+    const maximumRadius = Math.max(
+      SIMULANT_MIN_START_DISTANCE_METERS,
+      Math.min(EXPLORATION_WORLD_HALF_SIZE - 4, 48),
+    );
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const angle = simulantRandom.nextFloat() * Math.PI * 2;
+      const radius = SIMULANT_MIN_START_DISTANCE_METERS + simulantRandom.nextFloat() * 12;
+      const x = THREE.MathUtils.clamp(
+        camera.position.x + Math.cos(angle) * radius,
+        WORLD_BOUNDS.minX + 2,
+        WORLD_BOUNDS.maxX - 2,
+      );
+      const z = THREE.MathUtils.clamp(
+        camera.position.z + Math.sin(angle) * radius,
+        WORLD_BOUNDS.minZ + 2,
+        WORLD_BOUNDS.maxZ - 2,
+      );
+      if (Math.hypot(x - camera.position.x, z - camera.position.z) >= maximumRadius * 0.55) {
+        return { x, y: 0, z };
+      }
+    }
+    return {
+      x: THREE.MathUtils.clamp(
+        camera.position.x + maximumRadius,
+        WORLD_BOUNDS.minX + 2,
+        WORLD_BOUNDS.maxX - 2,
+      ),
+      y: 0,
+      z: THREE.MathUtils.clamp(camera.position.z, WORLD_BOUNDS.minZ + 2, WORLD_BOUNDS.maxZ - 2),
+    };
+  };
+  const syncSimulantMarkerVitals = (): void => {
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.userData.simulantHealth = simulantVitals.health;
+    simulantMarker.userData.simulantShield = simulantVitals.shield;
+  };
+  const respawnSimulant = (): void => {
+    if (simulantMarker === null) {
+      return;
+    }
+    const position = resolveSimulantSpawnPosition();
+    simulantPosition.set(position.x, position.y, position.z);
+    simulantMarker.position.copy(simulantPosition);
+    simulantMarker.visible = true;
+    simulantVitals = createPlayerVitals();
+    simulantAttackCooldown = 0;
+    syncSimulantMarkerVitals();
+  };
+  const scheduleSimulantRespawn = (): void => {
+    if (simulantRespawnTimer !== 0) {
+      window.clearTimeout(simulantRespawnTimer);
+    }
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.visible = false;
+    simulantRespawnTimer = window.setTimeout(() => {
+      simulantRespawnTimer = 0;
+      respawnSimulant();
+    }, SIMULANT_RESPAWN_DELAY_MS);
+  };
+  const getSimulantHitObject = (hitObject: THREE.Object3D): THREE.Object3D | null => {
+    let current: THREE.Object3D | null = hitObject;
+    while (current !== null) {
+      if (current.userData.simulantCombatMarker === true) {
+        return current;
+      }
+      current = current.parent;
+    }
+    return null;
+  };
+  const damageSimulant = (hitObject: THREE.Object3D, damage: number): void => {
+    if (
+      simulantMarker === null ||
+      !simulantMarker.visible ||
+      getSimulantHitObject(hitObject) === null
+    ) {
+      return;
+    }
+    const nextVitals = applyPlayerDamage(simulantVitals, Math.max(0, damage));
+    if (nextVitals.damage <= 0) {
+      return;
+    }
+    simulantVitals = nextVitals.state;
+    syncSimulantMarkerVitals();
+    if (nextVitals.killed) {
+      scheduleSimulantRespawn();
+    }
   };
 
   const setDebugCameraPreset = (preset: VisualCameraPreset): void => {
@@ -11941,6 +12272,32 @@ export const createMahjongTableScene = (
   );
   loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
   addLighting(scene);
+  simulantMarker = new THREE.Group();
+  simulantMarker.name = "SimulantSpawnMarker";
+  simulantMarker.userData = {
+    simulantCombatMarker: true,
+    simulantHealth: simulantVitals.health,
+    simulantShield: simulantVitals.shield,
+  };
+  const simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
+  simulantBody.name = "SimulantCombatBody";
+  simulantMarker.add(simulantBody);
+  const simulantRing = new THREE.Mesh(
+    new THREE.TorusGeometry(0.48, 0.022, 8, 32),
+    new THREE.MeshBasicMaterial({
+      color: COLORS.red,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+      toneMapped: false,
+    }),
+  );
+  simulantRing.name = "SimulantCombatRing";
+  simulantRing.rotation.x = -Math.PI / 2;
+  simulantRing.position.y = 0.02;
+  simulantMarker.add(simulantRing);
+  scene.add(simulantMarker);
+  respawnSimulant();
   scene.environmentIntensity = debugEnvironmentIntensity;
   const table = penthouseEnabled
     ? createTable(architectureResources.surfaceTextures)
@@ -12243,12 +12600,6 @@ export const createMahjongTableScene = (
       reservedRects: weaponReservedRects,
       obstacles: [...staticPhysicsBoxes, ...(explorationWorld?.getPhysicsBoxes() ?? [])],
     }),
-    ...(parametricBarracksEnabled
-      ? generateParametricGunPickupsV1(roomSeed, {
-          count: DEFAULT_PARAMETRIC_GUN_CATALOG_COUNT,
-          placements: parametricCampus.placements,
-        })
-      : []),
   ];
   weaponRuntime = createWeaponRuntime(
     scene,
@@ -12268,6 +12619,11 @@ export const createMahjongTableScene = (
         ),
       });
       return oxygenConsumed;
+    },
+    (hitObject, damage) => {
+      if (getSimulantHitObject(hitObject) !== null) {
+        damageSimulant(hitObject, damage);
+      }
     },
     (hasOutgoingWeapon) => {
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
@@ -12459,6 +12815,38 @@ export const createMahjongTableScene = (
     playerVitals = nextVitals;
     if (vitalsChanged || (playerVitals.shield < PLAYER_MAX_SHIELD && vitalsPublishElapsed >= 0.1)) {
       publishPlayerVitals();
+    }
+    if (simulantMarker !== null && simulantMarker.visible && !playerVitals.isDead) {
+      const toPlayerX = camera.position.x - simulantPosition.x;
+      const toPlayerZ = camera.position.z - simulantPosition.z;
+      const distance = Math.hypot(toPlayerX, toPlayerZ);
+      if (distance > SIMULANT_STOP_DISTANCE_METERS) {
+        const moveDistance = Math.min(
+          SIMULANT_MOVE_SPEED_METERS_PER_SECOND * delta,
+          Math.max(0, distance - SIMULANT_STOP_DISTANCE_METERS),
+        );
+        simulantPosition.x += (toPlayerX / Math.max(distance, 0.0001)) * moveDistance;
+        simulantPosition.z += (toPlayerZ / Math.max(distance, 0.0001)) * moveDistance;
+        simulantPosition.x = THREE.MathUtils.clamp(
+          simulantPosition.x,
+          WORLD_BOUNDS.minX + 1,
+          WORLD_BOUNDS.maxX - 1,
+        );
+        simulantPosition.z = THREE.MathUtils.clamp(
+          simulantPosition.z,
+          WORLD_BOUNDS.minZ + 1,
+          WORLD_BOUNDS.maxZ - 1,
+        );
+      }
+      simulantMarker.position.copy(simulantPosition);
+      if (distance > 0.001) {
+        simulantMarker.rotation.y = Math.atan2(toPlayerX, toPlayerZ);
+      }
+      simulantAttackCooldown = Math.max(0, simulantAttackCooldown - delta);
+      if (distance <= SIMULANT_ATTACK_DISTANCE_METERS && simulantAttackCooldown <= 0) {
+        damagePlayer(SIMULANT_ATTACK_DAMAGE_PER_SECOND * 0.25);
+        simulantAttackCooldown = 0.25;
+      }
     }
     syncDofIntensityForZoom();
     const currentTimestamp = performance.now();
@@ -13345,17 +13733,6 @@ export const createMahjongTableScene = (
       activeView === "seat" && firstPersonControls.enabled,
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
-      {
-        zoomed: aimingDownSights,
-        movementFactor: movementMagnitudeActivity,
-        postureFactor: isCrouched ? 0 : 1,
-        speedMetersPerSecond: Math.hypot(forwardVelocity, strafeVelocity),
-        unresolvedRecoil: Math.min(
-          1,
-          Math.hypot(cameraMotion.getOffsets().recoilPitch, cameraMotion.getOffsets().recoilYaw) *
-            2,
-        ),
-      },
     );
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before

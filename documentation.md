@@ -555,84 +555,34 @@ recharge status, and the scene renderer carries rounded `data-player-health` and
 values for local smoke inspection. This is a visual-table prototype surface, not yet authoritative
 match combat or persistence state.
 
-## Procedural weapons prototype
+## Fixed six-weapon combat prototype
 
-The visual-table scene now includes a seeded pickup and shooting loop in `apps/web/src/scene/weapons.ts`.
-Each normalized room seed produces one starter pistol in the penthouse and a deterministic outdoor spread
-of pistol, shotgun, machine gun, and sniper pickups. The penthouse also stages one visible pickup of each type
-around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
-physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
-Procedural outdoor placements are density-capped at one pickup in each pickup's 50 m horizontal-radius circle:
-candidate positions must be at least 50 m apart, and a constrained world omits a requested pickup rather than
-placing it closer.
-The table-side starter set and the 24-profile parametric barracks are authored test displays and remain exempt from
-this outdoor-world cap.
+The 8 August checkpoint keeps the visual-table combat presentation but removes generated weapon profiles and per-instance
+gun stats. `apps/web/src/scene/weapons.ts` defines exactly six fixed weapons: pistol, shotgun, machine gun, sniper,
+carbine, and submachine gun. Room seeds still deterministically place fixed-weapon pickups in the world; the seed never
+changes a weapon's definition. The loadout always exposes six inventory slots, with `1`–`6` selecting the corresponding
+weapon and `0` holstering. Walk-over pickup and `E` equip the nearest fixed weapon.
 
-The browser mount owns the presentation combat state: walking through 3.5 m of a pickup stores the nearest gun in the
-first free slot and only equips it when the player's hands are empty; E intentionally equips the nearest pickup, or
-swaps it with the held gun when the two slots are full. A full inventory makes walk-over pickup a no-op. Number keys
-select owned slots, Q throws the active instance forward while inheriting the player's current movement velocity, 0
-holsters the current weapon, R reloads, and mouse click fires while pointer lock is active. Mobile users have Fire,
-Equip, and Reload actions. Held weapons include a procedural right forearm, palm, and thumb. All four procedural gun
-models use a shared near-black finish across their bodies, barrels, sights, and accent details. Each weapon has a
-distinct firing profile. The pistol, machine gun, and sniper fire on the live reticule ray with no random
-projectile cone; only the shotgun keeps an inherent seeded pellet spread. Tracer lines, impact sparks, floating pickup labels,
-recoil, ammo, reload state, and a two-slot HUD make the loop visible. Shot raycasts stay on authored
-scene roots rather than traversing the streamed city, and malformed render subtrees fall back to a miss. Hitscan shots
-have no weapon-specific distance cap: they continue to the first render surface, while a miss tracer uses only the
-camera's finite far plane to keep its presentation geometry finite.
-The held model follows the seat-view state separately from the firing-control state, so it remains visible
-in the right hand before pointer lock is acquired.
-The camera is part of the rendered scene graph so its attached view-model meshes are included in the render.
-The live reticule presentation function feeds both the CSS sway and the weapon's aim NDC; the weapon is lowered
-on Y and continuously rotates toward the moving reticule dot. Reloading uses one generic snappy pose for every
-weapon: the muzzle pitches skyward, pauses for a small clip-change nudge, then returns to the reticule.
-Reload duration is not a per-weapon tuning constant. `weapons.ts` derives total trigger-pull damage as
-`damage × pellets`; a pull at or above 100 damage uses individual round reloads, while a lower-damage pull uses a
-full-clip reload. Clip timing is `0.01 × damage × magazine size`, so the pistol takes `28 × 12 × 0.01 = 3.36 s`
-and the machine gun takes `12 × 30 × 0.01 = 3.6 s` for a magazine. Round timing is `0.01 × total trigger-pull
-damage` per inserted bullet or shell: the sniper takes `1 s` per 100-damage bullet, and the shotgun's eight
-16-damage pellets total 128 damage, so it takes `1.28 s` per shell. Round reloads insert one reserve round at each
-interval until the magazine is full; new weapon definitions inherit this classification and formula by default.
-The pose lifts during the first 10% of that interval, keeps the gun raised for the middle 80% while the reload work
-plays, and recentres during the final 10%. For round reloads, the first lift is held across every shell/bullet interval;
-the final 10% recenter only starts after the last round or an interruption. Round reloads are interruptible between
-rounds: holding fire shoots as soon as the next bullet or shell is chambered and cancels the pending next insertion.
-The final 0.12 seconds of each reload interval gives the held gun a brief upward insertion impulse; the shell/bullet or
-full clip is committed when that impulse ends, so the UI and chamber timing finish together. Sprinting interrupts either
-reload mode immediately: a clip reload leaves its magazine unchanged, while a round reload keeps any shells/bullets already
-inserted. The reload presentation and HUD state clear with the interruption, and the interruption is included in weapon
-telemetry. Holding fire still interrupts round reloads only after a chambered round; clip reloads remain atomic for firing.
-The shared camera-motion damper also owns the held viewmodel posture: standing uses a right-hand hip-fire offset,
-crouching uses an intermediate raised offset, and explicit zoom smoothly centres and raises the weapon fully onto
-the optical axis using the original crouched sight height, preserving existing ironsight and sniper-scope alignment.
-The weapon continues to aim and fire through the same reticule ray. A double-tap movement sprint clears the persistent
-right-mouse zoom toggle before acceleration begins.
-Each procedural weapon now carries its own top-rail sight profile: an open two-ear rear notch, a forward post, and
-a small black bead make the sight picture readable when crouched and zoomed. Those meshes are camera children
-and inherit the same reticule aim quaternion, so the sights do not introduce a second or divergent firing direction.
-The receivers now stay low and the sight rails are split to leave a clear center channel. The pistol's rear detail and
-machine gun's former full-width top accent sit off-axis, so neither covers the centered reticule.
-The sniper now adds a real camera-child scope tube, rings, tinted glass disk, and lens anchor. While the sniper is
-equipped and explicit zoom is active, `SniperScopeLensShader` runs after Bokeh and samples a clean world-only render
-texture inside the projected glass. A hidden secondary camera aims through the live reticule with a true 5× tighter
-FOV and renders only a square 2×-supersampled lens target, so bullet-hole decals receive fresh geometry pixels instead
-of a stretched viewport crop. Floating sprites and weapon/UI overlays are excluded while the bullet-hole root remains
-visible. Catmull–Rom bicubic reconstruction, a feathered circular mask, restrained glass colour split, and diagonal
-cyan X marks keep the optic legible, then `OutputPass` performs normal tone mapping.
-Right-mouse zoom remains independent from left-Command hold-breath. Because the mask is projected from the actual scope anchor after
-viewmodel transforms, it follows sway, recoil, reload, and reticule-relative aim while the weapon ray remains authoritative.
-The scope tube is open-ended at the rear and the glass sits just ahead of its rim; this avoids a capped-cylinder face
-covering the lens with a black panel.
-The optic assembly is authored at a 0.11979078 m local Y height over the rifle sight axis, so its projected glass centre stays
-on the reticle while the shared crouch and zoom viewmodel transforms remain centralized.
-Render hits attach a typed `lastWeaponHit` record to the struck object for local experimentation; this is
-not an authoritative enemy, damage, replay, or multiplayer system.
+The combat runtime keeps the visual-table weapon meshes, shared first-person camera/viewmodel/reticule path, recoil,
+tracers, impacts, bullet holes, reload poses, sniper scope, and spatial Web Audio. It includes a longer, dense white
+muzzle gunpowder plume with world-space velocity inheritance and pooled diffusion, plus separate thermal wisps driven
+by Celsius barrel glow. Barrels use the visual-table temperature thresholds and exponential cooling curve, while the
+powder plume uses the parametric-guns eased expansion and full-lifetime fade. Shot audio includes muzzle, crack, tail,
+and listener-relative bullet pass-by layers.
+
+The scene adds a deterministic red simulant target. It spawns beyond the initial player position, charges until close,
+damages the player's shield/health at contact range, accepts weapon-ray damage, hides on defeat, and respawns after a
+short delay. This target is local presentation state for gun testing; it is not authoritative game, replay, or multiplayer
+state. The parametric-guns movement, traversal, acceleration, and wall/vault physics remain the active movement path.
+
+The fixed roster is covered by `apps/web/src/scene/weapons.test.ts`, including six-key mapping, reload formulas,
+spread, pickup placement, audio profiles, Celsius cooling, and smoke-pool clearing. Browser rendering and audio acceptance
+remain pending because this checkpoint does not open a second browser session.
 
 ## Penthouse armory chart
 
 The penthouse west wall now carries a readable `WeaponDamageAmmoChartSign`. Its chart is generated from
-`WEAPON_CHART_ENTRIES`, which is derived from the four playable weapon definitions, so it stays aligned with the
+`WEAPON_CHART_ENTRIES`, which is derived from the six fixed weapon definitions, so it stays aligned with the
 pickup and loadout data. Each row shows the weapon name, damage per projectile, pellets per shot, loaded magazine,
 reserve ammunition, and total starting rounds. The footer defines the ammo order as `loaded / reserve` and calls out
 that shotgun damage is per pellet rather than per shell.
@@ -670,7 +620,7 @@ on, while the outer circle remains visible regardless of the lock state. Sprint 
 
 Focused coverage lives in `apps/web/src/scene/weapons.test.ts`, `apps/web/src/scene/reticle-aim.test.ts`, and
 `apps/web/src/scene/sniper-scope.test.ts`.
-The tests cover the four profiles, separated front/rear iron-sight anchors, same-seed placement stability, seed
+The tests cover the six fixed profiles, separated front/rear iron-sight anchors, same-seed placement stability, seed
 variation, reserved-area exclusion, rotated-obstacle clearance, normalized reload pose timing, damage-scaled recoil,
 the signed reticle-following camera impulse, the shared moving-dot NDC projection, and the centralized crouch
 viewmodel posture. The current local evidence is the focused recoil/weapon/reticle Vitest set (34 tests), strict
@@ -889,7 +839,11 @@ path. This prevents the weapon sights from drifting away from the reticule when 
 ordinary weapons still use the deterministic live ray with no random projectile cone; only the shotgun has inherent
 seeded pellet spread.
 
-## Generic parametric gun inventory
+## Generic parametric gun inventory (historical lane)
+
+The following section records the earlier parametric-guns experiment. It is not active in the 8 August checkpoint:
+the runtime now uses the fixed six-weapon roster and six slots described above. The resolver and instance details remain
+useful historical context for that discarded experiment only.
 
 Gun profiles are resolved from `GunPrimitivesV1` by the pure `v1` resolver. The resolver exposes canonical group,
 burst, magazine, inventory, cadence, reload, handling, recoil, movement, and heat inputs, then hashes the resolved
