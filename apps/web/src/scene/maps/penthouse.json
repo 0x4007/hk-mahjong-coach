@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "floor": {
+    "width": 48,
+    "depth": 48,
+    "rotationDegrees": 0
+  },
+  "entities": []
+}

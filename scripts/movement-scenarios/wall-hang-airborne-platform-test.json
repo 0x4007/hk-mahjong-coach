@@ -1,0 +1,37 @@
+{
+  "name": "wall-hang-airborne-platform-test",
+  "description": "Catch the upper face of a high platform during a jump, then climb onto it.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 10,
+  "start": {
+    "position": [0, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 3.12, -4],
+      "halfExtents": [0.75, 0.08, 0.5]
+    }
+  ],
+  "frames": [
+    {
+      "duration": 0.3,
+      "forward": 1,
+      "sprint": true,
+      "jump": true,
+      "label": "jump-to-platform"
+    },
+    {
+      "duration": 1.0,
+      "forward": 1,
+      "label": "climb-onto-platform"
+    }
+  ]
+}

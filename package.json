@@ -9,7 +9,7 @@
     "pnpm": ">=11 <12"
   },
   "scripts": {
-    "dev": "pnpm build:packages && concurrently --kill-others --names server,web \"pnpm --filter @hk-mahjong/server dev\" \"pnpm --filter @hk-mahjong/web dev\"",
+    "dev": "concurrently --kill-others --names server,web \"pnpm --filter @hk-mahjong/server dev\" \"pnpm --filter @hk-mahjong/web dev\"",
     "build:packages": "pnpm --filter \"./packages/**\" --workspace-concurrency=1 run build",
     "build": "pnpm build:packages && pnpm --filter @hk-mahjong/cli build && pnpm --filter @hk-mahjong/web build && pnpm --filter @hk-mahjong/server build",
     "start": "node apps/server/dist/index.js",
@@ -22,6 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "test:sim:fast": "tsx scripts/simulate.ts 500",
     "test:sim": "tsx scripts/simulate.ts 10000",
+    "test:movement:sim": "tsx scripts/movement-simulate.ts",
+    "hmr": "tsx scripts/hmr.ts",
     "test:e2e": "playwright test",
     "smoke": "tsx scripts/smoke.ts",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:coverage && pnpm test:sim:fast && pnpm build && pnpm smoke"

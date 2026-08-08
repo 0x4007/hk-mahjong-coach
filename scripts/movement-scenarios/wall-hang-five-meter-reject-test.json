@@ -1,0 +1,32 @@
+{
+  "name": "wall-hang-five-meter-reject-test",
+  "description": "A normal jump cannot catch the top of a five-metre wall.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 10,
+  "start": {
+    "position": [0, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 2.5, -4],
+      "halfExtents": [0.5, 2.5, 0.5]
+    }
+  ],
+  "frames": [
+    {
+      "duration": 1.0,
+      "forward": 1,
+      "sprint": true,
+      "jump": true,
+      "label": "jump-at-five-metre-wall"
+    }
+  ]
+}

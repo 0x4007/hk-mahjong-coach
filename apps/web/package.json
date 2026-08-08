@@ -8,6 +8,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "0.19.3",
     "@hk-mahjong/core": "workspace:*",
     "@hk-mahjong/protocol": "workspace:*",
     "@hk-mahjong/tile-ui": "workspace:*",

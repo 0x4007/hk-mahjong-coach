@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { startTestBus } from "./test-bus.js";
 
 const HOST = "0.0.0.0";
 const PORT = 4173;
@@ -39,5 +40,14 @@ const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
 
 if (isMainModule) {
   const server = await buildServer();
-  await server.listen({ host: HOST, port: PORT });
+  const testBus = await startTestBus();
+  server.addHook("onClose", () => {
+    testBus.stop();
+  });
+  try {
+    await server.listen({ host: HOST, port: PORT });
+  } catch (error) {
+    testBus.stop();
+    throw error;
+  }
 }
