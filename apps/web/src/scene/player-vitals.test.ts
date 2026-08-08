@@ -132,7 +132,7 @@ describe("player vitals model", () => {
       O2_WALKING_RECOVERY_PER_SECOND * (1 - O2_TROT_SPEED_BLEND) -
       O2_SPRINT_DRAIN_PER_SECOND * O2_TROT_SPEED_BLEND;
 
-    expect(O2_TROT_SPEED_BLEND).toBeCloseTo(0.5, 8);
+    expect(O2_TROT_SPEED_BLEND).toBeCloseTo(0.25, 8);
     expect(expectedRecovery).toBeGreaterThan(0);
     expect(jogging.o2).toBeCloseTo(depleted.o2 + expectedRecovery, 8);
   });

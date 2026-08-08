@@ -24,6 +24,7 @@ import {
   CAMERA_VIEWMODEL_CROUCHING_OFFSET,
   CAMERA_VIEWMODEL_STANDING_OFFSET,
   createCameraMotionDamper,
+  resolveCameraAccelerationPitch,
   resolveCameraGaitAngularFrequency,
   resolveCameraGaitAmount,
   resolveCameraGaitOffsets,
@@ -256,6 +257,25 @@ describe("camera motion damper", () => {
     expect(landingFrame.headBobPitch).toBeGreaterThan(0);
     expect(Math.abs(landingFrame.headBobPitch)).toBeGreaterThan(Math.abs(jumpFrame.headBobPitch));
     expect(Math.abs(landingFrame.headBobPitch)).toBeLessThanOrEqual(CAMERA_WEIGHT_PITCH_MAX);
+  });
+
+  it("matches the lateral shift with a damped front/back acceleration pitch", () => {
+    const accelerating = createCameraMotionDamper();
+    const braking = createCameraMotionDamper();
+    const forwardFrame = accelerating.update({ ...idleInput, forwardAcceleration: 60 });
+    const brakingFrame = braking.update({ ...idleInput, forwardAcceleration: -60 });
+
+    expect(resolveCameraAccelerationPitch(60)).toBeLessThan(0);
+    expect(resolveCameraAccelerationPitch(-60)).toBeGreaterThan(0);
+    expect(forwardFrame.headBobPitch).toBeLessThan(0);
+    expect(brakingFrame.headBobPitch).toBeGreaterThan(0);
+    expect(Math.abs(forwardFrame.headBobPitch)).toBeCloseTo(Math.abs(brakingFrame.headBobPitch), 8);
+
+    let settled = forwardFrame;
+    for (let index = 0; index < 180; index += 1) {
+      settled = accelerating.update(idleInput);
+    }
+    expect(Math.abs(settled.headBobPitch)).toBeLessThan(Math.abs(forwardFrame.headBobPitch) * 0.2);
   });
 
   it("keeps gait bob on the lateral and depth axes", () => {

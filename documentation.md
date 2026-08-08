@@ -197,7 +197,7 @@
   default-fog frame on a tunnel and keeps debug mode as the write path; the read is cache-busted, no-store,
   and bounded so a stalled tunnel still falls back to the normal scene.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.00 m eye height.
-  Standing movement starts at the 2×-base trot (6.8 m/s, 24.48 km/h) and slowly regenerates O₂. Shift keeps the
+  Standing movement starts at the 1.5×-base trot (5.1 m/s, 18.36 km/h) and slowly regenerates O₂. Shift keeps the
   existing half-speed crouch movement and enables an internal walk-mode toggle; that toggle applies only after the
   player is upright, where WASD/arrow input uses the 1×-base walk speed (3.4 m/s). Sprint clears the hidden toggle.
   Space keeps the same quick airtime while doubling the jump apex. Double-tapping any WASD
@@ -388,12 +388,18 @@ deceleration pitches down through the same bounded spring. Gait lateral/depth of
 render matrix only, so Rapier or the deterministic fallback remains authoritative for the player position.
 Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
+The first front/back inertia pass uses the controller's forward velocity change before collision resolution. It feeds
+that acceleration into the same damped target/response pair as the left/right sprint roll: forward acceleration gives
+a small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
+roll magnitude. Wall-resolved delta-v is not yet included in this small pass; it remains the next collision-specific
+input to the same centralized damper.
+
 ## Oxygen vital and breathing response
 
 The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
 `apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
-Standing idle restores 12 points per second. The normal standing trot is exactly twice the 3.4 m/s base (6.8 m/s,
-24.48 km/h), maps halfway between walk and sprint, and recovers about 2.33 O₂ points per second while moving.
+Standing idle restores 12 points per second. The normal standing trot is exactly 1.5× the 3.4 m/s base (5.1 m/s,
+18.36 km/h), maps one quarter of the way from walk to sprint, and recovers about 5.17 O₂ points per second while moving.
 Crouch walking keeps the reserve flat and does not recharge it while movement is active. Sprinting drains 3.33 points
 per second (about 30 seconds from full). A full jump and each transition from
 crouch to standing costs 5 points, so roughly 20
@@ -408,10 +414,10 @@ O₂ is an action reserve. A full jump and a stand-up transition each require th
 cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
 balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
 The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. The normal standing
-speed is the 2×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
-frame's drain is affordable. When it is not (including at 0%), the controller stays at the same 2×-base trot rather
-than stopping movement. The trot's midpoint walk-to-sprint blend combines the configured walking recovery (+8/s) and
-sprint drain (-3.33/s) into about +2.33 O₂/s while moving (subject to the existing recovery delay after sprinting).
+speed is the 1.5×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
+frame's drain is affordable. When it is not (including at 0%), the controller stays at the same 1.5×-base trot rather
+than stopping movement. The trot's quarter walk-to-sprint blend combines the configured walking recovery (+8/s) and
+sprint drain (-3.33/s) into about +5.17 O₂/s while moving (subject to the existing recovery delay after sprinting).
 Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
 stops when the reserve reaches zero.
 
@@ -695,9 +701,9 @@ authority; it only keeps the viewmodel out of the way during parkour movement. C
 
 ## Reload movement
 
-Reloading caps a full-sprint request at the existing 2×-base “trot”. Normal standing movement already uses that trot,
+Reloading caps a full-sprint request at the existing 1.5×-base “trot”. Normal standing movement already uses that trot,
 and crouch movement keeps its slower walk speed. Full sprint resumes only when the next O₂ drain slice is affordable;
-if the reserve cannot pay that slice, movement stays at the 2×-base trot. Crouch speed remains the higher-priority
+if the reserve cannot pay that slice, movement stays at the 1.5×-base trot. Crouch speed remains the higher-priority
 posture limit.
 
 When development debug mode is enabled (`?debug=1`), the browser shows a small bottom-left `SPD` readout in metres

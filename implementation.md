@@ -24,6 +24,21 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   the 1×-base walk speed (3.4 m/s). Accepted sprint transitions clear it before applying the 3× (10.2 m/s) sprint.
   The toggle is intentionally absent from visual snapshots and HUD state.
 
+## 2026-08-07 — One-and-a-half-times-base trot
+
+- Standing trot now uses 1.5× the 3.4 m/s base: 5.1 m/s (18.36 km/h). The derived walk-to-sprint O₂ blend is 0.25,
+  so moving trot recovers about 5.17 O₂ points per second after any sprint recovery delay.
+- Crouch walk remains unchanged, and sprint remains 3× base (10.2 m/s).
+
+## 2026-08-07 — Front/back acceleration pitch
+
+- The shared first-person damper now receives the controller's forward velocity change and applies a short,
+  bounded pitch response through the same target/response damping used by the existing left/right sprint roll.
+  Forward acceleration pitches the view up; braking pitches it down. The response reaches the existing full-sprint
+  roll magnitude at a 60 m/s² reference acceleration, so it is intentionally simple and easy to tune.
+- The input is derived before physics resolves a wall contact. Wall-resolved horizontal delta-v is still reserved for
+  the next collision-impact pass; camera, viewmodel, reticule, and aim ray remain on the centralized output.
+
 ## 2026-08-07 — Two-times-base trot and slow O₂ recovery
 
 - Standing trot is now exactly 2× the 3.4 m/s base: 6.8 m/s (24.48 km/h). Its shared movement telemetry maps halfway

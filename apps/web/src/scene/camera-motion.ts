@@ -1,13 +1,12 @@
 import { O2_BRACED_STABILITY_FACTOR, resolveO2Stability } from "./o2-stability.js";
-import {
-  PLAYER_MOVE_SPEED_METERS_PER_SECOND,
-  PLAYER_WALK_SPEED_RATIO,
-} from "./world-scale.js";
+import { PLAYER_MOVE_SPEED_METERS_PER_SECOND, PLAYER_WALK_SPEED_RATIO } from "./world-scale.js";
 
 export interface CameraMotionUpdateInput {
   readonly deltaSeconds: number;
   /** Horizontal input, where positive values mean movement to the right. */
   readonly lateralInput: number;
+  /** Forward acceleration, where positive values mean accelerating toward the view direction. */
+  readonly forwardAcceleration?: number;
   readonly movementMagnitude: number;
   readonly movementSpeedRatio: number;
   /** Current oxygen ratio, where 1 is rested and 0 is out of breath. */
@@ -51,7 +50,7 @@ export interface CameraMotionOffsets {
   readonly headBobLateral: number;
   /** Local forward/back gait displacement in metres. */
   readonly headBobDepth: number;
-  /** Short-lived pitch response to take-off and landing acceleration. */
+  /** Short-lived pitch response to take-off, landing, and front/back acceleration. */
   readonly headBobPitch: number;
   /** Short-lived vertical weight response in metres. */
   readonly weightShift: number;
@@ -119,6 +118,9 @@ export const CAMERA_SHIFT_WALK = ((0.9 * Math.PI) / 180) * CAMERA_SHIFT_WEIGHT_M
 export const CAMERA_SHIFT_SPRINT = ((1.8 * Math.PI) / 180) * CAMERA_SHIFT_WEIGHT_MULTIPLIER;
 export const CAMERA_SHIFT_TARGET_DAMPING = 4;
 export const CAMERA_SHIFT_DAMPING = 6;
+/** Forward acceleration that reaches the same maximum response as a full sprint roll. */
+export const CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED = 60;
+export const CAMERA_ACCELERATION_PITCH_MAX = CAMERA_SHIFT_SPRINT;
 export const CAMERA_BOB_AMPLITUDE = 0.025;
 export const CAMERA_BOB_LATERAL_AMPLITUDE = 0.012;
 export const CAMERA_BOB_DEPTH_AMPLITUDE = 0.008;
@@ -309,6 +311,19 @@ export const resolveCameraGaitOffsets = (
     headBobLateral: stride * CAMERA_BOB_LATERAL_AMPLITUDE * safeAmount,
     headBobDepth: Math.sin(safePhase * 2) * CAMERA_BOB_DEPTH_AMPLITUDE * safeAmount,
   };
+};
+
+/**
+ * Convert front/back acceleration into the same bounded presentation response
+ * used by the lateral sprint shift. Positive forward acceleration pitches up;
+ * braking pitches down.
+ */
+export const resolveCameraAccelerationPitch = (forwardAcceleration: number): number => {
+  const acceleration = Number.isFinite(forwardAcceleration) ? forwardAcceleration : 0;
+  return (
+    -clamp(acceleration / CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED, -1, 1) *
+    CAMERA_ACCELERATION_PITCH_MAX
+  );
 };
 
 export interface CameraWeaponShotImpulse {
@@ -503,6 +518,8 @@ const createDefaultOffsets = (): CameraMotionOffsets => ({
 export const createCameraMotionDamper = (): CameraMotionDamper => {
   let shiftRoll = 0;
   let shiftTarget = 0;
+  let accelerationPitch = 0;
+  let accelerationPitchTarget = 0;
   let bobPhase = 0;
   let bobAmount = 0;
   let breathingPhase = 0;
@@ -529,6 +546,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   const clearShift = (): void => {
     shiftRoll = 0;
     shiftTarget = 0;
+    accelerationPitch = 0;
+    accelerationPitchTarget = 0;
     lastLateralDirection = 0;
     lateralIdleTime = Number.POSITIVE_INFINITY;
     offsets = {
@@ -557,6 +576,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   const reset = (): void => {
     shiftRoll = 0;
     shiftTarget = 0;
+    accelerationPitch = 0;
+    accelerationPitchTarget = 0;
     bobPhase = 0;
     bobAmount = 0;
     breathingPhase = 0;
@@ -629,6 +650,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       traversalTransitionElapsed += deltaSeconds;
     }
     const lateralInput = clamp(input.lateralInput, -1, 1);
+    const forwardAcceleration = Number.isFinite(input.forwardAcceleration)
+      ? (input.forwardAcceleration ?? 0)
+      : 0;
     const movementMagnitude = clamp(input.movementMagnitude, 0, 1);
     const movementSpeedRatio = clamp(input.movementSpeedRatio, 0, 1);
     const oxygenRatio = clamp(input.oxygenRatio, 0, 1);
@@ -670,6 +694,22 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
 
     shiftTarget = damp(shiftTarget, 0, CAMERA_SHIFT_TARGET_DAMPING, deltaSeconds);
     shiftRoll = damp(shiftRoll, shiftTarget, CAMERA_SHIFT_DAMPING, deltaSeconds);
+
+    if (input.shiftEnabled && Math.abs(forwardAcceleration) > Number.EPSILON) {
+      accelerationPitchTarget = resolveCameraAccelerationPitch(forwardAcceleration);
+    }
+    accelerationPitchTarget = damp(
+      accelerationPitchTarget,
+      0,
+      CAMERA_SHIFT_TARGET_DAMPING,
+      deltaSeconds,
+    );
+    accelerationPitch = damp(
+      accelerationPitch,
+      accelerationPitchTarget,
+      CAMERA_SHIFT_DAMPING,
+      deltaSeconds,
+    );
 
     const bobTarget = input.bobEnabled
       ? resolveCameraGaitAmount(movementMagnitude, movementSpeedRatio, input.crouching)
@@ -718,11 +758,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     weightVelocity *= Math.exp(-CAMERA_WEIGHT_DAMPING * deltaSeconds);
     weightShift += weightVelocity * deltaSeconds;
     weightShift = clamp(weightShift, -0.45, 0.22);
+    const weightPitch = -(
+      weightVelocity * CAMERA_WEIGHT_PITCH_VELOCITY_SCALE +
+      weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
+    );
     const headBobPitch = clamp(
-      -(
-        weightVelocity * CAMERA_WEIGHT_PITCH_VELOCITY_SCALE +
-        weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
-      ),
+      weightPitch + accelerationPitch,
       -CAMERA_WEIGHT_PITCH_MAX,
       CAMERA_WEIGHT_PITCH_MAX,
     );

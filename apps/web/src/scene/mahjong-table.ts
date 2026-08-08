@@ -1396,7 +1396,7 @@ export interface PlayerMovementSpeedInput {
 /**
  * Resolve the grounded movement multiplier.
  *
- * Standing movement defaults to the 2×-base trot. Crouching always keeps its
+ * Standing movement defaults to the 1.5×-base trot. Crouching always keeps its
  * own slower posture speed; the hidden walking toggle only applies while the
  * player is upright. A sprint request can still reach full sprint when its O₂
  * drain is affordable, and reloading caps a sprint request at the same trot.
@@ -12518,6 +12518,7 @@ export const createMahjongTableScene = (
       const isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
       const desiredForward = isWallTraversalActive ? 0 : forward * inputScale * currentMoveSpeed;
       const desiredStrafe = isWallTraversalActive ? 0 : right * inputScale * currentMoveSpeed;
+      let forwardAcceleration = 0;
       const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
       const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
       movementMagnitudeActivity = movementMagnitude;
@@ -12545,8 +12546,11 @@ export const createMahjongTableScene = (
         forwardVelocity = 0;
         strafeVelocity = 0;
       } else {
+        const previousForwardVelocity = forwardVelocity;
         forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
         strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
+        forwardAcceleration =
+          (forwardVelocity - previousForwardVelocity) / Math.max(delta, 1 / 120);
       }
       const movementStart = camera.position.clone();
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(forwardVelocity) > 0.001) {
@@ -13056,6 +13060,7 @@ export const createMahjongTableScene = (
       applyFirstPersonCameraMotion(baseCameraY, {
         deltaSeconds: delta,
         lateralInput: debugCameraShiftEnabled ? right : 0,
+        forwardAcceleration: debugCameraShiftEnabled ? forwardAcceleration : 0,
         movementMagnitude,
         movementSpeedRatio,
         oxygenRatio: playerVitals.o2 / PLAYER_MAX_O2,

@@ -45,17 +45,17 @@ describe("world measurement contract", () => {
     expect(PLAYER_STANDING_EYE_HEIGHT).toBeGreaterThan(PLAYER_CAPSULE_CENTER_HEIGHT);
   });
 
-  it("pins the two-times-base trot and three-times-base sprint speeds", () => {
+  it("pins the one-and-a-half-times-base trot and three-times-base sprint speeds", () => {
     expect(PLAYER_MOVE_SPEED_METERS_PER_SECOND).toBe(3.4);
     expect(PLAYER_WALK_MULTIPLIER).toBe(1);
-    expect(PLAYER_TROT_MULTIPLIER).toBe(2);
-    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBeCloseTo(6.8, 8);
-    expect(PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(24.48, 8);
+    expect(PLAYER_TROT_MULTIPLIER).toBe(1.5);
+    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBeCloseTo(5.1, 8);
+    expect(PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(18.36, 8);
     expect(PLAYER_SPRINT_MULTIPLIER).toBe(3);
     expect(PLAYER_SPRINT_SPEED_METERS_PER_SECOND).toBeCloseTo(10.2, 8);
     expect(PLAYER_SPRINT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(36.72, 8);
     expect(PLAYER_WALK_SPEED_RATIO).toBeCloseTo(3.4 / 10.2, 8);
-    expect(PLAYER_TROT_LOCOMOTION_BLEND).toBeCloseTo(0.5, 8);
+    expect(PLAYER_TROT_LOCOMOTION_BLEND).toBeCloseTo(0.25, 8);
   });
 
   it("rejects non-finite conversions", () => {

@@ -96,7 +96,7 @@ class MemoryStorage implements Storage {
 }
 
 describe("player movement speed", () => {
-  it("defaults standing movement to the two-times-base trot and keeps crouch in walk mode", () => {
+  it("defaults standing movement to the 1.5-times-base trot and keeps crouch in walk mode", () => {
     const defaultStanding = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
       walking: false,
@@ -192,19 +192,19 @@ describe("player movement speed", () => {
     expect(sprintingReload).toBe(trot);
   });
 
-  it("keeps the two-times-base trot below the three-times-base sprint target", () => {
+  it("keeps the 1.5-times-base trot below the three-times-base sprint target", () => {
     const trotMultiplier = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
       sprinting: false,
       jogging: false,
       reloading: false,
     });
-    expect(PLAYER_TROT_MULTIPLIER).toBe(2);
+    expect(PLAYER_TROT_MULTIPLIER).toBe(1.5);
     expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBe(
       PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_TROT_MULTIPLIER,
     );
-    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBeCloseTo(6.8, 8);
-    expect(PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(24.48, 8);
+    expect(PLAYER_TROT_SPEED_METERS_PER_SECOND).toBeCloseTo(5.1, 8);
+    expect(PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR).toBeCloseTo(18.36, 8);
     expect(PLAYER_SPRINT_SPEED_METERS_PER_SECOND).toBe(
       PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_SPRINT_MULTIPLIER,
     );

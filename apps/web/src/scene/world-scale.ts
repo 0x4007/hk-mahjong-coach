@@ -47,8 +47,8 @@ export const PLAYER_CROUCH_EYE_HEIGHT = worldUnitsFromMeters(PLAYER_CROUCH_EYE_H
 export const PLAYER_MOVE_SPEED_METERS_PER_SECOND = 3.4;
 /** Upright walk mode uses the unscaled base movement speed. */
 export const PLAYER_WALK_MULTIPLIER = 1;
-/** Standing trot is exactly twice the base movement speed. */
-export const PLAYER_TROT_MULTIPLIER = 2;
+/** Standing trot is exactly one-and-a-half times the base movement speed. */
+export const PLAYER_TROT_MULTIPLIER = 1.5;
 export const PLAYER_TROT_SPEED_METERS_PER_SECOND =
   PLAYER_MOVE_SPEED_METERS_PER_SECOND * PLAYER_TROT_MULTIPLIER;
 export const PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR = PLAYER_TROT_SPEED_METERS_PER_SECOND * 3.6;
