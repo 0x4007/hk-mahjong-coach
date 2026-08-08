@@ -1,5 +1,8 @@
-import { PLAYER_MAX_HEALTH, PLAYER_MAX_SHIELD } from "./player-vitals.js";
-import { PLAYER_SPRINT_SPEED_METERS_PER_SECOND } from "./world-scale.js";
+import { O2_LANDING_BASE_COST, PLAYER_MAX_HEALTH, PLAYER_MAX_SHIELD } from "./player-vitals.js";
+import {
+  PLAYER_JUMP_SPEED_METERS_PER_SECOND,
+  PLAYER_SPRINT_SPEED_METERS_PER_SECOND,
+} from "./world-scale.js";
 
 export {
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
@@ -45,4 +48,21 @@ export const resolveImpactDamage = (decelerationMetersPerSecond: number): number
       (terminalSpeedSquared - safeSpeedSquared),
   );
   return PLAYER_MAX_IMPACT_DAMAGE * excessKineticEnergyRatio;
+};
+
+/**
+ * Resolve the O₂ charge for a landing from its downward speed.
+ *
+ * A landing is an energy event, so the charge follows v² rather than the
+ * frame-dependent acceleration used for presentation. The full jump's
+ * downward speed is the 10 O₂ reference point; a faster fall costs more and
+ * an easier drop costs less. Non-finite input is treated as no impact.
+ */
+export const resolveLandingO2Cost = (downwardSpeedMetersPerSecond: number): number => {
+  const downwardSpeed = normalizeDeceleration(downwardSpeedMetersPerSecond);
+  if (downwardSpeed <= 0) {
+    return 0;
+  }
+  const speedRatio = downwardSpeed / PLAYER_JUMP_SPEED_METERS_PER_SECOND;
+  return O2_LANDING_BASE_COST * speedRatio ** 2;
 };

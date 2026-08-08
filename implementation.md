@@ -17,6 +17,26 @@
 
 Milestone 5 — Persistence and replay repairs and acceptance.
 
+## 2026-08-08 — Sprint interrupts reload
+
+- Accepted sprint requests now call the weapon runtime's explicit reload interruption path. Clip reloads stop before their
+  atomic magazine commit, while round reloads preserve rounds already inserted; the raised reload presentation and HUD
+  `reloading` state clear immediately.
+- Interrupted operations record their elapsed reload interval in the existing weapon telemetry. A sprint request rejected
+  while standing from crouch leaves the reload active because no sprint was accepted.
+
+## 2026-08-08 — Landing exertion spends O₂ before impact damage
+
+- Added a pure landing-energy resolver. A landing at the full-jump downward speed costs 10 O₂ (the proposed 10% leg
+  effort), and other falls scale by the square of downward speed so a 2 m fall costs slightly more than a full jump
+  landing in the current world-gravity scale.
+- Physics and fallback landings now spend the resolved O₂ charge before applying the existing shield-then-health damage
+  path. A full reserve therefore absorbs the landing without health or shield loss; when O₂ is insufficient, the unpaid
+  remainder becomes ordinary impact damage. The camera landing impulse remains separate and continues to use its own
+  deceleration input.
+- Added pure regressions for the speed-to-energy mapping and reserve-overflow behavior. The live browser acceptance still
+  requires a manual traversal check in the existing session.
+
 ## 2026-08-07 — Hidden crouch walk-mode toggle
 
 - Crouching now synchronizes an internal, non-UI walking toggle across keyboard, touch, and traversal speed paths.
@@ -36,8 +56,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   bounded pitch response through the same target/response damping used by the existing left/right sprint roll.
   Forward acceleration pitches the view up; braking pitches it down. The response reaches the existing full-sprint
   roll magnitude at a 60 m/s² reference acceleration, so it is intentionally simple and easy to tune.
-- The input is derived before physics resolves a wall contact. Wall-resolved horizontal delta-v is still reserved for
-  the next collision-impact pass; camera, viewmodel, reticule, and aim ray remain on the centralized output.
+- The input now also receives one bounded front/back impulse when physics resolves a horizontal wall stop. Requested
+  and resolved horizontal velocity are compared, limited to the speed the player carried, projected onto camera-forward,
+  and sent through the same damper; repeated contact frames do not retrigger the impact. Side-impact roll remains a
+  later extension, while camera, viewmodel, reticule, and aim ray stay on the centralized output.
 
 ## 2026-08-07 — Two-times-base trot and slow O₂ recovery
 

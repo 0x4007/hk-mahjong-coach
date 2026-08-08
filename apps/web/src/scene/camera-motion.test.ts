@@ -267,6 +267,10 @@ describe("camera motion damper", () => {
 
     expect(resolveCameraAccelerationPitch(60)).toBeLessThan(0);
     expect(resolveCameraAccelerationPitch(-60)).toBeGreaterThan(0);
+    expect(resolveCameraAccelerationPitch(-600)).toBeCloseTo(
+      Math.abs(resolveCameraAccelerationPitch(60)),
+      8,
+    );
     expect(forwardFrame.headBobPitch).toBeLessThan(0);
     expect(brakingFrame.headBobPitch).toBeGreaterThan(0);
     expect(Math.abs(forwardFrame.headBobPitch)).toBeCloseTo(Math.abs(brakingFrame.headBobPitch), 8);

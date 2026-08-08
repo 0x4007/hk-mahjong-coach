@@ -391,8 +391,9 @@ Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 The first front/back inertia pass uses the controller's forward velocity change before collision resolution. It feeds
 that acceleration into the same damped target/response pair as the left/right sprint roll: forward acceleration gives
 a small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
-roll magnitude. Wall-resolved delta-v is not yet included in this small pass; it remains the next collision-specific
-input to the same centralized damper.
+roll magnitude. A horizontal wall stop now compares requested and resolved velocity, bounds the correction to the speed
+the player carried, projects it onto camera-forward, and sends one additional braking impulse through that same damper.
+Holding movement into the wall does not repeat the impulse every frame. Side-impact roll remains a later extension.
 
 ## Oxygen vital and breathing response
 
@@ -404,6 +405,14 @@ Crouch walking keeps the reserve flat and does not recharge it while movement is
 per second (about 30 seconds from full). A full jump and each transition from
 crouch to standing costs 5 points, so roughly 20
 consecutive full jumps empty the reserve.
+
+Landing is a separate leg-exertion event. A landing at the full-jump downward speed costs 10 O₂, and the charge follows
+the square of downward speed as a frame-rate-independent kinetic-energy proxy. With the current 48 m/s² gravity, a
+2 m fall is about 13.9 m/s and costs about 11 O₂. The live and fallback controllers use the measured maximum fall speed
+for this calculation. Landing O₂ is spent before impact damage: a sufficient reserve prevents shield/health loss, while
+any unpaid remainder follows the normal shield-then-health path. Landing exertion also uses the 0.25-second jump
+recovery delay. The camera dip is still resolved by the centralized camera damper from its separate landing deceleration
+input.
 
 Sprint recovery waits 1.5 seconds, recovery after crouch walking waits 0.5 seconds, and jump recovery waits 0.25
 seconds. These delays are stored in the pure state and recovery is integrated for the exact portion of a frame
@@ -522,12 +531,12 @@ until the scene is reset. After 3.5 seconds without a non-zero hit, the shield r
 second. The pure model lives in `apps/web/src/scene/player-vitals.ts` and is covered by focused Vitest
 regressions.
 
-The scene applies damage from collision delta-v rather than raw travel speed. A wall impact compares the
-requested horizontal velocity with the velocity Rapier resolves after contact; penetration correction cannot
-create more delta-v than the player carried into the wall. Sprint speed (10.2 m/s, exactly 36.72 km/h) and below
-is always harmless. Above that limit, a kinetic-energy-shaped km/h curve scales damage, reaching 200 damage
-at an approximate 200 km/h human terminal velocity. Landing damage uses the same curve on the downward
-velocity lost at impact, so a ledge fall whose downward speed stays at sprint speed or below does no damage.
+The scene applies wall damage from collision delta-v rather than raw travel speed. A wall impact compares the
+requested horizontal velocity with the velocity Rapier resolves after contact; penetration correction cannot create more
+delta-v than the player carried into the wall. Sprint speed (10.2 m/s, exactly 36.72 km/h) and below is always harmless.
+Above that limit, a kinetic-energy-shaped km/h curve scales wall damage, reaching 200 damage at an approximate 200 km/h
+human terminal velocity. Landings use the separate O₂ energy curve described above, so a fall can be harmless while the
+reserve is available and only the unpaid exertion becomes shield/health damage.
 In development (`?debug=1`),
 the Visual debug panel has `Simulate 25 damage` and `Reset vitals` controls so the recharge
 loop can be checked without arranging a traversal impact. The HUD exposes shield and health bars,
@@ -579,7 +588,10 @@ plays, and recentres during the final 10%. For round reloads, the first lift is 
 the final 10% recenter only starts after the last round or an interruption. Round reloads are interruptible between
 rounds: holding fire shoots as soon as the next bullet or shell is chambered and cancels the pending next insertion.
 The final 0.12 seconds of each reload interval gives the held gun a brief upward insertion impulse; the shell/bullet or
-full clip is committed when that impulse ends, so the UI and chamber timing finish together. Clip reloads remain atomic.
+full clip is committed when that impulse ends, so the UI and chamber timing finish together. Sprinting interrupts either
+reload mode immediately: a clip reload leaves its magazine unchanged, while a round reload keeps any shells/bullets already
+inserted. The reload presentation and HUD state clear with the interruption, and the interruption is included in weapon
+telemetry. Holding fire still interrupts round reloads only after a chambered round; clip reloads remain atomic for firing.
 The shared camera-motion damper also owns the held viewmodel posture: standing uses a right-hand hip-fire offset,
 crouching uses an intermediate raised offset, and explicit zoom smoothly centres and raises the weapon fully onto
 the optical axis using the original crouched sight height, preserving existing ironsight and sniper-scope alignment.
@@ -701,10 +713,10 @@ authority; it only keeps the viewmodel out of the way during parkour movement. C
 
 ## Reload movement
 
-Reloading caps a full-sprint request at the existing 1.5×-base “trot”. Normal standing movement already uses that trot,
-and crouch movement keeps its slower walk speed. Full sprint resumes only when the next O₂ drain slice is affordable;
-if the reserve cannot pay that slice, movement stays at the 1.5×-base trot. Crouch speed remains the higher-priority
-posture limit.
+Sprinting interrupts an active reload before the sprint speed check. A clip reload leaves its magazine unchanged; a round
+reload keeps any shells/bullets already inserted. The reload presentation and HUD state clear immediately, so the accepted sprint
+can use full speed on the next movement update. If O₂ cannot pay the sprint drain, the existing neutral jog fallback still applies.
+Crouch speed remains the higher-priority posture limit, and a failed crouch-to-stand transition does not interrupt the reload.
 
 When development debug mode is enabled (`?debug=1`), the browser shows a small bottom-left `SPD` readout in metres
 per second. It consumes the scene's damped horizontal velocity and is throttled to about 10 updates per second; on

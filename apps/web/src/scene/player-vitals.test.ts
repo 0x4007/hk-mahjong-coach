@@ -12,6 +12,8 @@ import {
   O2_IDLE_RECOVERY_PER_SECOND,
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_LANDING_BASE_COST,
+  O2_LANDING_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
   O2_TROT_SPEED_BLEND,
   O2_PROJECTILE_DAMAGE_FACTOR,
@@ -23,6 +25,7 @@ import {
   SHIELD_RECHARGE_RATE_PER_SECOND,
   applyPlayerDamage,
   applyPlayerO2Cost,
+  applyPlayerO2ImpactCost,
   applyPlayerProjectileO2Cost,
   canAffordPlayerO2Cost,
   createPlayerVitals,
@@ -148,6 +151,41 @@ describe("player vitals model", () => {
     expect(afterJump.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.95, 8);
     expect(next.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.9, 8);
     expect(afterJump.oxygenRecoveryDelaySeconds).toBe(O2_JUMP_RECOVERY_DELAY_SECONDS);
+  });
+
+  it("spends landing O₂ before carrying the unpaid impact into shields", () => {
+    const fullReserve = applyPlayerO2ImpactCost(
+      createPlayerVitals(),
+      O2_LANDING_BASE_COST,
+      O2_LANDING_RECOVERY_DELAY_SECONDS,
+    );
+    expect(fullReserve.oxygenSpent).toBe(O2_LANDING_BASE_COST);
+    expect(fullReserve.state.o2).toBe(PLAYER_MAX_O2 - O2_LANDING_BASE_COST);
+    expect(fullReserve.damage).toBe(0);
+    expect(fullReserve.state.shield).toBe(PLAYER_MAX_SHIELD);
+    expect(fullReserve.state.health).toBe(PLAYER_MAX_HEALTH);
+    expect(fullReserve.state.oxygenRecoveryDelaySeconds).toBe(O2_LANDING_RECOVERY_DELAY_SECONDS);
+
+    const lowReserve = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2 - 5);
+    const overflow = applyPlayerO2ImpactCost(
+      lowReserve,
+      O2_LANDING_BASE_COST,
+      O2_LANDING_RECOVERY_DELAY_SECONDS,
+    );
+    expect(overflow.oxygenSpent).toBe(5);
+    expect(overflow.state.o2).toBe(0);
+    expect(overflow.shieldDamage).toBe(O2_LANDING_BASE_COST - 5);
+    expect(overflow.healthDamage).toBe(0);
+
+    const emptyReserve = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2);
+    const healthOverflow = applyPlayerO2ImpactCost(
+      emptyReserve,
+      PLAYER_MAX_SHIELD + 25,
+      O2_LANDING_RECOVERY_DELAY_SECONDS,
+    );
+    expect(healthOverflow.oxygenSpent).toBe(0);
+    expect(healthOverflow.shieldDamage).toBe(PLAYER_MAX_SHIELD);
+    expect(healthOverflow.healthDamage).toBe(25);
   });
 
   it("derives the free mini-hop blend from standing recovery and the full jump charge", () => {

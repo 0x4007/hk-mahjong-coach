@@ -57,6 +57,12 @@ export const O2_CROUCH_WALK_RECOVERY_DELAY_SECONDS = 0.5;
 /** Delay before recovery starts after jumping. */
 export const O2_JUMP_RECOVERY_DELAY_SECONDS = 0.25;
 
+/** O₂ spent by a landing at the full-jump impact speed. */
+export const O2_LANDING_BASE_COST = PLAYER_MAX_O2 * 0.1;
+
+/** Delay before O₂ recovery starts after a landing exertion event. */
+export const O2_LANDING_RECOVERY_DELAY_SECONDS = O2_JUMP_RECOVERY_DELAY_SECONDS;
+
 /** Oxygen used per second while holding breath. */
 export const O2_HOLD_BREATH_DRAIN_PER_SECOND = 15;
 
@@ -112,6 +118,13 @@ export interface PlayerVitalsDamageResult {
   readonly healthDamage: number;
   readonly shieldBroken: boolean;
   readonly killed: boolean;
+}
+
+export interface PlayerVitalsO2ImpactResult extends PlayerVitalsDamageResult {
+  /** Requested O₂ charge before the reserve/overflow split. */
+  readonly oxygenCost: number;
+  /** O₂ actually spent; this is capped by the available reserve. */
+  readonly oxygenSpent: number;
 }
 
 const clampFinite = (value: number, min: number, max: number): number =>
@@ -219,6 +232,46 @@ export const applyPlayerO2Cost = (
     state.holdingBreath,
     state.holdBreathLocked,
   );
+};
+
+/**
+ * Spend O₂ for a physical exertion event, carrying any unpaid cost into the
+ * normal shield-then-health damage path. Discrete actions remain atomic via
+ * applyPlayerO2Cost; landings are deliberately allowed to spend a partial
+ * reserve before they hurt the player.
+ */
+export const applyPlayerO2ImpactCost = (
+  state: PlayerVitalsState,
+  oxygenCost: number,
+  recoveryDelaySeconds = 0,
+): PlayerVitalsO2ImpactResult => {
+  const cost = normalizeDamage(oxygenCost);
+  if (cost <= 0 || state.isDead) {
+    const damageResult = applyPlayerDamage(state, 0);
+    return {
+      ...damageResult,
+      oxygenCost: cost,
+      oxygenSpent: 0,
+    };
+  }
+
+  const oxygenSpent = Math.min(state.o2, cost);
+  const afterOxygen = makeState(
+    state.health,
+    state.shield,
+    state.o2 - oxygenSpent,
+    state.timeSinceDamage,
+    Math.max(state.oxygenRecoveryDelaySeconds, normalizeDelta(recoveryDelaySeconds)),
+    state.holdingBreath,
+    state.holdBreathLocked,
+  );
+  const overflowDamage = cost - oxygenSpent;
+  const damageResult = applyPlayerDamage(afterOxygen, overflowDamage);
+  return {
+    ...damageResult,
+    oxygenCost: cost,
+    oxygenSpent,
+  };
 };
 
 /**

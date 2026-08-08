@@ -39,6 +39,7 @@ import {
   resolveHumanEyePupilDiameter,
   resolveCrouchedStateAfterJump,
   resolveCrouchedStateAfterSprint,
+  shouldInterruptReloadForSprint,
   resolveJumpLaunchSpeed,
   resolveReticleZoomViewOffset,
   resolveWeaponShotReticleOffset,
@@ -418,6 +419,12 @@ describe("sprint posture", () => {
     expect(resolveCrouchedStateAfterSprint(true, true)).toBe(false);
     expect(resolveCrouchedStateAfterSprint(true, false)).toBe(true);
     expect(resolveCrouchedStateAfterSprint(false, true)).toBe(false);
+  });
+
+  it("interrupts reload only after sprint is accepted", () => {
+    expect(shouldInterruptReloadForSprint(true, true)).toBe(true);
+    expect(shouldInterruptReloadForSprint(true, false)).toBe(false);
+    expect(shouldInterruptReloadForSprint(false, true)).toBe(false);
   });
 });
 

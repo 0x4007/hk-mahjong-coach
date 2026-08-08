@@ -72,6 +72,7 @@ import {
 import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_LANDING_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
   O2_SPRINT_DRAIN_PER_SECOND,
   O2_STAND_COST,
@@ -80,6 +81,7 @@ import {
   SHIELD_RECHARGE_DELAY_SECONDS,
   applyPlayerDamage,
   applyPlayerO2Cost,
+  applyPlayerO2ImpactCost,
   applyPlayerProjectileO2Cost,
   canAffordPlayerO2Cost,
   createPlayerVitals,
@@ -94,6 +96,7 @@ import {
   PLAYER_SPRINT_MULTIPLIER as SPRINT_MULTIPLIER,
   PLAYER_WALK_SPEED_RATIO,
   resolveImpactDamage,
+  resolveLandingO2Cost,
 } from "./player-impact.js";
 import {
   PLAYER_CAPSULE_CENTER_HEIGHT,
@@ -241,6 +244,12 @@ export const resolveCrouchedStateAfterSprint = (
   isCrouched: boolean,
   sprintAccepted: boolean,
 ): boolean => (sprintAccepted ? false : isCrouched);
+
+/** Only an accepted sprint request may interrupt an active reload. */
+export const shouldInterruptReloadForSprint = (
+  isReloading: boolean,
+  sprintAccepted: boolean,
+): boolean => isReloading && sprintAccepted;
 
 export const VISUAL_SCENE_STATE_VERSION = 1 as const;
 
@@ -4362,6 +4371,7 @@ interface WeaponRuntime {
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
   readonly reload: () => void;
+  readonly interruptReload: () => void;
   readonly isReloading: () => boolean;
   readonly interact: () => void;
   readonly holster: () => void;
@@ -5751,6 +5761,28 @@ const createWeaponRuntime = (
     emitState(true);
   };
 
+  /** Cancel the active reload when sprinting takes priority over weapon handling. */
+  const interruptReload = (): void => {
+    const activeInstance = resolveActiveInstance();
+    const definition = activeInstance?.profile ?? null;
+    if (activeInstance === null || definition === null || !isReloadPresentationActive()) {
+      return;
+    }
+    if (reloadingSeconds > 0) {
+      recordActiveTelemetry({
+        type: "reload",
+        durationSeconds: Math.max(
+          0,
+          resolveReloadPresentationDuration(definition) - reloadingSeconds,
+        ),
+        interrupted: true,
+      });
+    }
+    reloadingSeconds = 0;
+    resetRoundReloadPresentation();
+    emitState(true);
+  };
+
   /**
    * Finish one reload operation. Clip weapons fill the magazine in one step;
    * high-damage weapons insert one bullet or shell and automatically continue
@@ -6449,6 +6481,7 @@ const createWeaponRuntime = (
     setFireHeld,
     fire: tryFire,
     reload,
+    interruptReload,
     isReloading: isReloadPresentationActive,
     interact,
     holster: holsterWeapon,
@@ -10423,6 +10456,7 @@ export const createMahjongTableScene = (
   let wallBracedAim = false;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
+  let wallImpactActive = false;
   const cameraMotion = createCameraMotionDamper();
   let touchMovementActive = false;
   let touchForward = 0;
@@ -10508,6 +10542,25 @@ export const createMahjongTableScene = (
       }
     }
     return result;
+  };
+  const applyLandingO2 = (downwardSpeed: number): void => {
+    const oxygenCost = resolveLandingO2Cost(downwardSpeed);
+    if (oxygenCost <= 0 || playerVitals.isDead) {
+      return;
+    }
+    const result = applyPlayerO2ImpactCost(
+      playerVitals,
+      oxygenCost,
+      O2_LANDING_RECOVERY_DELAY_SECONDS,
+    );
+    if (result.oxygenSpent <= 0 && result.damage <= 0) {
+      return;
+    }
+    playerVitals = result.state;
+    publishPlayerVitals(true);
+    if (result.killed) {
+      weaponRuntime?.recordDeath();
+    }
   };
   const spendPlayerO2 = (oxygenCost: number, recoveryDelaySeconds = 0): boolean => {
     if (playerVitals.isDead || oxygenCost > playerVitals.o2) {
@@ -10669,6 +10722,7 @@ export const createMahjongTableScene = (
   };
   const resetCameraMotion = (): void => {
     cameraMotion.reset();
+    wallImpactActive = false;
     camera.updateMatrix();
   };
   const movementKeys = MOVEMENT_KEY_CODES;
@@ -10725,6 +10779,9 @@ export const createMahjongTableScene = (
     if (isCrouched) {
       isSprinting = false;
       return;
+    }
+    if (shouldInterruptReloadForSprint(weaponRuntime?.isReloading() ?? false, sprintAccepted)) {
+      weaponRuntime?.interruptReload();
     }
     isSprinting = true;
     // Sprinting is a committed locomotion action: leave the persistent
@@ -12266,6 +12323,7 @@ export const createMahjongTableScene = (
   };
   const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
   const COLLISION_DAMAGE_COOLDOWN_SECONDS = 0.8;
+  const CAMERA_WALL_IMPACT_SPEED_THRESHOLD = 0.5;
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") {
       saveSceneState(true);
@@ -12545,6 +12603,7 @@ export const createMahjongTableScene = (
       if (isWallTraversalActive) {
         forwardVelocity = 0;
         strafeVelocity = 0;
+        wallImpactActive = false;
       } else {
         const previousForwardVelocity = forwardVelocity;
         forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
@@ -12679,7 +12738,7 @@ export const createMahjongTableScene = (
             y: verticalVelocity * delta,
             z: desiredHorizontalDelta.z,
           });
-          if (movement.collisions > 0 && impactDamageCooldown <= 0 && delta > 0) {
+          if (movement.collisions > 0 && delta > 0) {
             const requestedVelocity = {
               x: desiredHorizontalDelta.x / delta,
               z: desiredHorizontalDelta.z / delta,
@@ -12689,19 +12748,50 @@ export const createMahjongTableScene = (
               z: (movement.position.z - characterPosition.z) / delta,
             };
             const requestedSpeed = Math.hypot(requestedVelocity.x, requestedVelocity.z);
-            const velocityDrop = Math.hypot(
-              requestedVelocity.x - resolvedVelocity.x,
-              requestedVelocity.z - resolvedVelocity.z,
+            const velocityChange = {
+              x: resolvedVelocity.x - requestedVelocity.x,
+              z: resolvedVelocity.z - requestedVelocity.z,
+            };
+            const velocityChangeMagnitude = Math.hypot(velocityChange.x, velocityChange.z);
+            const boundedVelocityChangeMagnitude = Math.min(
+              requestedSpeed,
+              velocityChangeMagnitude,
             );
-            // Rapier may push a capsule back slightly while correcting contact
-            // penetration. Do not turn that correction into more delta-v than
-            // the player actually carried into the wall.
-            const horizontalDeceleration = Math.min(requestedSpeed, velocityDrop);
-            const collisionDamage = resolveImpactDamage(horizontalDeceleration);
-            if (collisionDamage > 0) {
-              damagePlayer(collisionDamage);
-              impactDamageCooldown = COLLISION_DAMAGE_COOLDOWN_SECONDS;
+            const velocityChangeScale =
+              velocityChangeMagnitude > Number.EPSILON
+                ? boundedVelocityChangeMagnitude / velocityChangeMagnitude
+                : 0;
+            const horizontalImpact =
+              boundedVelocityChangeMagnitude > CAMERA_WALL_IMPACT_SPEED_THRESHOLD;
+            if (horizontalImpact && !wallImpactActive && velocityChangeScale > 0) {
+              cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+              cameraMotionForward.y = 0;
+              if (cameraMotionForward.lengthSq() > 0.0001) {
+                cameraMotionForward.normalize();
+                const forwardVelocityChange =
+                  velocityChange.x * velocityChangeScale * cameraMotionForward.x +
+                  velocityChange.z * velocityChangeScale * cameraMotionForward.z;
+                forwardAcceleration += forwardVelocityChange / Math.max(delta, 1 / 120);
+              }
             }
+            wallImpactActive = horizontalImpact;
+            if (impactDamageCooldown <= 0) {
+              const velocityDrop = Math.hypot(
+                requestedVelocity.x - resolvedVelocity.x,
+                requestedVelocity.z - resolvedVelocity.z,
+              );
+              // Rapier may push a capsule back slightly while correcting contact
+              // penetration. Do not turn that correction into more delta-v than
+              // the player actually carried into the wall.
+              const horizontalDeceleration = Math.min(requestedSpeed, velocityDrop);
+              const collisionDamage = resolveImpactDamage(horizontalDeceleration);
+              if (collisionDamage > 0) {
+                damagePlayer(collisionDamage);
+                impactDamageCooldown = COLLISION_DAMAGE_COOLDOWN_SECONDS;
+              }
+            }
+          } else {
+            wallImpactActive = false;
           }
           knockImpactDelta = {
             x: desiredHorizontalDelta.x,
@@ -12904,10 +12994,7 @@ export const createMahjongTableScene = (
               downwardVelocity: landingVelocity,
               downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
             });
-            const fallDamage = resolveImpactDamage(maximumFallSpeed);
-            if (fallDamage > 0) {
-              damagePlayer(fallDamage);
-            }
+            applyLandingO2(maximumFallSpeed);
           }
           if (grounded) {
             maximumFallSpeed = 0;
@@ -13032,6 +13119,7 @@ export const createMahjongTableScene = (
                 downwardVelocity: landingVelocity,
                 downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
               });
+              applyLandingO2(maximumFallSpeed);
               maximumFallSpeed = 0;
             }
             verticalVelocity = 0;
