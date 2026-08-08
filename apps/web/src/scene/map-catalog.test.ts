@@ -20,6 +20,10 @@ import {
   DEBUGGING_TWO_RACK_LED_BAR_HEIGHT,
   DEBUGGING_TWO_RACK_LED_BAR_WIDTH,
   DEBUGGING_TWO_WORLD_BOUNDS,
+  WAREHOUSE_FOG_GENERATION,
+  WAREHOUSE_LENS_FLARE_GENERATION,
+  WAREHOUSE_LENS_FLARE_SPRITE_COUNT,
+  WAREHOUSE_LENS_FLARE_TEXTURE_SIZE,
 } from "./debugging-two-map.js";
 import { generateWeaponPickupsOnEdges, WEAPON_IDS } from "./weapons.js";
 
@@ -107,6 +111,9 @@ describe("visual map catalog", () => {
     expect(first.root.userData.physicsGeneration).toBe("warehouse-supported-piles-v5");
     expect(first.root.userData.boxSizeMeters).toBe(DEBUGGING_TWO_BOX_SIZE);
     expect(first.root.userData.boxGapMeters).toBe(DEBUGGING_TWO_BOX_GAP);
+    expect(first.root.userData.fogGeneration).toBe(WAREHOUSE_FOG_GENERATION);
+    expect(first.root.userData.lensFlareGeneration).toBe(WAREHOUSE_LENS_FLARE_GENERATION);
+    expect(first.root.userData.lensFlareSpriteCount).toBe(WAREHOUSE_LENS_FLARE_SPRITE_COUNT);
     expect(first.root.userData.boxCount).toBeGreaterThan(300);
     expect(first.root.userData.wallCount).toBeGreaterThanOrEqual(2);
     expect(first.root.userData.wallCrateCount).toBeGreaterThan(60);
@@ -117,7 +124,7 @@ describe("visual map catalog", () => {
       (child) => child.userData.warehouseWall === true,
     );
     expect(bakedWalls).toHaveLength(4);
-    expect(first.textures).toHaveLength(5);
+    expect(first.textures).toHaveLength(6);
     expect(first.textures.every((texture) => texture instanceof THREE.DataTexture)).toBe(true);
     expect(first.textures.map((texture) => texture.name)).toEqual([
       "WarehouseFloorLightMap:center",
@@ -125,10 +132,18 @@ describe("visual map catalog", () => {
       "WarehouseWallLightMap:south",
       "WarehouseWallLightMap:east",
       "WarehouseWallLightMap:west",
+      "WarehouseLensFlareSpriteTexture",
     ]);
-    expect(first.textures.every((texture) => texture.userData.bakedAreaLighting === true)).toBe(
-      true,
-    );
+    expect(
+      first.textures.slice(0, 5).every((texture) => texture.userData.bakedAreaLighting === true),
+    ).toBe(true);
+    const lensFlareTexture = first.textures[5];
+    expect(lensFlareTexture?.userData.lensFlare).toBe(true);
+    expect(lensFlareTexture?.userData.generation).toBe(WAREHOUSE_LENS_FLARE_GENERATION);
+    if (lensFlareTexture instanceof THREE.DataTexture) {
+      expect(lensFlareTexture.image.width).toBe(WAREHOUSE_LENS_FLARE_TEXTURE_SIZE);
+      expect(lensFlareTexture.image.height).toBe(WAREHOUSE_LENS_FLARE_TEXTURE_SIZE);
+    }
     expect(
       (bakedWalls ?? []).every((wall) => {
         if (!(wall instanceof THREE.Mesh)) {
@@ -199,8 +214,8 @@ describe("visual map catalog", () => {
       expect(ledSize.x).toBeCloseTo(DEBUGGING_TWO_RACK_LED_BAR_WIDTH, 5);
       expect(ledSize.y).toBeCloseTo(DEBUGGING_TWO_RACK_LED_BAR_HEIGHT, 5);
       expect(ledSize.z).toBeCloseTo(DEBUGGING_TWO_RACK_LED_BAR_DEPTH, 5);
-      expect(ledSize.x).toBeLessThan(0.1);
-      expect(ledSize.y).toBeGreaterThan(ledSize.x);
+      expect(ledSize.x).toBeGreaterThan(ledSize.y);
+      expect(ledSize.y).toBeLessThan(0.05);
     }
     const blinkingLeds =
       rackRoot?.children.filter((child) => child.userData.blinking === true) ?? [];
@@ -392,6 +407,33 @@ describe("visual map catalog", () => {
     expect(industrialLighting?.getObjectByName("WarehouseCentralSpotlightPool")).toBeInstanceOf(
       THREE.Mesh,
     );
+    const lensFlareRoot = firstScene.getObjectByName("WarehouseLensFlareSprites");
+    expect(lensFlareRoot?.userData.generation).toBe(WAREHOUSE_LENS_FLARE_GENERATION);
+    expect(lensFlareRoot?.userData.spriteCount).toBe(WAREHOUSE_LENS_FLARE_SPRITE_COUNT);
+    expect(lensFlareRoot?.children).toHaveLength(WAREHOUSE_LENS_FLARE_SPRITE_COUNT);
+    expect(
+      lensFlareRoot?.children.every(
+        (child) =>
+          child instanceof THREE.Sprite &&
+          child.userData.lensFlareSprite === true &&
+          child.userData.weaponRaycastIgnore === true &&
+          child.userData.dofIgnore === true &&
+          child.userData.fog === false &&
+          child.material instanceof THREE.SpriteMaterial &&
+          !child.material.fog &&
+          child.material.transparent &&
+          !child.material.depthWrite &&
+          child.material.depthTest &&
+          child.material.blending === THREE.AdditiveBlending &&
+          !child.material.toneMapped,
+      ),
+    ).toBe(true);
+    expect(
+      lensFlareRoot?.children.filter((child) => child.userData.element === "halo"),
+    ).toHaveLength(13);
+    expect(
+      lensFlareRoot?.children.filter((child) => child.userData.element === "streak"),
+    ).toHaveLength(13);
     const perimeterLights = firstScene.getObjectByName("WarehousePerimeterLights");
     expect(perimeterLights?.userData.generation).toBe("yellow-perimeter-leds-v1");
     const yellowPerimeterLeds = perimeterLights?.getObjectByName("WarehouseYellowPerimeterLEDs");
@@ -422,6 +464,7 @@ describe("visual map catalog", () => {
     expect(firstScene.fog).toBeInstanceOf(THREE.Fog);
     expect(firstScene.fog).toEqual(createWarehouseFog());
     if (firstScene.fog instanceof THREE.Fog) {
+      expect(firstScene.fog.name).toBe(WAREHOUSE_FOG_GENERATION);
       expect(firstScene.fog.color.getHex()).toBe(0x07131c);
       expect(firstScene.fog.near).toBe(10);
       expect(firstScene.fog.far).toBe(92);

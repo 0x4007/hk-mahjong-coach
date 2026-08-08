@@ -15,9 +15,18 @@ export const DEBUGGING_TWO_WORLD_BOUNDS = {
 export const WAREHOUSE_FOG_COLOR = 0x07131c;
 export const WAREHOUSE_FOG_NEAR = 10;
 export const WAREHOUSE_FOG_FAR = 92;
+export const WAREHOUSE_FOG_GENERATION = "warehouse-linear-fog-v1";
 
-export const createWarehouseFog = (): THREE.Fog =>
-  new THREE.Fog(WAREHOUSE_FOG_COLOR, WAREHOUSE_FOG_NEAR, WAREHOUSE_FOG_FAR);
+export const createWarehouseFog = (): THREE.Fog => {
+  const fog = new THREE.Fog(WAREHOUSE_FOG_COLOR, WAREHOUSE_FOG_NEAR, WAREHOUSE_FOG_FAR);
+  fog.name = WAREHOUSE_FOG_GENERATION;
+  return fog;
+};
+
+/** Shared generated flare mask used by the Warehouse's bright fixtures. */
+export const WAREHOUSE_LENS_FLARE_TEXTURE_SIZE = 64;
+export const WAREHOUSE_LENS_FLARE_GENERATION = "warehouse-lens-flare-sprites-v1";
+export const WAREHOUSE_LENS_FLARE_SPRITE_COUNT = 26;
 
 /** Every generated warehouse crate is one exact one-metre cube. */
 export const DEBUGGING_TWO_BOX_SIZE = 1;
@@ -71,14 +80,14 @@ const WAREHOUSE_RACK_BODY_SIZE = [0.84, 0.96, 0.8] as const;
 /** Number of larger status bars placed around each rack body. */
 export const DEBUGGING_TWO_RACK_LED_BARS_PER_RACK = 8;
 /** Width of one status bar along a rack face. */
-export const DEBUGGING_TWO_RACK_LED_BAR_WIDTH = 0.09;
+export const DEBUGGING_TWO_RACK_LED_BAR_WIDTH = 0.3;
 /** Height of one status bar along a rack face. */
-export const DEBUGGING_TWO_RACK_LED_BAR_HEIGHT = 0.72;
+export const DEBUGGING_TWO_RACK_LED_BAR_HEIGHT = 0.035;
 /** Depth of one boxed status bar, kept just outside the rack body. */
-export const DEBUGGING_TWO_RACK_LED_BAR_DEPTH = 0.025;
+export const DEBUGGING_TWO_RACK_LED_BAR_DEPTH = 0.018;
 const WAREHOUSE_RACK_LED_BAR_FACE_OFFSET_Z = 0.412;
 const WAREHOUSE_RACK_LED_BAR_FACE_OFFSET_X = 0.432;
-const WAREHOUSE_RACK_LED_BAR_HORIZONTAL_OFFSETS = [-0.2, 0.2] as const;
+const WAREHOUSE_RACK_LED_BAR_VERTICAL_OFFSETS = [-0.2, 0.2] as const;
 const WAREHOUSE_RACK_LED_ON_COLOR = 0x38cfff;
 const WAREHOUSE_RACK_LED_OFF_COLOR = 0x14607a;
 const WAREHOUSE_RACK_LED_GLOW_ON_COLOR = 0x9feeff;
@@ -414,12 +423,13 @@ const createWarehouseRacks = (
     const cosine = Math.cos(plan.rotationY);
     const sine = Math.sin(plan.rotationY);
     for (const face of faceDefinitions) {
-      for (const barOffset of WAREHOUSE_RACK_LED_BAR_HORIZONTAL_OFFSETS) {
-        const localX = face.axis === "z" ? barOffset : face.offset;
+      for (const barOffset of WAREHOUSE_RACK_LED_BAR_VERTICAL_OFFSETS) {
+        const localX = face.axis === "z" ? 0 : face.offset;
         const localZ = face.axis === "z" ? face.offset : barOffset;
         const worldX = plan.x + cosine * localX + sine * localZ;
         const worldZ = plan.z - sine * localX + cosine * localZ;
-        ledTransform.position.set(worldX, plan.y, worldZ);
+        const localY = barOffset;
+        ledTransform.position.set(worldX, plan.y + localY, worldZ);
         ledTransform.rotation.set(0, plan.rotationY + face.rotationY, 0);
         ledTransform.scale.set(1, 1, 1);
         ledTransform.updateMatrix();
@@ -1156,7 +1166,197 @@ const createWarehouseLaneEmergencyLights = (lighting: THREE.Group): void => {
   lighting.add(laneLights);
 };
 
-const createWarehouseLighting = (scene: THREE.Scene): void => {
+const createWarehouseLensFlareTexture = (): THREE.DataTexture => {
+  const size = WAREHOUSE_LENS_FLARE_TEXTURE_SIZE;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    const normalizedY = ((y + 0.5) / size) * 2 - 1;
+    for (let x = 0; x < size; x += 1) {
+      const normalizedX = ((x + 0.5) / size) * 2 - 1;
+      const radius = Math.hypot(normalizedX, normalizedY);
+      const core = Math.exp(-(radius * radius) * 18);
+      const halo = Math.pow(Math.max(0, 1 - radius), 2.4) * 0.26;
+      const streak =
+        Math.exp(-Math.abs(normalizedY) * 38) *
+        Math.pow(Math.max(0, 1 - Math.abs(normalizedX)), 3.4) *
+        0.22;
+      const alpha = Math.round(Math.min(1, core * 0.92 + halo + streak) * 255);
+      const offset = (y * size + x) * 4;
+      data[offset] = 255;
+      data[offset + 1] = 255;
+      data[offset + 2] = 255;
+      data[offset + 3] = alpha;
+    }
+  }
+
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+  texture.name = "WarehouseLensFlareSpriteTexture";
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.userData = {
+    warehouseLighting: true,
+    lensFlare: true,
+    generation: WAREHOUSE_LENS_FLARE_GENERATION,
+    source: "procedural-radial-gradient",
+  };
+  texture.needsUpdate = true;
+  return texture;
+};
+
+interface WarehouseLensFlareMaterialOptions {
+  readonly color: number;
+  readonly opacity: number;
+}
+
+const createWarehouseLensFlareMaterial = (
+  texture: THREE.Texture,
+  options: WarehouseLensFlareMaterialOptions,
+): THREE.SpriteMaterial =>
+  new THREE.SpriteMaterial({
+    map: texture,
+    color: options.color,
+    opacity: options.opacity,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    fog: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+
+const createWarehouseLensFlareSprites = (
+  lighting: THREE.Group,
+  textures: THREE.Texture[],
+): void => {
+  const flareTexture = createWarehouseLensFlareTexture();
+  textures.push(flareTexture);
+
+  const flareRoot = new THREE.Group();
+  flareRoot.name = "WarehouseLensFlareSprites";
+  flareRoot.userData = {
+    warehouseLighting: true,
+    physicsIgnore: true,
+    weaponRaycastIgnore: true,
+    dofIgnore: true,
+    lensFlare: true,
+    generation: WAREHOUSE_LENS_FLARE_GENERATION,
+    spriteCount: WAREHOUSE_LENS_FLARE_SPRITE_COUNT,
+    textureName: flareTexture.name,
+    fog: false,
+  };
+
+  const haloMaterial = createWarehouseLensFlareMaterial(flareTexture, {
+    color: 0xffd7a1,
+    opacity: 0.23,
+  });
+  const streakMaterial = createWarehouseLensFlareMaterial(flareTexture, {
+    color: 0xffc979,
+    opacity: 0.14,
+  });
+  const emergencyHaloMaterial = createWarehouseLensFlareMaterial(flareTexture, {
+    color: 0xff3540,
+    opacity: 0.2,
+  });
+  const emergencyStreakMaterial = createWarehouseLensFlareMaterial(flareTexture, {
+    color: 0xff2638,
+    opacity: 0.12,
+  });
+
+  const addSprite = (
+    name: string,
+    source: string,
+    position: readonly [number, number, number],
+    scale: readonly [number, number],
+    material: THREE.SpriteMaterial,
+    element: "halo" | "streak",
+  ): void => {
+    const sprite = new THREE.Sprite(material);
+    sprite.name = name;
+    sprite.position.set(...position);
+    sprite.scale.set(scale[0], scale[1], 1);
+    sprite.renderOrder = 4;
+    sprite.userData = {
+      warehouseLighting: true,
+      physicsIgnore: true,
+      weaponRaycastIgnore: true,
+      dofIgnore: true,
+      lensFlare: true,
+      lensFlareSprite: true,
+      source,
+      element,
+      fog: false,
+      generation: WAREHOUSE_LENS_FLARE_GENERATION,
+    };
+    flareRoot.add(sprite);
+  };
+
+  for (const x of WAREHOUSE_LIGHT_X_POSITIONS) {
+    for (const z of WAREHOUSE_LIGHT_Z_POSITIONS) {
+      const source = `high-bay:${String(x)}:${String(z)}`;
+      addSprite(
+        `WarehouseLensFlareHalo:${String(x)}:${String(z)}`,
+        source,
+        [x, WAREHOUSE_LIGHT_HEIGHT - 0.1, z],
+        [1.55, 1.55],
+        haloMaterial,
+        "halo",
+      );
+      addSprite(
+        `WarehouseLensFlareStreak:${String(x)}:${String(z)}`,
+        source,
+        [x, WAREHOUSE_LIGHT_HEIGHT - 0.1, z],
+        [3.6, 0.28],
+        streakMaterial,
+        "streak",
+      );
+    }
+  }
+
+  addSprite(
+    "WarehouseLensFlareHalo:central-spotlight",
+    "central-spotlight",
+    [0, WAREHOUSE_SPOTLIGHT_HEIGHT, 0],
+    [2.1, 2.1],
+    haloMaterial,
+    "halo",
+  );
+  addSprite(
+    "WarehouseLensFlareStreak:central-spotlight",
+    "central-spotlight",
+    [0, WAREHOUSE_SPOTLIGHT_HEIGHT, 0],
+    [5.2, 0.36],
+    streakMaterial,
+    "streak",
+  );
+
+  for (const fixture of WAREHOUSE_EMERGENCY_LIGHTS) {
+    const source = `emergency:${fixture.id}`;
+    addSprite(
+      `WarehouseLensFlareHalo:${fixture.id}`,
+      source,
+      [fixture.x, WAREHOUSE_EMERGENCY_LIGHT_HEIGHT, fixture.z],
+      [1.1, 1.1],
+      emergencyHaloMaterial,
+      "halo",
+    );
+    addSprite(
+      `WarehouseLensFlareStreak:${fixture.id}`,
+      source,
+      [fixture.x, WAREHOUSE_EMERGENCY_LIGHT_HEIGHT, fixture.z],
+      [2.5, 0.22],
+      emergencyStreakMaterial,
+      "streak",
+    );
+  }
+
+  lighting.add(flareRoot);
+};
+
+const createWarehouseLighting = (scene: THREE.Scene, textures: THREE.Texture[]): void => {
   const lighting = new THREE.Group();
   lighting.name = "DebuggingTwoIndustrialLighting";
   lighting.userData = {
@@ -1258,6 +1458,7 @@ const createWarehouseLighting = (scene: THREE.Scene): void => {
   createWarehousePerimeterLights(lighting);
   createWarehouseEmergencyLights(lighting);
   createWarehouseLaneEmergencyLights(lighting);
+  createWarehouseLensFlareSprites(lighting, textures);
 
   scene.add(lighting);
 };
@@ -1281,6 +1482,9 @@ export const createDebuggingTwoMap = (
     stackCount: warehouse.stackCount,
     wallCount: warehouse.wallCount,
     wallCrateCount: warehouse.wallCrateCount,
+    fogGeneration: WAREHOUSE_FOG_GENERATION,
+    lensFlareGeneration: WAREHOUSE_LENS_FLARE_GENERATION,
+    lensFlareSpriteCount: WAREHOUSE_LENS_FLARE_SPRITE_COUNT,
   };
   scene.add(root);
   // Keep the warehouse background black so the explicit spotlight, corner
@@ -1293,7 +1497,7 @@ export const createDebuggingTwoMap = (
   createPlatform(root, textures);
   createWarehouseStructure(root, textures);
   createWarehouseRacks(root, warehouse.boxes, normalizedSeed);
-  createWarehouseLighting(scene);
+  createWarehouseLighting(scene, textures);
 
   return {
     root,

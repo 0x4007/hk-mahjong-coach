@@ -1,5 +1,15 @@
 # Implementation status
 
+## 2026-08-08 — Warehouse lens-flare sprites
+
+- Added 26 deterministic `THREE.Sprite` elements: halo and horizontal streak pairs for eight high-bay fixtures, the central
+  spotlight, and four emergency wall fixtures.
+- Generated one 64×64 radial/streak `DataTexture`, using additive, tone-mapped-off materials with depth testing and no depth
+  writes. Sprites are presentation-only (`weaponRaycastIgnore`, `dofIgnore`, `physicsIgnore`, and `fog: false`) and the
+  texture is included in `DebuggingTwoMapResources.textures` for disposal.
+- Kept the fixed Warehouse-only linear fog (`warehouse-linear-fog-v1`) and recorded both presentation generations on the map
+  root. Map-catalog coverage locks sprite count, source elements, material flags, texture dimensions, and fog identity.
+
 ## 2026-08-08 — Zoomed melee throws
 
 - Starting a gun or held-prop melee action now clears both persistent zoom inputs through the shared aiming path, so the
@@ -25,7 +35,8 @@
 
 ## 2026-08-08 — Opaque-blinking Warehouse rack indicators
 
-- Replaced the tiny single-face pixel planes with eight boxed status bars around all four vertical faces of each rack.
+- Replaced the tiny single-face pixel planes with eight thin horizontal boxed status bars around all four vertical faces of
+  each rack.
 - Split the bars into one steady and three room-seeded blink groups. Each group has an opaque base plus one shared additive
   alpha glow overlay; all eight bar meshes are fog-exempt so the black Warehouse haze cannot erase them.
 - The map regression locks the four-sided bar layout, three opaque blink meshes, four glow overlays, fog exemption, and

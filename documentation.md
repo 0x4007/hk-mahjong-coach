@@ -1,11 +1,18 @@
 # Architecture and implementation log
 
+## 2026-08-08 — Warehouse lens-flare sprites
+
+The Warehouse now places deterministic additive lens-flare sprites at the eight high-bay fixtures, the central spotlight,
+and the four emergency wall fixtures. Each source gets a soft radial halo and a horizontal streak from one generated
+64×64 alpha mask. The sprites use depth testing without depth writes, opt out of fog, depth-of-field, physics, and weapon
+raycasts, and are returned with the map textures so HMR and scene teardown dispose them with the Warehouse.
+
 ## 2026-08-08 — Opaque-blinking Warehouse rack indicators
 
-Warehouse server racks now use eight larger boxed status bars around all four vertical faces of each rack. Bars are split
-across one steady and three room-seeded blink groups, so a visible bar is available from any aisle direction. Four shared
-additive alpha overlays provide a halo, while the bar bases stay opaque and opt out of map fog. This replaces the tiny
-single-face pixel planes that were too easy to lose against the black room.
+Warehouse server racks now use eight thin horizontal boxed status bars around all four vertical faces of each rack. Bars
+are split across one steady and three room-seeded blink groups, so a visible bar is available from any aisle direction.
+Four shared additive alpha overlays provide a halo, while the bar bases stay opaque and opt out of map fog. This replaces
+the tiny single-face pixel planes that were too easy to lose against the black room.
 
 ## 2026-08-08 — Warehouse aisle fog
 
