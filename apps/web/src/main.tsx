@@ -23,6 +23,7 @@ import {
   PLAYER_MAX_SHIELD,
   createPlayerVitals,
 } from "./scene/player-vitals.js";
+import { createKillScoreSnapshot, type KillScoreSnapshot } from "./scene/kill-scoreboard.js";
 import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
 import {
   createEmptyMeleeStateSnapshot,
@@ -1262,6 +1263,9 @@ const App = (): React.JSX.Element => {
   const [playerVitals, setPlayerVitals] = React.useState<PlayerVitalsState>(() =>
     createPlayerVitals(),
   );
+  const [killScore, setKillScore] = React.useState<KillScoreSnapshot>(() =>
+    createKillScoreSnapshot(),
+  );
   const [weaponState, setWeaponState] = React.useState<WeaponStateSnapshot>(() =>
     createEmptyWeaponStateSnapshot(),
   );
@@ -1394,6 +1398,7 @@ const App = (): React.JSX.Element => {
         setPlayerSpeed(0);
         setWeaponState(createEmptyWeaponStateSnapshot());
         setMeleeState(createEmptyMeleeStateSnapshot());
+        setKillScore(createKillScoreSnapshot());
         hasAttemptedMotionReenable.current = false;
         hasAppliedPersistedVisualStateRef.current = false;
         if (reticleBobbingFrame.current !== 0) {
@@ -1815,6 +1820,7 @@ const App = (): React.JSX.Element => {
               onSprintingChange={setIsSprinting}
               onSpeedChange={setPlayerSpeed}
               onVitalsChange={setPlayerVitals}
+              onKillScoreChange={setKillScore}
               onWeaponStateChange={setWeaponState}
               onMeleeStateChange={setMeleeState}
             />
@@ -1853,6 +1859,27 @@ const App = (): React.JSX.Element => {
             className={`scene-death-fade${playerVitals.isDead ? " is-visible" : ""}`}
             aria-hidden="true"
           />
+          <aside
+            aria-label="Match kill scoreboard"
+            aria-live="polite"
+            className="scene-scoreboard"
+            data-player-kills={killScore.playerKills}
+            data-simulant-kills={killScore.simulantKills}
+            data-last-killer={killScore.lastKiller ?? "none"}
+          >
+            <header>
+              <span>Match kills</span>
+              <small>Live</small>
+            </header>
+            <div className="scene-scoreboard-row" data-side="player">
+              <span>Player</span>
+              <strong>{killScore.playerKills}</strong>
+            </div>
+            <div className="scene-scoreboard-row" data-side="simulant">
+              <span>Simulant</span>
+              <strong>{killScore.simulantKills}</strong>
+            </div>
+          </aside>
           <header className="scene-overlay scene-overlay-intro">
             <p className="eyebrow">Hong Kong Old Style · NYC Social Table</p>
             <h1 id="table-heading">Stay in the hand.</h1>
@@ -2031,17 +2058,16 @@ const App = (): React.JSX.Element => {
               </span>
               <strong>
                 {activeMelee !== null
-                  ? `${activeMelee.damage.toFixed(0)} dmg · ${activeMelee.stoppingPower.toFixed(1)} stop · ${activeMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s`
+                  ? `${activeMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s`
                   : activeWeaponSlot === null
                     ? "—"
-                    : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)} · ${activeWeaponDefinition?.damage ?? 0} dmg · ${activeWeaponDefinition?.stoppingPowerPerBullet.toFixed(2) ?? "0.00"} stop`}
+                    : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
               </strong>
             </div>
             {nearbyMelee !== null ? (
               <p className="scene-weapons-pickup">
                 Press E to equip {nearbyMelee.displayName} · {nearbyMelee.rangeMeters.toFixed(2)} m
-                reach · {nearbyMelee.damage.toFixed(0)} damage ·{" "}
-                {nearbyMelee.stoppingPower.toFixed(1)} stop
+                reach
               </p>
             ) : null}
             {nearbyWeaponDefinition !== null ? (
@@ -2081,7 +2107,6 @@ const App = (): React.JSX.Element => {
               <small>
                 F melee · Reach {activeGunMeleeRange.toFixed(2)} m · Volume{" "}
                 {activeWeaponDefinition?.meleeVolumeM3.toFixed(3)} m³ ·{" "}
-                {activeGunMelee.damage.toFixed(0)} damage ·{" "}
                 {activeGunMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s ·{" "}
                 {activeGunMelee.oxygenCost.toFixed(1)} O₂ per swing
               </small>

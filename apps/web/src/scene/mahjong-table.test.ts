@@ -63,6 +63,7 @@ import {
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
   resolveSimulantShotDamage,
+  resolvePlayerKnockbackVelocity,
   isWeaponRaycastSurface,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
@@ -74,9 +75,10 @@ import {
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
-import { createDebuggingTwoMap } from "./debugging-two-map.js";
+import { createDebuggingTwoMap, DEBUGGING_TWO_BOX_STACK_PITCH } from "./debugging-two-map.js";
 import { O2_LANDING_BASE_COST } from "./player-vitals.js";
 import {
+  PLAYER_CAPSULE_CENTER_HEIGHT,
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
   PLAYER_SPRINT_MULTIPLIER,
   PLAYER_SPRINT_SPEED_KILOMETERS_PER_HOUR,
@@ -743,6 +745,37 @@ describe("simulant shot payload", () => {
   });
 });
 
+describe("simulant melee player knockback", () => {
+  it("pushes the player away from the contact direction", () => {
+    expect(resolvePlayerKnockbackVelocity({ x: 0, y: 0, z: -1 }, 12)).toEqual({
+      x: 0,
+      y: 0,
+      z: -12,
+    });
+  });
+
+  it("accumulates repeated hits without exceeding the melee stopping-power cap", () => {
+    const velocity = resolvePlayerKnockbackVelocity({ x: 1, y: 0, z: 0 }, 12, {
+      x: 0,
+      y: 0,
+      z: -12,
+    });
+    expect(Math.hypot(velocity.x, velocity.z)).toBeLessThanOrEqual(18);
+    expect(velocity.x).toBeGreaterThan(0);
+    expect(velocity.z).toBeLessThan(0);
+  });
+
+  it("ignores malformed impulses and preserves finite horizontal velocity", () => {
+    expect(
+      resolvePlayerKnockbackVelocity({ x: Number.NaN, y: 0, z: 0 }, Number.NaN, {
+        x: 2,
+        y: 9,
+        z: -3,
+      }),
+    ).toEqual({ x: 2, y: 0, z: -3 });
+  });
+});
+
 describe("exploration chunk footprint", () => {
   it("preloads the central and edge chunks while omitting the four corners", () => {
     const scene = new THREE.Scene();
@@ -909,7 +942,9 @@ describe("exploration chunk footprint", () => {
       expect(pickups.map((pickup) => pickup.snapshot.displayName)).toEqual(
         map.meleeObjects.map((spawn) => spawn.displayName),
       );
-      expect(world.getPhysicsBoxes()).toHaveLength(map.meleeObjects.length);
+      expect(world.getPhysicsBoxes()).toHaveLength(
+        map.physicsBoxes.length + map.meleeObjects.length,
+      );
       const cityObjectNames: string[] = [];
       scene.traverse((object) => {
         if (
@@ -941,6 +976,185 @@ describe("exploration chunk footprint", () => {
       expect(Math.hypot(firstBody?.linearVelocity?.x ?? 0, firstBody?.linearVelocity?.z ?? 0)).toBe(
         firstPickup.snapshot.stoppingPower,
       );
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("releases a server and the supported servers above it into physics", () => {
+    const scene = new THREE.Scene();
+    const map = createDebuggingTwoMap(scene, "warehouse-server-stack-impact-test");
+    const world = createExplorationWorld(
+      scene,
+      "warehouse-server-stack-impact-test",
+      undefined,
+      undefined,
+      map,
+    );
+    try {
+      const supportIndex = map.physicsBoxes.findIndex((box) =>
+        map.physicsBoxes.some(
+          (candidate) =>
+            Math.abs(candidate.center.x - box.center.x) < 0.000001 &&
+            Math.abs(candidate.center.z - box.center.z) < 0.000001 &&
+            candidate.center.y > box.center.y &&
+            Math.abs(candidate.center.y - (box.center.y + DEBUGGING_TWO_BOX_STACK_PITCH)) <
+              0.000001,
+        ),
+      );
+      if (supportIndex < 0) {
+        throw new Error("Expected a supported Warehouse server stack");
+      }
+      const upperIndex = map.physicsBoxes.findIndex(
+        (candidate) =>
+          Math.abs(candidate.center.x - (map.physicsBoxes[supportIndex]?.center.x ?? 0)) <
+            0.000001 &&
+          Math.abs(candidate.center.z - (map.physicsBoxes[supportIndex]?.center.z ?? 0)) <
+            0.000001 &&
+          Math.abs(
+            candidate.center.y -
+              ((map.physicsBoxes[supportIndex]?.center.y ?? 0) + DEBUGGING_TWO_BOX_STACK_PITCH),
+          ) < 0.000001,
+      );
+      if (upperIndex < 0) {
+        throw new Error("Expected an upper server in the supported stack");
+      }
+      const rackObject = map.rackBodyMesh;
+      const supportId = world.getRagdollObjectIdForHit(rackObject, supportIndex);
+      const upperId = world.getRagdollObjectIdForHit(rackObject, upperIndex);
+      expect(supportId).not.toBeNull();
+      expect(upperId).not.toBeNull();
+      if (supportId === null || upperId === null) {
+        throw new Error("Expected Warehouse rack physics IDs");
+      }
+      const rackRoot = map.root.getObjectByName("DebuggingTwoDataCenterRacks");
+      const ledMeshes =
+        rackRoot?.children.filter(
+          (child): child is THREE.InstancedMesh =>
+            child instanceof THREE.InstancedMesh && child.userData.rackLed === true,
+        ) ?? [];
+      const supportBodyBefore = new THREE.Matrix4();
+      map.rackBodyMesh.getMatrixAt(supportIndex, supportBodyBefore);
+      const supportPositionBefore = new THREE.Vector3();
+      const supportRotationBefore = new THREE.Quaternion();
+      const supportScaleBefore = new THREE.Vector3();
+      supportBodyBefore.decompose(supportPositionBefore, supportRotationBefore, supportScaleBefore);
+      let trackedLed: THREE.InstancedMesh | undefined;
+      let trackedLedIndex = -1;
+      let trackedLedDistance = Number.POSITIVE_INFINITY;
+      const candidateLedMatrix = new THREE.Matrix4();
+      const candidateLedPosition = new THREE.Vector3();
+      for (const ledMesh of ledMeshes) {
+        for (let index = 0; index < ledMesh.count; index += 1) {
+          ledMesh.getMatrixAt(index, candidateLedMatrix);
+          candidateLedMatrix.decompose(
+            candidateLedPosition,
+            new THREE.Quaternion(),
+            new THREE.Vector3(),
+          );
+          const distance = candidateLedPosition.distanceTo(supportPositionBefore);
+          if (distance < trackedLedDistance) {
+            trackedLed = ledMesh;
+            trackedLedIndex = index;
+            trackedLedDistance = distance;
+          }
+        }
+      }
+      if (trackedLed === undefined || trackedLedIndex < 0) {
+        throw new Error("Expected a rack LED to track during impact");
+      }
+
+      const ledBeforeImpact = new THREE.Matrix4();
+      trackedLed.getMatrixAt(trackedLedIndex, ledBeforeImpact);
+      const ledScaleBeforeImpact = new THREE.Vector3();
+      ledBeforeImpact.decompose(new THREE.Vector3(), new THREE.Quaternion(), ledScaleBeforeImpact);
+      expect(ledScaleBeforeImpact.length()).toBeGreaterThan(0.9);
+
+      expect(world.applyProjectileHit(supportId, { x: 1, y: 0, z: 0 }, 2)).toBe(true);
+      const dynamicIds = new Set(
+        world
+          .getPhysicsBoxes()
+          .filter((box) => box.dynamic === true)
+          .map((box) => box.dynamicId),
+      );
+      expect(dynamicIds.has(supportId)).toBe(true);
+      expect(dynamicIds.has(upperId)).toBe(true);
+
+      const ledAfterImpact = new THREE.Matrix4();
+      trackedLed.getMatrixAt(trackedLedIndex, ledAfterImpact);
+      // Three.js decomposes a singular zero-scale matrix as unit scale because
+      // its rotation basis is undefined; inspect the matrix columns instead.
+      expect(ledAfterImpact.getMaxScaleOnAxis()).toBeCloseTo(0, 6);
+      const localLed = supportBodyBefore.clone().invert().multiply(ledAfterImpact);
+
+      world.updateKnockables(1 / 60, new THREE.Vector3(), { x: 0, y: 0, z: 0 }, 0, true);
+
+      const supportBodyAfter = new THREE.Matrix4();
+      map.rackBodyMesh.getMatrixAt(supportIndex, supportBodyAfter);
+      const expectedLedAfter = supportBodyAfter.clone().multiply(localLed);
+      const actualLedAfter = new THREE.Matrix4();
+      trackedLed.getMatrixAt(trackedLedIndex, actualLedAfter);
+      expectedLedAfter.elements.forEach((value, index) => {
+        expect(actualLedAfter.elements[index]).toBeCloseTo(value, 4);
+      });
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("lets a simulant target the lowest rack beneath a grounded player", () => {
+    const scene = new THREE.Scene();
+    const map = createDebuggingTwoMap(scene, "warehouse-simulant-support-target-test");
+    const world = createExplorationWorld(
+      scene,
+      "warehouse-simulant-support-target-test",
+      undefined,
+      undefined,
+      map,
+    );
+    try {
+      const columns = new Map<string, { readonly box: PhysicsBox; readonly index: number }[]>();
+      map.physicsBoxes.forEach((box, index) => {
+        const key = `${String(box.center.x)}:${String(box.center.z)}`;
+        const column = columns.get(key) ?? [];
+        column.push({ box, index });
+        columns.set(key, column);
+      });
+      const column = [...columns.values()]
+        .filter((candidate) => candidate.length >= 3)
+        .sort((left, right) => right.length - left.length)[0];
+      if (column === undefined) {
+        throw new Error("Expected a tall Warehouse rack column");
+      }
+      column.sort((left, right) => left.box.center.y - right.box.center.y);
+      const top = column[column.length - 1];
+      const lowest = column[0];
+      if (top === undefined || lowest === undefined) {
+        throw new Error("Expected a non-empty Warehouse rack column");
+      }
+      const target = world.getMeleeSupportTarget({
+        x: top.box.center.x,
+        y: top.box.center.y + top.box.halfExtents.y + PLAYER_CAPSULE_CENTER_HEIGHT,
+        z: top.box.center.z,
+      });
+      expect(target).not.toBeNull();
+      if (target === null) {
+        throw new Error("Expected a support rack target");
+      }
+      const lowestId = world.getRagdollObjectIdForHit(map.rackBodyMesh, lowest.index);
+      expect(lowestId).not.toBeNull();
+      expect(target.objectId).toBe(lowestId);
+      expect(world.applyMeleeHit(target.objectId, { x: 0, y: 0, z: -1 }, 4, 8)).toBe(true);
+      const dynamicIds = new Set(
+        world
+          .getPhysicsBoxes()
+          .filter((box) => box.dynamic === true)
+          .map((box) => box.dynamicId),
+      );
+      expect(dynamicIds.has(target.objectId)).toBe(true);
+      expect(
+        dynamicIds.has(world.getRagdollObjectIdForHit(map.rackBodyMesh, top.index) ?? -1),
+      ).toBe(true);
     } finally {
       world.dispose();
     }
@@ -1462,13 +1676,19 @@ describe("weapon raycast surface filtering", () => {
     const scene = new THREE.Scene();
     createDebuggingTwoMap(scene, "warehouse-light-raycast-test");
 
-    const spotlightShaft = scene.getObjectByName("WarehouseCentralSpotlightShaft");
+    const spotlightShaft = scene.getObjectByName("WarehouseQuadrantSpotlightShaft:north-west");
     const warehouseWall = scene.getObjectByName("WarehouseWallNorth");
-    if (spotlightShaft === undefined || warehouseWall === undefined) {
+    const serverRackBody = scene.getObjectByName("DataCenterRackBodies");
+    if (
+      spotlightShaft === undefined ||
+      warehouseWall === undefined ||
+      serverRackBody === undefined
+    ) {
       throw new Error("Expected Warehouse lighting and structure meshes");
     }
 
     expect(isWeaponRaycastSurface(spotlightShaft)).toBe(false);
     expect(isWeaponRaycastSurface(warehouseWall)).toBe(true);
+    expect(isWeaponRaycastSurface(serverRackBody)).toBe(true);
   });
 });

@@ -26,10 +26,12 @@ export const createWarehouseFog = (): THREE.Fog => {
 /** Shared generated flare mask used by the Warehouse's bright fixtures. */
 export const WAREHOUSE_LENS_FLARE_TEXTURE_SIZE = 64;
 export const WAREHOUSE_LENS_FLARE_GENERATION = "warehouse-lens-flare-sprites-v1";
-export const WAREHOUSE_LENS_FLARE_SPRITE_COUNT = 26;
 
 /** Every generated warehouse crate is one exact one-metre cube. */
 export const DEBUGGING_TWO_BOX_SIZE = 1;
+
+/** The top of the rendered warehouse platform and its matching physics floor. */
+export const WAREHOUSE_FLOOR_TOP_Y = 0;
 
 /** A centimetre-scale visual seam keeps adjacent crates readable as separate boxes. */
 export const DEBUGGING_TWO_BOX_GAP = 0.01;
@@ -56,8 +58,8 @@ const WAREHOUSE_BAY_MIN_X = -40.5;
 const WAREHOUSE_BAY_MIN_Z = -27;
 const WAREHOUSE_BAY_COUNT_X = 19;
 const WAREHOUSE_BAY_COUNT_Z = 13;
-const WAREHOUSE_MIN_STACK_HEIGHT = 2;
-const WAREHOUSE_MAX_STACK_HEIGHT = 6;
+const WAREHOUSE_MIN_STACK_HEIGHT = 5;
+const WAREHOUSE_MAX_STACK_HEIGHT = 12;
 const WAREHOUSE_PILE_MIN_COLUMNS = 1;
 const WAREHOUSE_PILE_MAX_COLUMNS = 3;
 const WAREHOUSE_PILE_MIN_ROWS = 1;
@@ -99,11 +101,38 @@ const WAREHOUSE_RACK_BLINK_GLOW_OPACITY = 0.4;
 const WAREHOUSE_RACK_BLINK_GLOW_DARK_OPACITY = 0.16;
 /** Rack indicators use opaque boxed bars with a small instanced alpha glow for readability. */
 export const DEBUGGING_TWO_RACK_BLINKING_ENABLED = true;
-const WAREHOUSE_CEILING_HEIGHT = 9;
-const WAREHOUSE_LIGHT_HEIGHT = 8.25;
-const WAREHOUSE_SPOTLIGHT_HEIGHT = 7.25;
+/** Versioned seam for the dormant rack colliders that become dynamic on impact. */
+export const WAREHOUSE_RACK_PHYSICS_GENERATION = "warehouse-rack-dynamics-v2-tall-towers";
+const WAREHOUSE_CEILING_HEIGHT = 16;
+const WAREHOUSE_LIGHT_HEIGHT = 15.25;
+const WAREHOUSE_SPOTLIGHT_HEIGHT = 14.25;
 const WAREHOUSE_LIGHT_X_POSITIONS = [-30, -10, 10, 30] as const;
 const WAREHOUSE_LIGHT_Z_POSITIONS = [-22, 22] as const;
+const WAREHOUSE_MID_X = (DEBUGGING_TWO_WORLD_BOUNDS.minX + DEBUGGING_TWO_WORLD_BOUNDS.maxX) / 2;
+const WAREHOUSE_MID_Z = (DEBUGGING_TWO_WORLD_BOUNDS.minZ + DEBUGGING_TWO_WORLD_BOUNDS.maxZ) / 2;
+export const WAREHOUSE_SPOTLIGHT_GENERATION = "warehouse-quadrant-spotlights-v1";
+export const WAREHOUSE_SPOTLIGHT_QUADRANTS = [
+  {
+    id: "north-west",
+    x: (DEBUGGING_TWO_WORLD_BOUNDS.minX + WAREHOUSE_MID_X) / 2,
+    z: (WAREHOUSE_MID_Z + DEBUGGING_TWO_WORLD_BOUNDS.maxZ) / 2,
+  },
+  {
+    id: "north-east",
+    x: (WAREHOUSE_MID_X + DEBUGGING_TWO_WORLD_BOUNDS.maxX) / 2,
+    z: (WAREHOUSE_MID_Z + DEBUGGING_TWO_WORLD_BOUNDS.maxZ) / 2,
+  },
+  {
+    id: "south-west",
+    x: (DEBUGGING_TWO_WORLD_BOUNDS.minX + WAREHOUSE_MID_X) / 2,
+    z: (DEBUGGING_TWO_WORLD_BOUNDS.minZ + WAREHOUSE_MID_Z) / 2,
+  },
+  {
+    id: "south-east",
+    x: (WAREHOUSE_MID_X + DEBUGGING_TWO_WORLD_BOUNDS.maxX) / 2,
+    z: (DEBUGGING_TWO_WORLD_BOUNDS.minZ + WAREHOUSE_MID_Z) / 2,
+  },
+] as const;
 const WAREHOUSE_FLOOR_LED_HEIGHT = 0.028;
 const WAREHOUSE_FLOOR_LED_WIDTH = 0.3;
 const WAREHOUSE_FLOOR_LED_LENGTH = 0.9;
@@ -118,11 +147,16 @@ const WAREHOUSE_WALL_LIGHTMAP_HEIGHT = 24;
 const WAREHOUSE_WALL_BASE_COLOR = 0x3c474c;
 const WAREHOUSE_WALL_GLOW_CUTOFF_HEIGHT = 4.25;
 const WAREHOUSE_WALL_GLOW_EXPONENT = 1.8;
-const WAREHOUSE_WALL_BAKE_GENERATION = "warehouse-wall-area-bake-v2-dim-bottom";
+const WAREHOUSE_WALL_BAKE_GENERATION = "warehouse-wall-area-bake-v3-quadrants";
 const WAREHOUSE_FLOOR_LIGHTMAP_WIDTH = 96;
 const WAREHOUSE_FLOOR_LIGHTMAP_HEIGHT = 72;
-const WAREHOUSE_FLOOR_BASE_COLOR = 0x343a43;
-const WAREHOUSE_FLOOR_BAKE_GENERATION = "warehouse-floor-area-bake-v1-center";
+export const WAREHOUSE_FLOOR_BASE_COLOR = 0x343a43;
+export const WAREHOUSE_FLOOR_ROUGHNESS = 0.22;
+export const WAREHOUSE_FLOOR_METALNESS = 0.76;
+export const WAREHOUSE_FLOOR_CLEARCOAT = 0.62;
+export const WAREHOUSE_FLOOR_CLEARCOAT_ROUGHNESS = 0.1;
+export const WAREHOUSE_FLOOR_FINISH_GENERATION = "warehouse-floor-polished-server-metal-v1";
+const WAREHOUSE_FLOOR_BAKE_GENERATION = "warehouse-floor-area-bake-v2-quadrants";
 const WAREHOUSE_EMERGENCY_LIGHTS = [
   { id: "north", x: 0, z: DEBUGGING_TWO_WORLD_BOUNDS.maxZ - 0.42, rotationY: 0 },
   { id: "east", x: DEBUGGING_TWO_WORLD_BOUNDS.maxX - 0.42, z: 0, rotationY: Math.PI / 2 },
@@ -131,6 +165,10 @@ const WAREHOUSE_EMERGENCY_LIGHTS = [
 ] as const;
 const WAREHOUSE_LANE_EMERGENCY_LIGHT_X_POSITIONS = [-12, 12] as const;
 const WAREHOUSE_LANE_EMERGENCY_LIGHT_Z_POSITIONS = [-30, -18, -6, 6, 18, 30] as const;
+export const WAREHOUSE_LENS_FLARE_SPRITE_COUNT =
+  WAREHOUSE_LIGHT_X_POSITIONS.length * WAREHOUSE_LIGHT_Z_POSITIONS.length * 2 +
+  WAREHOUSE_SPOTLIGHT_QUADRANTS.length * 2 +
+  WAREHOUSE_EMERGENCY_LIGHTS.length * 2;
 
 interface WarehouseBoxPlan {
   readonly x: number;
@@ -150,6 +188,17 @@ interface WarehouseGeneration {
   readonly wallCrateCount: number;
 }
 
+interface WarehouseRackLedPlacement {
+  readonly rackIndex: number;
+  readonly localMatrix: THREE.Matrix4;
+}
+
+interface WarehouseRackRender {
+  readonly bodyMesh: THREE.InstancedMesh;
+  readonly markRackDamaged: (rackIndex: number) => void;
+  readonly updatePresentation: () => void;
+}
+
 export interface DebuggingTwoMeleeSpawn {
   readonly id: string;
   readonly kind: DebuggingTwoMeleeKind;
@@ -162,7 +211,16 @@ export interface DebuggingTwoMeleeSpawn {
 
 export interface DebuggingTwoMapResources {
   readonly root: THREE.Group;
+  /** Render instances for the server cabinets, kept separate from the static shell. */
+  readonly rackBodyMesh: THREE.InstancedMesh;
   readonly physicsBoxes: readonly PhysicsBox[];
+  /** Static authored colliders; server cabinets are supplied by the exploration physics seam. */
+  readonly staticPhysicsBoxes: readonly PhysicsBox[];
+  /** Turn off the status bars for a server cabinet after an impact. */
+  readonly markRackDamaged: (rackIndex: number) => void;
+  /** Recompose rack-local LEDs after the live rack body instances receive physics transforms. */
+  readonly updateRackPresentation: () => void;
+  /** Player spawn point on the floor surface; the controller adds capsule height. */
   readonly spawn: { readonly x: number; readonly y: number; readonly z: number };
   readonly simulantSpawn: { readonly x: number; readonly y: number; readonly z: number };
   readonly variant: string;
@@ -187,7 +245,7 @@ const randomSigned = (random: ReturnType<typeof createSeededRandom>, magnitude: 
  * occupied support cells, and every crate stays level with a yaw-only rotation.
  */
 const generateWarehouse = (roomSeed: string): WarehouseGeneration => {
-  const random = createSeededRandom(`${roomSeed}|debugging-02|warehouse|v3`);
+  const random = createSeededRandom(`${roomSeed}|debugging-02|warehouse|v4-tall-towers`);
   const boxes: WarehouseBoxPlan[] = [];
   const physicsBoxes: PhysicsBox[] = [];
   let stackCount = 0;
@@ -281,7 +339,9 @@ const generateWarehouse = (roomSeed: string): WarehouseGeneration => {
         continue;
       }
 
-      const baseHeight = 4 + random.nextInt(WAREHOUSE_MAX_STACK_HEIGHT - 3);
+      const baseHeight =
+        WAREHOUSE_MIN_STACK_HEIGHT +
+        random.nextInt(WAREHOUSE_MAX_STACK_HEIGHT - WAREHOUSE_MIN_STACK_HEIGHT + 1);
       const stackHeight = clampStackHeight(baseHeight + random.nextInt(3) - 1);
       const pileColumns =
         WAREHOUSE_PILE_MIN_COLUMNS +
@@ -344,17 +404,17 @@ const createWarehouseRacks = (
   root: THREE.Group,
   plans: readonly WarehouseBoxPlan[],
   roomSeed: string,
-): void => {
+): WarehouseRackRender => {
   if (plans.length === 0) {
-    return;
+    throw new Error("Warehouse must contain at least one server rack");
   }
   const rackRoot = new THREE.Group();
   rackRoot.name = "DebuggingTwoDataCenterRacks";
   rackRoot.userData = {
     dofIgnore: false,
-    physicsIgnore: true,
     mapFeature: "data-center-racks",
-    generation: "data-center-racks-v1",
+    generation: "data-center-racks-v2-dynamic-impact",
+    physicsGeneration: WAREHOUSE_RACK_PHYSICS_GENERATION,
     iceBlue: true,
     blinkingLedGroups: WAREHOUSE_RACK_BLINK_GROUPS,
     blinkingDisabled: false,
@@ -384,9 +444,9 @@ const createWarehouseRacks = (
   bodies.receiveShadow = true;
   bodies.userData = {
     dofIgnore: false,
-    physicsIgnore: true,
     dataCenterRack: true,
     rackBody: true,
+    weaponRaycastSurface: true,
   };
   const transform = new THREE.Object3D();
   const color = new THREE.Color();
@@ -406,11 +466,16 @@ const createWarehouseRacks = (
   bodies.computeBoundingSphere();
   rackRoot.add(bodies);
 
-  const steadyLedMatrices: THREE.Matrix4[] = [];
-  const blinkingLedMatrices: THREE.Matrix4[][] = Array.from(
+  const steadyLedPlacements: WarehouseRackLedPlacement[] = [];
+  const blinkingLedPlacements: WarehouseRackLedPlacement[][] = Array.from(
     { length: WAREHOUSE_RACK_BLINK_GROUPS },
     () => [],
   );
+  const ledMeshBindings: {
+    readonly mesh: THREE.InstancedMesh;
+    readonly placements: readonly WarehouseRackLedPlacement[];
+  }[] = [];
+  const damagedRackIndices = new Set<number>();
   const ledTransform = new THREE.Object3D();
   const ledPatternRandom = createSeededRandom(`${roomSeed}|debugging-02|rack-led-bars|v2`);
   const faceDefinitions = [
@@ -419,26 +484,25 @@ const createWarehouseRacks = (
     { axis: "x", offset: -WAREHOUSE_RACK_LED_BAR_FACE_OFFSET_X, rotationY: Math.PI / 2 },
     { axis: "x", offset: WAREHOUSE_RACK_LED_BAR_FACE_OFFSET_X, rotationY: Math.PI / 2 },
   ] as const;
-  plans.forEach((plan) => {
-    const cosine = Math.cos(plan.rotationY);
-    const sine = Math.sin(plan.rotationY);
+  plans.forEach((_, rackIndex) => {
     for (const face of faceDefinitions) {
       for (const barOffset of WAREHOUSE_RACK_LED_BAR_VERTICAL_OFFSETS) {
         const localX = face.axis === "z" ? 0 : face.offset;
         const localZ = face.axis === "z" ? face.offset : barOffset;
-        const worldX = plan.x + cosine * localX + sine * localZ;
-        const worldZ = plan.z - sine * localX + cosine * localZ;
         const localY = barOffset;
-        ledTransform.position.set(worldX, plan.y + localY, worldZ);
-        ledTransform.rotation.set(0, plan.rotationY + face.rotationY, 0);
+        ledTransform.position.set(localX, localY, localZ);
+        ledTransform.rotation.set(0, face.rotationY, 0);
         ledTransform.scale.set(1, 1, 1);
         ledTransform.updateMatrix();
-        const matrix = ledTransform.matrix.clone();
+        const placement: WarehouseRackLedPlacement = {
+          rackIndex,
+          localMatrix: ledTransform.matrix.clone(),
+        };
         if (ledPatternRandom.nextFloat() < 0.28) {
           const group = ledPatternRandom.nextInt(WAREHOUSE_RACK_BLINK_GROUPS);
-          blinkingLedMatrices[group]?.push(matrix);
+          blinkingLedPlacements[group]?.push(placement);
         } else {
-          steadyLedMatrices.push(matrix);
+          steadyLedPlacements.push(placement);
         }
       }
     }
@@ -456,35 +520,34 @@ const createWarehouseRacks = (
   );
   const createLedMesh = (
     name: string,
-    matrices: readonly THREE.Matrix4[],
+    placements: readonly WarehouseRackLedPlacement[],
     material: THREE.MeshBasicMaterial,
     geometry: THREE.BufferGeometry,
   ): THREE.InstancedMesh => {
-    const leds = new THREE.InstancedMesh(geometry, material, matrices.length);
+    const leds = new THREE.InstancedMesh(geometry, material, placements.length);
     leds.name = name;
     leds.castShadow = false;
     leds.receiveShadow = false;
     leds.userData = {
       warehouseLighting: true,
       physicsIgnore: true,
+      weaponRaycastIgnore: true,
       dofIgnore: true,
       dataCenterRack: true,
       rackLed: true,
       ledLayout: "four-sided-status-bars-v1",
       ledBarsPerRack: DEBUGGING_TWO_RACK_LED_BARS_PER_RACK,
     };
-    matrices.forEach((matrix, index) => leds.setMatrixAt(index, matrix));
-    leds.instanceMatrix.needsUpdate = true;
-    leds.computeBoundingSphere();
+    ledMeshBindings.push({ mesh: leds, placements });
     rackRoot.add(leds);
     return leds;
   };
   const createGlow = (
     name: string,
-    matrices: readonly THREE.Matrix4[],
+    placements: readonly WarehouseRackLedPlacement[],
     material: THREE.MeshBasicMaterial,
   ): THREE.InstancedMesh => {
-    const glow = createLedMesh(name, matrices, material, glowGeometry);
+    const glow = createLedMesh(name, placements, material, glowGeometry);
     glow.userData.rackLed = false;
     glow.userData.rackLedGlow = true;
     glow.renderOrder = 2;
@@ -493,7 +556,7 @@ const createWarehouseRacks = (
 
   createLedMesh(
     "DataCenterRackLEDsSteady",
-    steadyLedMatrices,
+    steadyLedPlacements,
     new THREE.MeshBasicMaterial({
       color: WAREHOUSE_RACK_LED_ON_COLOR,
       toneMapped: false,
@@ -503,7 +566,7 @@ const createWarehouseRacks = (
   );
   createGlow(
     "DataCenterRackLEDGlowSteady",
-    steadyLedMatrices,
+    steadyLedPlacements,
     new THREE.MeshBasicMaterial({
       color: WAREHOUSE_RACK_LED_GLOW_ON_COLOR,
       toneMapped: false,
@@ -514,7 +577,7 @@ const createWarehouseRacks = (
       blending: THREE.AdditiveBlending,
     }),
   );
-  blinkingLedMatrices.forEach((matrices, groupIndex) => {
+  blinkingLedPlacements.forEach((placements, groupIndex) => {
     const material = new THREE.MeshBasicMaterial({
       color: WAREHOUSE_RACK_LED_ON_COLOR,
       toneMapped: false,
@@ -522,7 +585,7 @@ const createWarehouseRacks = (
     });
     const leds = createLedMesh(
       `DataCenterRackLEDsBlinking:${String(groupIndex)}`,
-      matrices,
+      placements,
       material,
       ledGeometry,
     );
@@ -541,7 +604,7 @@ const createWarehouseRacks = (
     });
     const glow = createGlow(
       `DataCenterRackLEDGlowBlinking:${String(groupIndex)}`,
-      matrices,
+      placements,
       glowMaterial,
     );
     glow.userData.blinkGlow = true;
@@ -562,7 +625,43 @@ const createWarehouseRacks = (
     leds.onBeforeRender = updateBlinkVisual;
     glow.onBeforeRender = updateBlinkVisual;
   });
+
+  const bodyMatrices = Array.from({ length: plans.length }, () => new THREE.Matrix4());
+  const worldLedMatrix = new THREE.Matrix4();
+  const disabledLedMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+  const updatePresentation = (): void => {
+    bodyMatrices.forEach((matrix, rackIndex) => bodies.getMatrixAt(rackIndex, matrix));
+    for (const binding of ledMeshBindings) {
+      binding.placements.forEach((placement, index) => {
+        const bodyMatrix = bodyMatrices[placement.rackIndex];
+        if (bodyMatrix === undefined) {
+          return;
+        }
+        const ledMatrix = damagedRackIndices.has(placement.rackIndex)
+          ? disabledLedMatrix
+          : placement.localMatrix;
+        worldLedMatrix.multiplyMatrices(bodyMatrix, ledMatrix);
+        binding.mesh.setMatrixAt(index, worldLedMatrix);
+      });
+      binding.mesh.instanceMatrix.needsUpdate = true;
+      // Instance transforms can move far from the original culling sphere when
+      // a rack tumbles, so refresh the presentation bounds with the matrices.
+      binding.mesh.computeBoundingSphere();
+    }
+  };
+  const markRackDamaged = (rackIndex: number): void => {
+    if (!Number.isInteger(rackIndex) || rackIndex < 0 || rackIndex >= plans.length) {
+      return;
+    }
+    if (damagedRackIndices.has(rackIndex)) {
+      return;
+    }
+    damagedRackIndices.add(rackIndex);
+    updatePresentation();
+  };
+  updatePresentation();
   root.add(rackRoot);
+  return { bodyMesh: bodies, markRackDamaged, updatePresentation };
 };
 
 type WarehouseWallDirection = "north" | "south" | "east" | "west";
@@ -570,6 +669,12 @@ type WarehouseWallDirection = "north" | "south" | "east" | "west";
 const srgbByteToLinear = (value: number): number => Math.pow(value / 255, 2.2);
 
 const clampUnit = (value: number): number => Math.max(0, Math.min(1, value));
+
+const resolveWarehouseSpotlightGlow = (x: number, z: number, radius: number): number =>
+  WAREHOUSE_SPOTLIGHT_QUADRANTS.reduce((strongestGlow, spotlight) => {
+    const distance = Math.hypot(x - spotlight.x, z - spotlight.z);
+    return Math.max(strongestGlow, Math.exp(-((distance / radius) * (distance / radius))));
+  }, 0);
 
 const resolveWarehouseWallWorldPosition = (
   direction: WarehouseWallDirection,
@@ -637,8 +742,7 @@ const createWarehouseWallLightMap = (
     for (let column = 0; column < WAREHOUSE_WALL_LIGHTMAP_WIDTH; column += 1) {
       const u = column / (WAREHOUSE_WALL_LIGHTMAP_WIDTH - 1);
       const position = resolveWarehouseWallWorldPosition(direction, u, v, width, depth, wallHeight);
-      const centerDistance = Math.hypot(position.x, position.z);
-      const centerGlow = Math.exp(-((centerDistance / 29) * (centerDistance / 29)));
+      const spotlightGlow = resolveWarehouseSpotlightGlow(position.x, position.z, 29);
       const floorGlow = Math.exp(-((position.y / 2.8) * (position.y / 2.8)));
       const verticalGlow =
         position.y >= WAREHOUSE_WALL_GLOW_CUTOFF_HEIGHT
@@ -654,8 +758,8 @@ const createWarehouseWallLightMap = (
         position.z,
       );
       const perimeterGlow = 0.34 * floorGlow * verticalGlow;
-      const ambient = verticalGlow * (0.22 + centerGlow * 0.28);
-      const warm = verticalGlow * centerGlow * 0.2;
+      const ambient = verticalGlow * (0.22 + spotlightGlow * 0.28);
+      const warm = verticalGlow * spotlightGlow * 0.2;
       const yellow = perimeterGlow * 0.42;
       const red = verticalGlow === 0 ? 0 : emergencyGlow * (0.11 + verticalGlow * 0.19);
       const redChannel =
@@ -681,7 +785,7 @@ const createWarehouseWallLightMap = (
     THREE.RGBAFormat,
     THREE.UnsignedByteType,
   );
-  texture.name = `WarehouseWallLightMap:${direction}`;
+  texture.name = `WarehouseWallLightMap:quadrants:${direction}`;
   texture.colorSpace = THREE.LinearSRGBColorSpace;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -887,9 +991,9 @@ const createWarehouseFloorLightMap = (width: number, depth: number): THREE.DataT
     for (let column = 0; column < WAREHOUSE_FLOOR_LIGHTMAP_WIDTH; column += 1) {
       const x =
         DEBUGGING_TWO_WORLD_BOUNDS.minX + (column / (WAREHOUSE_FLOOR_LIGHTMAP_WIDTH - 1)) * width;
-      const centerGlow = Math.exp(-((Math.hypot(x, z) / 25) ** 2));
-      const dimBase = centerGlow * 0.08;
-      const warmPool = centerGlow * 0.65;
+      const spotlightGlow = resolveWarehouseSpotlightGlow(x, z, 25);
+      const dimBase = spotlightGlow * 0.08;
+      const warmPool = spotlightGlow * 0.65;
       const redChannel = baseRed * (dimBase + warmPool) + warmPool * 0.025;
       const greenChannel = baseGreen * (dimBase + warmPool * 0.72) + warmPool * 0.018;
       const blueChannel = baseBlue * (dimBase + warmPool * 0.28) + warmPool * 0.008;
@@ -908,7 +1012,7 @@ const createWarehouseFloorLightMap = (width: number, depth: number): THREE.DataT
     THREE.RGBAFormat,
     THREE.UnsignedByteType,
   );
-  texture.name = "WarehouseFloorLightMap:center";
+  texture.name = "WarehouseFloorLightMap:quadrants";
   texture.colorSpace = THREE.LinearSRGBColorSpace;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -920,7 +1024,7 @@ const createWarehouseFloorLightMap = (width: number, depth: number): THREE.DataT
     warehouseLighting: true,
     bakedAreaLighting: true,
     generation: WAREHOUSE_FLOOR_BAKE_GENERATION,
-    source: "central-spotlight",
+    source: WAREHOUSE_SPOTLIGHT_GENERATION,
   };
   texture.needsUpdate = true;
   return texture;
@@ -949,30 +1053,44 @@ const createPlatform = (root: THREE.Group, textures: THREE.Texture[]): void => {
   const depth = DEBUGGING_TWO_WORLD_BOUNDS.maxZ - DEBUGGING_TWO_WORLD_BOUNDS.minZ;
   const lightMap = createWarehouseFloorLightMap(width, depth);
   textures.push(lightMap);
-  const material = new THREE.MeshBasicMaterial({ color: 0x000000 });
-  material.name = "WarehouseBakedFloorMaterial:center";
+  const material = new THREE.MeshPhysicalMaterial({
+    color: WAREHOUSE_FLOOR_BASE_COLOR,
+    roughness: WAREHOUSE_FLOOR_ROUGHNESS,
+    metalness: WAREHOUSE_FLOOR_METALNESS,
+    clearcoat: WAREHOUSE_FLOOR_CLEARCOAT,
+    clearcoatRoughness: WAREHOUSE_FLOOR_CLEARCOAT_ROUGHNESS,
+    specularIntensity: 0.82,
+    reflectivity: 0.9,
+  });
+  material.name = "WarehousePolishedFloorMaterial:quadrants";
   material.lightMap = lightMap;
   material.lightMapIntensity = Math.PI;
   material.userData = {
     warehouseLighting: true,
     bakedAreaLighting: true,
-    dynamicLightingDisabled: true,
-    floorColor: "black",
+    dynamicLightingDisabled: false,
+    dynamicSpecularLighting: true,
+    floorColor: "charcoal-metal",
+    floorFinish: "polished-server-metal",
+    finishGeneration: WAREHOUSE_FLOOR_FINISH_GENERATION,
     generation: WAREHOUSE_FLOOR_BAKE_GENERATION,
-    source: "central-spotlight",
+    source: WAREHOUSE_SPOTLIGHT_GENERATION,
   };
   const platform = new THREE.Mesh(createWarehouseFloorGeometry(width, depth), material);
   platform.name = "DebuggingTwoWarehousePlatform";
-  platform.position.set(0, -0.15, 0);
+  platform.position.set(0, WAREHOUSE_FLOOR_TOP_Y - 0.15, 0);
   platform.castShadow = false;
   platform.receiveShadow = false;
   platform.userData = {
     dofIgnore: true,
     physicsIgnore: true,
     bakedAreaLighting: true,
-    dynamicLightingDisabled: true,
+    dynamicLightingDisabled: false,
+    dynamicSpecularLighting: true,
+    floorFinish: "polished-server-metal",
+    finishGeneration: WAREHOUSE_FLOOR_FINISH_GENERATION,
     generation: WAREHOUSE_FLOOR_BAKE_GENERATION,
-    source: "central-spotlight",
+    source: WAREHOUSE_SPOTLIGHT_GENERATION,
   };
   root.add(platform);
 };
@@ -1316,22 +1434,25 @@ const createWarehouseLensFlareSprites = (
     }
   }
 
-  addSprite(
-    "WarehouseLensFlareHalo:central-spotlight",
-    "central-spotlight",
-    [0, WAREHOUSE_SPOTLIGHT_HEIGHT, 0],
-    [2.1, 2.1],
-    haloMaterial,
-    "halo",
-  );
-  addSprite(
-    "WarehouseLensFlareStreak:central-spotlight",
-    "central-spotlight",
-    [0, WAREHOUSE_SPOTLIGHT_HEIGHT, 0],
-    [5.2, 0.36],
-    streakMaterial,
-    "streak",
-  );
+  for (const spotlightDefinition of WAREHOUSE_SPOTLIGHT_QUADRANTS) {
+    const source = `quadrant-spotlight:${spotlightDefinition.id}`;
+    addSprite(
+      `WarehouseLensFlareHalo:${source}`,
+      source,
+      [spotlightDefinition.x, WAREHOUSE_SPOTLIGHT_HEIGHT, spotlightDefinition.z],
+      [2.1, 2.1],
+      haloMaterial,
+      "halo",
+    );
+    addSprite(
+      `WarehouseLensFlareStreak:${source}`,
+      source,
+      [spotlightDefinition.x, WAREHOUSE_SPOTLIGHT_HEIGHT, spotlightDefinition.z],
+      [5.2, 0.36],
+      streakMaterial,
+      "streak",
+    );
+  }
 
   for (const fixture of WAREHOUSE_EMERGENCY_LIGHTS) {
     const source = `emergency:${fixture.id}`;
@@ -1404,56 +1525,84 @@ const createWarehouseLighting = (scene: THREE.Scene, textures: THREE.Texture[]):
     }
   }
 
-  // Keep one broad pool over the centre aisle. The warehouse deliberately has
-  // no shadow-casting lights, so it does not allocate or render a shadow map.
-  const centralTarget = new THREE.Object3D();
-  centralTarget.name = "WarehouseCentralSpotlightTarget";
-  centralTarget.position.set(0, 0, 0);
-  lighting.add(centralTarget);
-  const centralSpot = new THREE.SpotLight(0xffc979, 220, 72, Math.PI / 2, 0.62, 1.45);
-  centralSpot.name = "WarehouseCentralSpotlight";
-  centralSpot.position.set(0, WAREHOUSE_SPOTLIGHT_HEIGHT, 0);
-  centralSpot.target = centralTarget;
-  centralSpot.castShadow = false;
-  centralSpot.userData = { warehouseLighting: true, physicsIgnore: true, castsShadow: false };
-  lighting.add(centralSpot);
-
-  // WebGL spotlights do not render visible rays through empty air. A single
-  // translucent cone and floor pool make the central high-bay beam readable
-  // without adding another light, shadow map, or volumetric post-process.
+  // Keep one broad pool in each warehouse quadrant. The warehouse deliberately
+  // has no shadow-casting lights, so it does not allocate or render a shadow map.
   const shaftHeight = WAREHOUSE_SPOTLIGHT_HEIGHT;
-  const shaft = new THREE.Mesh(
-    new THREE.ConeGeometry(shaftHeight, shaftHeight, 24, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0xffc979,
-      transparent: true,
-      opacity: 0.055,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    }),
-  );
-  shaft.name = "WarehouseCentralSpotlightShaft";
-  shaft.position.set(0, shaftHeight / 2, 0);
-  shaft.userData = { warehouseLighting: true, physicsIgnore: true, dofIgnore: true };
-  lighting.add(shaft);
+  for (const spotlightDefinition of WAREHOUSE_SPOTLIGHT_QUADRANTS) {
+    const target = new THREE.Object3D();
+    target.name = `WarehouseQuadrantSpotlightTarget:${spotlightDefinition.id}`;
+    target.position.set(spotlightDefinition.x, 0, spotlightDefinition.z);
+    target.userData = {
+      warehouseLighting: true,
+      physicsIgnore: true,
+      spotlightTarget: true,
+      generation: WAREHOUSE_SPOTLIGHT_GENERATION,
+    };
+    lighting.add(target);
 
-  const pool = new THREE.Mesh(
-    new THREE.CircleGeometry(shaftHeight, 32),
-    new THREE.MeshBasicMaterial({
-      color: 0xffc979,
-      transparent: true,
-      opacity: 0.07,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    }),
-  );
-  pool.name = "WarehouseCentralSpotlightPool";
-  pool.rotation.x = -Math.PI / 2;
-  pool.position.y = 0.012;
-  pool.userData = { warehouseLighting: true, physicsIgnore: true, dofIgnore: true };
-  lighting.add(pool);
+    const spotlight = new THREE.SpotLight(0xffc979, 220, 72, Math.PI / 2, 0.62, 1.45);
+    spotlight.name = `WarehouseQuadrantSpotlight:${spotlightDefinition.id}`;
+    spotlight.position.set(
+      spotlightDefinition.x,
+      WAREHOUSE_SPOTLIGHT_HEIGHT,
+      spotlightDefinition.z,
+    );
+    spotlight.target = target;
+    spotlight.castShadow = false;
+    spotlight.userData = {
+      warehouseLighting: true,
+      physicsIgnore: true,
+      castsShadow: false,
+      spotlightQuadrant: spotlightDefinition.id,
+      generation: WAREHOUSE_SPOTLIGHT_GENERATION,
+    };
+    lighting.add(spotlight);
+
+    const shaft = new THREE.Mesh(
+      new THREE.ConeGeometry(shaftHeight, shaftHeight, 24, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xffc979,
+        transparent: true,
+        opacity: 0.055,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    shaft.name = `WarehouseQuadrantSpotlightShaft:${spotlightDefinition.id}`;
+    shaft.position.set(spotlightDefinition.x, shaftHeight / 2, spotlightDefinition.z);
+    shaft.userData = {
+      warehouseLighting: true,
+      physicsIgnore: true,
+      dofIgnore: true,
+      spotlightQuadrant: spotlightDefinition.id,
+      generation: WAREHOUSE_SPOTLIGHT_GENERATION,
+    };
+    lighting.add(shaft);
+
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(shaftHeight, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xffc979,
+        transparent: true,
+        opacity: 0.07,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    pool.name = `WarehouseQuadrantSpotlightPool:${spotlightDefinition.id}`;
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.set(spotlightDefinition.x, 0.012, spotlightDefinition.z);
+    pool.userData = {
+      warehouseLighting: true,
+      physicsIgnore: true,
+      dofIgnore: true,
+      spotlightQuadrant: spotlightDefinition.id,
+      generation: WAREHOUSE_SPOTLIGHT_GENERATION,
+    };
+    lighting.add(pool);
+  }
 
   createWarehousePerimeterLights(lighting);
   createWarehouseEmergencyLights(lighting);
@@ -1474,7 +1623,7 @@ export const createDebuggingTwoMap = (
   root.userData = {
     mapId: "debugging-02",
     generation: "warehouse-data-center-v1",
-    physicsGeneration: "warehouse-supported-piles-v5",
+    physicsGeneration: "warehouse-supported-piles-v7-tall-towers-rack-dynamics",
     roomSeed: normalizedSeed,
     boxSizeMeters: DEBUGGING_TWO_BOX_SIZE,
     boxGapMeters: DEBUGGING_TWO_BOX_GAP,
@@ -1483,12 +1632,14 @@ export const createDebuggingTwoMap = (
     wallCount: warehouse.wallCount,
     wallCrateCount: warehouse.wallCrateCount,
     fogGeneration: WAREHOUSE_FOG_GENERATION,
+    spotlightGeneration: WAREHOUSE_SPOTLIGHT_GENERATION,
+    spotlightCount: WAREHOUSE_SPOTLIGHT_QUADRANTS.length,
     lensFlareGeneration: WAREHOUSE_LENS_FLARE_GENERATION,
     lensFlareSpriteCount: WAREHOUSE_LENS_FLARE_SPRITE_COUNT,
   };
   scene.add(root);
-  // Keep the warehouse background black so the explicit spotlight, corner
-  // fill, and red emergency fixtures remain easy to read.
+  // Keep the warehouse background black so the explicit quadrant spotlights,
+  // perimeter fill, and red emergency fixtures remain easy to read.
   scene.background = new THREE.Color(0x000000);
   scene.fog = createWarehouseFog();
   scene.environment = null;
@@ -1496,13 +1647,17 @@ export const createDebuggingTwoMap = (
   const textures: THREE.Texture[] = [];
   createPlatform(root, textures);
   createWarehouseStructure(root, textures);
-  createWarehouseRacks(root, warehouse.boxes, normalizedSeed);
+  const rackRender = createWarehouseRacks(root, warehouse.boxes, normalizedSeed);
   createWarehouseLighting(scene, textures);
 
   return {
     root,
+    rackBodyMesh: rackRender.bodyMesh,
     physicsBoxes: warehouse.physicsBoxes,
-    spawn: { x: 0, y: 1.05, z: 27 },
+    staticPhysicsBoxes: [],
+    markRackDamaged: rackRender.markRackDamaged,
+    updateRackPresentation: rackRender.updatePresentation,
+    spawn: { x: 0, y: WAREHOUSE_FLOOR_TOP_Y, z: 27 },
     simulantSpawn: { x: 0, y: 1.05, z: -27 },
     variant: "Ice-blue data center",
     explorationArea: "Ice-blue data center",

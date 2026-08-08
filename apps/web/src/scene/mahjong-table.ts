@@ -89,6 +89,7 @@ import {
 import {
   MELEE_SWING_ARC_RADIANS,
   MELEE_SWING_RECOVERY_SECONDS,
+  MELEE_STOPPING_POWER_MAX_METERS_PER_SECOND,
   resolveMeleeLongestSizeMeters,
   resolveMeleeO2Cost,
   resolveMeleeRangeMeters,
@@ -115,10 +116,14 @@ import {
   type CombatDamageSource,
   type CombatHitZone,
 } from "./combat-damage.js";
+import { createKillScoreSnapshot, recordKill, type KillScoreSnapshot } from "./kill-scoreboard.js";
 import {
   createDebuggingTwoMap,
   createWarehouseFog,
   DEBUGGING_TWO_WORLD_BOUNDS,
+  DEBUGGING_TWO_BOX_SIZE,
+  DEBUGGING_TWO_BOX_STACK_PITCH,
+  WAREHOUSE_FLOOR_TOP_Y,
   type DebuggingTwoMeleeKind,
   type DebuggingTwoMapResources,
 } from "./debugging-two-map.js";
@@ -181,6 +186,7 @@ import {
 import {
   CAMERA_VIEWMODEL_STANDING_OFFSET,
   createCameraMotionDamper,
+  resolveCameraLocalAccelerationFromWorld,
   resolveCameraLocalAccelerationFromVelocityDelta,
   resolveCameraViewmodelTransition,
   type CameraLocalFrame,
@@ -239,8 +245,21 @@ import {
   type RagdollImpulse,
   type RagdollState,
 } from "./ragdoll.js";
+import {
+  createMeleeImpactFlashPass,
+  MELEE_IMPACT_DOF_BOOST_DURATION_SECONDS,
+  MELEE_IMPACT_DOF_INTENSITY_MULTIPLIER,
+  MELEE_IMPACT_FLASH_DURATION_SECONDS,
+  MELEE_IMPACT_MAX_DAMAGE,
+  resolveMeleeImpactFlashOpacity,
+  resolveMeleeImpactFlashOpacityAtTime,
+  resolveMeleeImpactFocusDistance,
+  resolveMeleeImpactFocusShiftMeters,
+  setMeleeImpactFlashOpacity,
+} from "./melee-impact.js";
 
 export type { PlayerVitalsDamageResult, PlayerVitalsState } from "./player-vitals.js";
+export type { KillScoreSnapshot } from "./kill-scoreboard.js";
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
@@ -528,10 +547,14 @@ const PLAYER_RESPAWN_FADE_IN_DURATION_MS = 260;
 const LOCAL_PLAYER_COMBAT_ACTOR_ID = "player";
 const SIMULANT_COMBAT_ACTOR_ID = "bot:simulant";
 const SIMULANT_STOP_DISTANCE_METERS = 2.4;
+const SIMULANT_WEAPON_PICKUP_DISTANCE_METERS = 1.9;
+const SIMULANT_MELEE_COOLDOWN_SECONDS = 0.28;
+const SIMULANT_WEAPON_HAND_OFFSET = { x: 0.34, y: 0.42, z: -0.24 } as const;
 /** Stopping power briefly interrupts the charge before the simulant resumes. */
 const SIMULANT_MAX_STAGGER_SECONDS = 0.65;
 const SIMULANT_STAGGER_SECONDS_PER_STOPPING_POWER = 0.09;
 const SIMULANT_KNOCKBACK_DAMPING_PER_SECOND = 5.2;
+const PLAYER_KNOCKBACK_DAMPING_PER_SECOND = 5.2;
 // Keep the 250 m FPS world bounded to 125 m from the origin in each direction.
 // Coarse chunks preserve long traversal sightlines while keeping the resident
 // grid compact enough for the runner prototype.
@@ -559,6 +582,35 @@ interface WorldBounds {
   readonly minZ: number;
   readonly maxZ: number;
 }
+
+type SimulantWeaponTarget =
+  | { readonly kind: "melee-prop"; readonly objectId: number }
+  | { readonly kind: "gun"; readonly pickupId: string; readonly weapon: WeaponId };
+
+type SimulantWeaponSource =
+  | {
+      readonly kind: "melee-prop";
+      readonly objectId: number;
+      readonly snapshot: MeleeObjectSnapshot;
+      readonly color: number;
+      readonly sourceMatrix: THREE.Matrix4;
+      readonly mesh: THREE.InstancedMesh;
+    }
+  | {
+      readonly kind: "gun";
+      readonly pickupId: string;
+      readonly weapon: WeaponId;
+      readonly snapshot: MeleeObjectSnapshot;
+      readonly color: number;
+    };
+
+type SimulantMeleeTarget =
+  | { readonly kind: "player" }
+  | {
+      readonly kind: "support-box";
+      readonly objectId: number;
+      readonly position: PhysicsVector;
+    };
 
 const WORLD_BOUNDS: WorldBounds = {
   minX: -EXPLORATION_WORLD_HALF_SIZE,
@@ -1038,6 +1090,7 @@ export interface MahjongTableSceneOptions {
   readonly onSprintingChange?: (sprinting: boolean) => void;
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
+  readonly onKillScoreChange?: (score: KillScoreSnapshot) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
   readonly onMeleeStateChange?: (state: MeleeStateSnapshot) => void;
   readonly onReady?: () => void;
@@ -1666,6 +1719,41 @@ export const resolveSimulantShotDamage = (
     ? Math.max(0, Math.floor(projectileCount))
     : 0;
   return damage * projectiles;
+};
+
+/**
+ * Accumulate a horizontal melee impulse on the local player.
+ *
+ * The direction points from the simulant to the player, so the resulting
+ * velocity moves the player away from the contact. Keep the accumulated
+ * impulse bounded by the shared melee stopping-power cap; repeated swings
+ * must not launch the player outside the playable world in one frame.
+ */
+export const resolvePlayerKnockbackVelocity = (
+  direction: PhysicsVector,
+  stoppingPower: number,
+  currentVelocity: PhysicsVector = { x: 0, y: 0, z: 0 },
+): PhysicsVector => {
+  const currentX = Number.isFinite(currentVelocity.x) ? currentVelocity.x : 0;
+  const currentZ = Number.isFinite(currentVelocity.z) ? currentVelocity.z : 0;
+  const safeStoppingPower = Number.isFinite(stoppingPower)
+    ? THREE.MathUtils.clamp(stoppingPower, 0, MELEE_STOPPING_POWER_MAX_METERS_PER_SECOND)
+    : 0;
+  const directionX = Number.isFinite(direction.x) ? direction.x : 0;
+  const directionZ = Number.isFinite(direction.z) ? direction.z : 0;
+  const directionLength = Math.hypot(directionX, directionZ);
+  let nextX = currentX;
+  let nextZ = currentZ;
+  if (directionLength > Number.EPSILON && safeStoppingPower > 0) {
+    nextX += (directionX / directionLength) * safeStoppingPower;
+    nextZ += (directionZ / directionLength) * safeStoppingPower;
+  }
+  const nextLength = Math.hypot(nextX, nextZ);
+  if (nextLength <= MELEE_STOPPING_POWER_MAX_METERS_PER_SECOND) {
+    return { x: nextX, y: 0, z: nextZ };
+  }
+  const scale = MELEE_STOPPING_POWER_MAX_METERS_PER_SECOND / nextLength;
+  return { x: nextX * scale, y: 0, z: nextZ * scale };
 };
 
 const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
@@ -4891,6 +4979,12 @@ interface WeaponRuntime {
   readonly cycleWeapon: (direction?: 1 | -1) => boolean;
   readonly cycleWeaponTo: (weapon: WeaponId) => boolean;
   readonly dropActiveWeapon: (playerVelocity?: PhysicsVector) => void;
+  /** Claim a world pickup for the simulant without adding it to the player inventory. */
+  readonly claimPickupForBot: (pickupId: string) => WeaponId | null;
+  /** Return fixed gun pickups that have not been claimed by either actor. */
+  readonly getAvailablePickups: () => readonly WeaponPickupSpawn[];
+  /** Restore a bot-claimed pickup when the simulant respawns. */
+  readonly releasePickupFromBot: (pickupId: string) => boolean;
   readonly recordDeath: () => void;
   readonly getWeaponScopeLens: () => {
     readonly anchor: THREE.Object3D;
@@ -6888,6 +6982,39 @@ const createWeaponRuntime = (
     emitState(true);
     return true;
   };
+  const claimPickupForBot = (pickupId: string): WeaponId | null => {
+    const normalizedId = pickupId.trim();
+    if (normalizedId.length === 0) {
+      return null;
+    }
+    const visual = pickupVisuals.find((candidate) => candidate.spawn.id === normalizedId);
+    if (visual === undefined || visual.collected) {
+      return null;
+    }
+    visual.collected = true;
+    visual.root.visible = false;
+    if (nearbyPickup === visual.spawn.weapon) {
+      nearbyPickup = null;
+    }
+    emitState(true);
+    return visual.spawn.weapon;
+  };
+  const getAvailablePickups = (): readonly WeaponPickupSpawn[] =>
+    pickupVisuals.filter((visual) => !visual.collected).map((visual) => visual.spawn);
+  const releasePickupFromBot = (pickupId: string): boolean => {
+    const normalizedId = pickupId.trim();
+    if (normalizedId.length === 0) {
+      return false;
+    }
+    const visual = pickupVisuals.find((candidate) => candidate.spawn.id === normalizedId);
+    if (visual === undefined || !visual.collected) {
+      return false;
+    }
+    visual.collected = false;
+    visual.root.visible = true;
+    emitState(true);
+    return true;
+  };
   const findNearestPickup = (
     position: THREE.Vector3,
   ): { readonly visual: WeaponPickupVisual; readonly distance: number } | undefined =>
@@ -8157,6 +8284,9 @@ const createWeaponRuntime = (
     cycleWeapon,
     cycleWeaponTo: selectWeapon,
     dropActiveWeapon,
+    claimPickupForBot,
+    getAvailablePickups,
+    releasePickupFromBot,
     recordDeath,
     getWeaponScopeLens,
     getSniperScopeLens: getWeaponScopeLens,
@@ -10583,6 +10713,8 @@ interface ExplorationWorld {
     object: THREE.Object3D,
     instanceIndex: number | undefined,
   ) => number | null;
+  /** Resolve the lowest warehouse rack supporting a grounded player position. */
+  readonly getMeleeSupportTarget: (position: PhysicsVector) => ExplorationMeleeSupportTarget | null;
   /** Resolve any streamed knockable prop, including one already in ragdoll. */
   readonly getRagdollObjectIdForHit: (
     object: THREE.Object3D,
@@ -10625,6 +10757,11 @@ interface ExplorationMeleePickup {
   readonly color: number;
 }
 
+interface ExplorationMeleeSupportTarget {
+  readonly objectId: number;
+  readonly position: PhysicsVector;
+}
+
 interface ExplorationChunk {
   readonly root: THREE.Group;
   readonly physicsBoxes: readonly PhysicsBox[];
@@ -10642,6 +10779,8 @@ interface ExplorationKnockable {
   readonly color: number;
   rotationY?: number;
   readonly physicsId: number;
+  /** Warehouse server cabinets are released only by projectile/melee impact. */
+  readonly warehouseRack?: boolean;
   readonly fallAxis: THREE.Vector3;
   readonly launchLinearVelocity: THREE.Vector3;
   readonly launchAngularVelocity: THREE.Vector3;
@@ -11007,6 +11146,83 @@ export const createExplorationWorld = (
   let physicsVersion = 0;
   let currentArea = warehouseResources?.explorationArea ?? "Penthouse";
 
+  const warehouseRackSupportTolerance = DEBUGGING_TWO_BOX_SIZE * 0.12;
+  const warehouseRackLayerTolerance = DEBUGGING_TWO_BOX_SIZE * 0.04;
+
+  const activateWarehouseRack = (
+    rack: ExplorationKnockable,
+    direction: PhysicsVector,
+    stoppingPower: number,
+    isImpactRoot: boolean,
+  ): void => {
+    warehouseResources?.markRackDamaged(rack.index);
+    activateKnockableRagdoll(rack, direction);
+    const safeStoppingPower = Number.isFinite(stoppingPower) ? Math.max(0, stoppingPower) : 0;
+    const horizontalDirection = new THREE.Vector3(direction.x, 0, direction.z);
+    if (horizontalDirection.lengthSq() <= Number.EPSILON) {
+      horizontalDirection.set(0, 0, -1);
+    } else {
+      horizontalDirection.normalize();
+    }
+    const impulseScale = isImpactRoot
+      ? THREE.MathUtils.clamp(0.55 + safeStoppingPower * 0.22, 0.55, 4.4)
+      : THREE.MathUtils.clamp(0.12 + safeStoppingPower * 0.025, 0.12, 0.55);
+    rack.launchLinearVelocity.set(
+      horizontalDirection.x * impulseScale,
+      isImpactRoot ? 1.15 + safeStoppingPower * 0.08 : 0.12,
+      horizontalDirection.z * impulseScale,
+    );
+    rack.launchAngularVelocity
+      .copy(rack.fallAxis)
+      .multiplyScalar(
+        isImpactRoot ? THREE.MathUtils.clamp(1.8 + safeStoppingPower * 0.12, 1.8, 4.8) : 1.6,
+      );
+    rack.kickCooldownSeconds = knockRehitCooldownSeconds;
+  };
+
+  const releaseSupportedWarehouseRacks = (
+    rootRack: ExplorationKnockable,
+    direction: PhysicsVector,
+    stoppingPower: number,
+  ): void => {
+    const released = new Set<number>();
+    const pending: ExplorationKnockable[] = [rootRack];
+    while (pending.length > 0) {
+      const supportRack = pending.shift();
+      if (supportRack === undefined) {
+        continue;
+      }
+      for (const chunk of activeChunks.values()) {
+        for (const candidate of chunk.knockableProps) {
+          if (
+            candidate.warehouseRack !== true ||
+            candidate.isEquipped ||
+            candidate.isKnocked ||
+            released.has(candidate.physicsId)
+          ) {
+            continue;
+          }
+          const sameSupportCell =
+            Math.abs(candidate.basePosition.x - supportRack.basePosition.x) <=
+              warehouseRackSupportTolerance &&
+            Math.abs(candidate.basePosition.z - supportRack.basePosition.z) <=
+              warehouseRackSupportTolerance;
+          const directlySupported =
+            Math.abs(
+              candidate.basePosition.y -
+                (supportRack.basePosition.y + DEBUGGING_TWO_BOX_STACK_PITCH),
+            ) <= warehouseRackLayerTolerance;
+          if (!sameSupportCell || !directlySupported) {
+            continue;
+          }
+          released.add(candidate.physicsId);
+          activateWarehouseRack(candidate, direction, stoppingPower, false);
+          pending.push(candidate);
+        }
+      }
+    }
+  };
+
   const activateKnockableRagdoll = (
     knockable: ExplorationKnockable,
     direction: PhysicsVector,
@@ -11126,6 +11342,43 @@ export const createExplorationWorld = (
     };
     const knockableProps: ExplorationKnockable[] = [];
     const yAxis = new THREE.Vector3(0, 1, 0);
+    const rackBodyMesh = warehouseResources.rackBodyMesh;
+    if (rackBodyMesh.count !== warehouseResources.physicsBoxes.length) {
+      throw new Error("Warehouse rack render and physics counts must match");
+    }
+    const rackMatrix = new THREE.Matrix4();
+    const rackPosition = new THREE.Vector3();
+    const rackQuaternion = new THREE.Quaternion();
+    const rackScale = new THREE.Vector3();
+    warehouseResources.physicsBoxes.forEach((physicsBox, index) => {
+      rackBodyMesh.getMatrixAt(index, rackMatrix);
+      rackMatrix.decompose(rackPosition, rackQuaternion, rackScale);
+      knockableProps.push({
+        mesh: rackBodyMesh,
+        index,
+        basePosition: rackPosition.clone(),
+        baseScale: rackScale.clone(),
+        baseQuaternion: rackQuaternion.clone(),
+        halfExtents: physicsBox.halfExtents,
+        displayName: "Data-center server",
+        color: 0x102534,
+        physicsId: nextKnockablePhysicsId,
+        warehouseRack: true,
+        fallAxis: new THREE.Vector3(0, 0, 1),
+        launchLinearVelocity: new THREE.Vector3(),
+        launchAngularVelocity: new THREE.Vector3(),
+        isKnocked: false,
+        isDropped: false,
+        isEquipped: false,
+        angle: 0,
+        angularVelocity: 0,
+        targetAngle: Math.PI * 0.7,
+        hasBodyState: false,
+        kickCooldownSeconds: 0,
+        ...(physicsBox.rotationY === undefined ? {} : { rotationY: physicsBox.rotationY }),
+      });
+      nextKnockablePhysicsId += 1;
+    });
     for (const spawn of warehouseResources.meleeObjects) {
       const geometry = warehouseMeleeGeometries.get(spawn.kind);
       if (geometry === undefined) {
@@ -11161,6 +11414,7 @@ export const createExplorationWorld = (
         halfExtents: resolveWarehouseMeleeHalfExtents(geometry, baseScale),
         displayName: spawn.displayName,
         color: spawn.color,
+        warehouseRack: false,
         rotationY: spawn.rotationY,
         physicsId: nextKnockablePhysicsId,
         fallAxis: new THREE.Vector3(0, 0, 1),
@@ -12027,6 +12281,11 @@ export const createExplorationWorld = (
           if (!shouldKnock || impactMagnitude <= 0) {
             continue;
           }
+          // Server cabinets are released by a projectile impact, not by the
+          // player brushing against their static support footprint.
+          if (knockable.warehouseRack === true) {
+            continue;
+          }
           if (knockable.halfExtents.y > knockableHeightMax) {
             continue;
           }
@@ -12087,6 +12346,7 @@ export const createExplorationWorld = (
         if (
           wasKnocked &&
           shouldKnock &&
+          knockable.warehouseRack !== true &&
           knockable.kickCooldownSeconds <= 0 &&
           impactMagnitude > 0 &&
           knockable.halfExtents.y <= knockableHeightMax
@@ -12182,6 +12442,10 @@ export const createExplorationWorld = (
     for (const mesh of updatedMeshes) {
       refreshKnockableMeshBounds(mesh);
     }
+    // Rack LEDs are stored in rack-local space. Recompose them only after the
+    // live body instances have received their Rapier/fallback transforms so
+    // they tumble with the cabinets instead of remaining at spawn positions.
+    warehouseResources?.updateRackPresentation();
     if (physicsChanged) {
       physicsVersion += 1;
     }
@@ -12237,6 +12501,115 @@ export const createExplorationWorld = (
       }
     }
     return null;
+  };
+
+  const isPositionInsideRackFootprint = (
+    position: PhysicsVector,
+    rack: ExplorationKnockable,
+  ): boolean => {
+    const offsetX = position.x - rack.basePosition.x;
+    const offsetZ = position.z - rack.basePosition.z;
+    const rotation = rack.rotationY ?? 0;
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    // Transform the world-space player position into the rack's local
+    // horizontal frame before applying its half-extents. The extra capsule
+    // radius keeps a grounded player on the edge of a box eligible.
+    const localX = offsetX * cos + offsetZ * sin;
+    const localZ = -offsetX * sin + offsetZ * cos;
+    const margin = PLAYER_CAPSULE_RADIUS + 0.0005;
+    return (
+      Math.abs(localX) <= rack.halfExtents.x + margin &&
+      Math.abs(localZ) <= rack.halfExtents.z + margin
+    );
+  };
+
+  const getMeleeSupportTarget = (position: PhysicsVector): ExplorationMeleeSupportTarget | null => {
+    if (
+      !Number.isFinite(position.x) ||
+      !Number.isFinite(position.y) ||
+      !Number.isFinite(position.z)
+    ) {
+      return null;
+    }
+    const feetY = position.y - PLAYER_CAPSULE_CENTER_HEIGHT;
+    const supportHeightTolerance = PLAYER_SUPPORT_SNAP_HEIGHT + 0.08;
+    let topRack: ExplorationKnockable | null = null;
+    let topRackY = Number.NEGATIVE_INFINITY;
+    for (const chunk of activeChunks.values()) {
+      for (const candidate of chunk.knockableProps) {
+        if (
+          candidate.warehouseRack !== true ||
+          candidate.isKnocked ||
+          candidate.isEquipped ||
+          !isPositionInsideRackFootprint(position, candidate)
+        ) {
+          continue;
+        }
+        const candidateTopY = candidate.basePosition.y + candidate.halfExtents.y;
+        if (
+          candidateTopY > feetY + supportHeightTolerance ||
+          feetY - candidateTopY > supportHeightTolerance ||
+          candidateTopY <= topRackY
+        ) {
+          continue;
+        }
+        topRack = candidate;
+        topRackY = candidateTopY;
+      }
+    }
+    if (topRack === null) {
+      return null;
+    }
+
+    // Hit the lowest rack in the connected support column. The existing
+    // warehouse impact rule then releases every directly supported rack above
+    // it, so a tall stack collapses as one readable event.
+    let rootRack = topRack;
+    for (;;) {
+      let lowerRack: ExplorationKnockable | null = null;
+      for (const chunk of activeChunks.values()) {
+        for (const candidate of chunk.knockableProps) {
+          if (
+            candidate.warehouseRack !== true ||
+            candidate.isKnocked ||
+            candidate.isEquipped ||
+            candidate.basePosition.y >= rootRack.basePosition.y
+          ) {
+            continue;
+          }
+          const sameSupportCell =
+            Math.abs(candidate.basePosition.x - rootRack.basePosition.x) <=
+              warehouseRackSupportTolerance &&
+            Math.abs(candidate.basePosition.z - rootRack.basePosition.z) <=
+              warehouseRackSupportTolerance;
+          const directlyBelow =
+            Math.abs(
+              rootRack.basePosition.y - (candidate.basePosition.y + DEBUGGING_TWO_BOX_STACK_PITCH),
+            ) <= warehouseRackLayerTolerance;
+          if (!sameSupportCell || !directlyBelow) {
+            continue;
+          }
+          lowerRack = candidate;
+          break;
+        }
+        if (lowerRack !== null) {
+          break;
+        }
+      }
+      if (lowerRack === null) {
+        break;
+      }
+      rootRack = lowerRack;
+    }
+    return {
+      objectId: rootRack.physicsId,
+      position: {
+        x: rootRack.basePosition.x,
+        y: rootRack.basePosition.y,
+        z: rootRack.basePosition.z,
+      },
+    };
   };
 
   const dispose = (): void => {
@@ -12337,7 +12710,7 @@ export const createExplorationWorld = (
           // Every world prop is a valid melee weapon. A toppled prop follows
           // the same live instance transform as a deliberately dropped one,
           // so it can be recovered while its ragdoll body is still settling.
-          if (!knockable.isEquipped) {
+          if (!knockable.isEquipped && knockable.warehouseRack !== true) {
             pickups.push(toMeleePickup(knockable));
           }
         }
@@ -12352,12 +12725,18 @@ export const createExplorationWorld = (
         const knockable = chunk.knockableProps.find(
           (candidate) => candidate.mesh === object && candidate.index === instanceIndex,
         );
-        if (knockable !== undefined && !knockable.isEquipped && !knockable.isDropped) {
+        if (
+          knockable !== undefined &&
+          knockable.warehouseRack !== true &&
+          !knockable.isEquipped &&
+          !knockable.isDropped
+        ) {
           return knockable.physicsId;
         }
       }
       return null;
     },
+    getMeleeSupportTarget,
     getRagdollObjectIdForHit: (object, instanceIndex) => {
       if (!(object instanceof THREE.InstancedMesh) || instanceIndex === undefined) {
         return null;
@@ -12374,7 +12753,7 @@ export const createExplorationWorld = (
     },
     equipMeleeObject: (objectId) => {
       const knockable = findKnockable(objectId);
-      if (knockable === null || knockable.isEquipped) {
+      if (knockable === null || knockable.isEquipped || knockable.warehouseRack === true) {
         return null;
       }
       // A toppled or dropped prop may still be rotating or moving in the
@@ -12457,6 +12836,16 @@ export const createExplorationWorld = (
       if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
         return false;
       }
+      if (knockable.warehouseRack === true) {
+        const safeStoppingPower =
+          stoppingPower !== undefined && Number.isFinite(stoppingPower)
+            ? Math.max(0, stoppingPower)
+            : 0;
+        activateWarehouseRack(knockable, direction, safeStoppingPower, true);
+        releaseSupportedWarehouseRacks(knockable, direction, safeStoppingPower);
+        physicsVersion += 1;
+        return true;
+      }
       knockable.isDropped = false;
       const safeSwingSpeed = Number.isFinite(swingSpeed) ? Math.max(0, swingSpeed) : 0;
       const swingScale = THREE.MathUtils.clamp(safeSwingSpeed / 8, 0.35, 2.2);
@@ -12495,7 +12884,12 @@ export const createExplorationWorld = (
       const wasKnocked = knockable.isKnocked;
       knockable.isDropped = false;
       if (!wasKnocked) {
-        activateKnockableRagdoll(knockable, direction);
+        if (knockable.warehouseRack === true) {
+          activateWarehouseRack(knockable, direction, safeStoppingPower, true);
+          releaseSupportedWarehouseRacks(knockable, direction, safeStoppingPower);
+        } else {
+          activateKnockableRagdoll(knockable, direction);
+        }
       } else {
         // A shot should continue to contribute force after the first pellet
         // starts the ragdoll. This is what makes a full shotgun spread read as
@@ -12869,7 +13263,7 @@ export const createMahjongTableScene = (
   const requestedQuality =
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
   const cleanSlateSeatPreset: CameraPreset = {
-    position: new THREE.Vector3(0, STANDING_EYE_HEIGHT, 27),
+    position: new THREE.Vector3(0, WAREHOUSE_FLOOR_TOP_Y + STANDING_EYE_HEIGHT, 27),
     target: new THREE.Vector3(0, 1.1, 0),
   };
   const cleanSlateOverheadPreset: CameraPreset = {
@@ -12922,6 +13316,9 @@ export const createMahjongTableScene = (
   const cameraMotionRight = new THREE.Vector3();
   const cameraMotionForward = new THREE.Vector3();
   const cameraMotionUp = new THREE.Vector3();
+  const cameraImpactRight = new THREE.Vector3();
+  const cameraImpactForward = new THREE.Vector3();
+  const cameraImpactUp = new THREE.Vector3();
   const quality = resolveQuality(requestedQuality);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   renderer.shadowMap.enabled = quality.shadows !== "off";
@@ -13027,6 +13424,16 @@ export const createMahjongTableScene = (
     elapsedSeconds: number;
   }
   const damageVignettePulses: DamageVignettePulse[] = [];
+  interface MeleeImpactFlashPulse {
+    readonly pass: ReturnType<typeof createMeleeImpactFlashPass>;
+    readonly initialOpacity: number;
+    elapsedSeconds: number;
+    /** Keep the hit at its requested opacity through the first rendered frame. */
+    fresh: boolean;
+  }
+  const meleeImpactFlashPulses: MeleeImpactFlashPulse[] = [];
+  let meleeFocusSeverity = 0;
+  let meleeDofBoostRemainingSeconds = 0;
   const syncDamageVignettePassSizes = (width: number, height: number): void => {
     for (const pulse of damageVignettePulses) {
       setDamageVignettePassSize(pulse.pass, width, height);
@@ -13054,6 +13461,69 @@ export const createMahjongTableScene = (
     }
     damageVignettePulses.length = 0;
     publishDamageVignetteLayerCount();
+  };
+  const addMeleeImpactFlash = (damage: number): void => {
+    const initialOpacity = resolveMeleeImpactFlashOpacity(damage);
+    if (initialOpacity <= 0) {
+      return;
+    }
+    const pass = createMeleeImpactFlashPass(damage);
+    const outputIndex = composer.passes.indexOf(outputPass);
+    composer.insertPass(pass, outputIndex >= 0 ? outputIndex : composer.passes.length);
+    meleeImpactFlashPulses.push({ pass, initialOpacity, elapsedSeconds: 0, fresh: true });
+    meleeFocusSeverity = Math.max(meleeFocusSeverity, resolveMeleeImpactFlashOpacity(damage));
+    meleeDofBoostRemainingSeconds = MELEE_IMPACT_DOF_BOOST_DURATION_SECONDS;
+    container.dataset.playerMeleeImpactOpacity = initialOpacity.toFixed(3);
+    container.dataset.playerMeleeFocusShiftMeters =
+      resolveMeleeImpactFocusShiftMeters(damage).toFixed(3);
+  };
+  const clearMeleeImpactFlashes = (): void => {
+    for (const pulse of meleeImpactFlashPulses) {
+      composer.removePass(pulse.pass);
+      pulse.pass.dispose();
+    }
+    meleeImpactFlashPulses.length = 0;
+    meleeFocusSeverity = 0;
+    meleeDofBoostRemainingSeconds = 0;
+    container.dataset.playerMeleeImpactOpacity = "0";
+    container.dataset.playerMeleeFocusShiftMeters = "0";
+  };
+  const updateMeleeImpactFlashes = (deltaSeconds: number): void => {
+    const delta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    let hasFreshPulse = false;
+    for (let index = meleeImpactFlashPulses.length - 1; index >= 0; index -= 1) {
+      const pulse = meleeImpactFlashPulses[index];
+      if (pulse === undefined) {
+        continue;
+      }
+      // A simulant hit can be resolved earlier in this same animation frame.
+      // Do not spend that frame's delta before the compositor presents the
+      // newly inserted pass; the impact must begin at its full opacity.
+      if (pulse.fresh) {
+        hasFreshPulse = true;
+        pulse.fresh = false;
+        setMeleeImpactFlashOpacity(pulse.pass, pulse.initialOpacity);
+        continue;
+      }
+      pulse.elapsedSeconds += delta;
+      if (pulse.elapsedSeconds >= MELEE_IMPACT_FLASH_DURATION_SECONDS) {
+        composer.removePass(pulse.pass);
+        pulse.pass.dispose();
+        meleeImpactFlashPulses.splice(index, 1);
+        continue;
+      }
+      setMeleeImpactFlashOpacity(
+        pulse.pass,
+        resolveMeleeImpactFlashOpacityAtTime(pulse.initialOpacity, pulse.elapsedSeconds),
+      );
+    }
+    if (!hasFreshPulse) {
+      meleeFocusSeverity = THREE.MathUtils.damp(meleeFocusSeverity, 0, 5.5, delta);
+      meleeDofBoostRemainingSeconds = Math.max(0, meleeDofBoostRemainingSeconds - delta);
+    }
+    container.dataset.playerMeleeFocusShiftMeters = resolveMeleeImpactFocusShiftMeters(
+      meleeFocusSeverity * MELEE_IMPACT_MAX_DAMAGE,
+    ).toFixed(3);
   };
   const updateDamageVignettePulses = (
     deltaSeconds: number,
@@ -13539,7 +14009,34 @@ export const createMahjongTableScene = (
   let coverSnapTarget: PhysicsVector | null = null;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
+  const playerKnockbackVelocity = new THREE.Vector3();
   const cameraMotion = createCameraMotionDamper();
+  /** Project a world-space melee push into the current camera frame. */
+  const resolveLocalMeleeImpactDirection = (
+    worldDirection: PhysicsVector,
+  ): CameraLocalAcceleration => {
+    cameraImpactRight.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+    cameraImpactForward.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+    cameraImpactUp.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+    return resolveCameraLocalAccelerationFromWorld(worldDirection, {
+      right: cameraImpactRight,
+      forward: cameraImpactForward,
+      up: cameraImpactUp,
+    });
+  };
+  /** Apply one directional kick through the same camera/viewmodel damper. */
+  const applyMeleeViewImpact = (
+    worldDirection: PhysicsVector,
+    stoppingPower: number,
+    directionSign: 1 | -1,
+  ): void => {
+    const localDirection = resolveLocalMeleeImpactDirection({
+      x: worldDirection.x * directionSign,
+      y: worldDirection.y * directionSign,
+      z: worldDirection.z * directionSign,
+    });
+    cameraMotion.applyMeleeImpactImpulse({ localDirection, stoppingPower });
+  };
   let touchMovementActive = false;
   let touchForward = 0;
   let touchRight = 0;
@@ -13573,9 +14070,21 @@ export const createMahjongTableScene = (
   let simulantWorldVelocity: PhysicsVector = { x: 0, y: 0, z: 0 };
   const simulantKnockbackVelocity = new THREE.Vector3();
   let simulantStaggerSeconds = 0;
+  let simulantWeaponTarget: SimulantWeaponTarget | null = null;
+  let simulantWeapon: SimulantWeaponSource | null = null;
+  let simulantWeaponModel: THREE.Group | null = null;
+  let simulantMeleeSwinging = false;
+  let simulantMeleeSwingElapsedSeconds = 0;
+  let simulantMeleeSwingDurationSeconds = 0;
+  let simulantMeleeSwingDirection: MeleeSwingDirection = "right-to-left";
+  let simulantMeleeNextSwingDirection: MeleeSwingDirection = "right-to-left";
+  let simulantMeleeHitResolved = false;
+  let simulantMeleeTarget: SimulantMeleeTarget | null = null;
+  let simulantMeleeCooldownSeconds = 0;
   const simulantPerspectiveRig = createCameraMotionDamper();
   let simulantVitals = createPlayerVitals();
   let playerVitals = createPlayerVitals();
+  let killScore = createKillScoreSnapshot();
   let deathFadeStartTimer = 0;
   let deathRespawnTimer = 0;
   let vitalsPublishElapsed = 0;
@@ -13637,6 +14146,20 @@ export const createMahjongTableScene = (
         ? "true"
         : "false";
     options.onVitalsChange?.(playerVitals);
+  };
+  const publishKillScore = (): void => {
+    options.onKillScoreChange?.(killScore);
+  };
+  const recordAuthoritativeKill = (attackerId: CombatActorId | null): void => {
+    if (attackerId === LOCAL_PLAYER_COMBAT_ACTOR_ID) {
+      killScore = recordKill(killScore, "player");
+      publishKillScore();
+      return;
+    }
+    if (attackerId === SIMULANT_COMBAT_ACTOR_ID) {
+      killScore = recordKill(killScore, "simulant");
+      publishKillScore();
+    }
   };
   const didPlayerVitalsChange = (nextVitals: PlayerVitalsState): boolean =>
     nextVitals.health !== playerVitals.health ||
@@ -13727,6 +14250,7 @@ export const createMahjongTableScene = (
   const handlePlayerKilled = (): void => {
     startPlayerRagdoll();
     cameraMotion.applyDeathTumble();
+    playerKnockbackVelocity.set(0, 0, 0);
     pressedKeys.clear();
     jumpKeyHeld = false;
     touchMovementActive = false;
@@ -13755,9 +14279,13 @@ export const createMahjongTableScene = (
     onDamage: (result) => {
       addDamageVignette("shield", result.shieldDamage);
       addDamageVignette("health", result.healthDamage);
+      if (result.source.kind === "melee") {
+        addMeleeImpactFlash(result.damage);
+      }
       publishPlayerVitals(true);
     },
-    onKilled: () => {
+    onKilled: (result) => {
+      recordAuthoritativeKill(result.attackerId);
       weaponRuntime?.recordDeath();
       handlePlayerKilled();
     },
@@ -13775,10 +14303,177 @@ export const createMahjongTableScene = (
       }
       syncSimulantMarkerVitals();
     },
-    onKilled: () => {
+    onKilled: (result) => {
+      recordAuthoritativeKill(result.attackerId);
       scheduleSimulantRespawn();
     },
   });
+  const applyPlayerKnockback = (direction: PhysicsVector, stoppingPower: number): void => {
+    const resolved = resolvePlayerKnockbackVelocity(
+      direction,
+      stoppingPower,
+      playerKnockbackVelocity,
+    );
+    playerKnockbackVelocity.set(resolved.x, resolved.y, resolved.z);
+  };
+  const resolveSimulantMeleeHit = (): void => {
+    const source = simulantWeapon;
+    const target = simulantMeleeTarget;
+    if (
+      source === null ||
+      target === null ||
+      playerVitals.isDead ||
+      simulantVitals.isDead ||
+      simulantRagdollState !== null
+    ) {
+      return;
+    }
+    if (target.kind === "support-box") {
+      const direction = {
+        x: target.position.x - simulantPosition.x,
+        y: target.position.y - simulantPosition.y,
+        z: target.position.z - simulantPosition.z,
+      };
+      const horizontalDistance = Math.hypot(direction.x, direction.z);
+      if (horizontalDistance <= Number.EPSILON) {
+        return;
+      }
+      direction.x /= horizontalDistance;
+      direction.y = 0;
+      direction.z /= horizontalDistance;
+      const applied = explorationWorld?.applyMeleeHit(
+        target.objectId,
+        direction,
+        source.snapshot.swingSpeedRadiansPerSecond,
+        source.snapshot.stoppingPower,
+      );
+      if (applied === true) {
+        weaponRuntime?.playMeleeImpactSound(
+          source.snapshot,
+          new THREE.Vector3(target.position.x, target.position.y, target.position.z),
+        );
+      }
+      return;
+    }
+    const toPlayer = new THREE.Vector3(
+      camera.position.x - simulantPosition.x,
+      0,
+      camera.position.z - simulantPosition.z,
+    );
+    const distance = toPlayer.length();
+    const playerPosition =
+      physicsCharacterPosition ??
+      new THREE.Vector3(
+        camera.position.x,
+        camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+        camera.position.z,
+      );
+    const handHeight = simulantPosition.y + SIMULANT_WEAPON_HAND_OFFSET.y;
+    const verticalReach = Math.max(0.8, source.snapshot.rangeMeters + PLAYER_CAPSULE_RADIUS);
+    if (
+      distance <= 0.0001 ||
+      distance > SIMULANT_STOP_DISTANCE_METERS + 0.6 ||
+      Math.abs(playerPosition.y - handHeight) > verticalReach
+    ) {
+      return;
+    }
+    toPlayer.multiplyScalar(1 / distance);
+    const momentum = resolveMeleeDamageWithMomentum({
+      baseDamage: source.snapshot.damage,
+      attackDirection: { x: toPlayer.x, y: 0, z: toPlayer.z },
+      attackerVelocity: simulantWorldVelocity,
+      targetVelocity: presentationWorldVelocity,
+      attackerAirborne: false,
+    });
+    const applied = combatDamageRouter.apply({
+      targetId: LOCAL_PLAYER_COMBAT_ACTOR_ID,
+      amount: momentum.damage,
+      source: { kind: "melee", id: source.snapshot.displayName },
+      attackerId: SIMULANT_COMBAT_ACTOR_ID,
+    });
+    if (applied.damage > 0 && !applied.killed) {
+      const stoppingPower = resolveMeleeStoppingPower(momentum.damage);
+      // The camera follows the same away-from-attacker vector as the physical
+      // knockback. This is the resolved push direction, not a fixed backward
+      // kick based on where the victim happens to be looking.
+      applyMeleeViewImpact(toPlayer, stoppingPower, 1);
+      applyPlayerKnockback(toPlayer, stoppingPower);
+      weaponRuntime?.playMeleeImpactSound(source.snapshot, camera.position);
+    }
+  };
+  const startSimulantMeleeSwing = (target: SimulantMeleeTarget): void => {
+    const source = simulantWeapon;
+    if (
+      source === null ||
+      simulantMeleeSwinging ||
+      simulantMeleeCooldownSeconds > 0 ||
+      playerVitals.isDead ||
+      simulantVitals.isDead
+    ) {
+      return;
+    }
+    const swing = resolveMeleeSwing(source.snapshot.volumeM3);
+    simulantMeleeSwingDirection = simulantMeleeNextSwingDirection;
+    simulantMeleeNextSwingDirection =
+      simulantMeleeSwingDirection === "right-to-left" ? "left-to-right" : "right-to-left";
+    simulantMeleeSwingDurationSeconds = swing.swingDurationSeconds;
+    simulantMeleeSwingElapsedSeconds = 0;
+    simulantMeleeHitResolved = false;
+    simulantMeleeTarget = target;
+    simulantMeleeSwinging = true;
+    weaponRuntime?.playMeleeSwingSound(
+      source.snapshot,
+      simulantPosition,
+      simulantMeleeSwingDurationSeconds,
+    );
+  };
+  const resolveSimulantMeleeTarget = (
+    source: SimulantWeaponSource,
+    attackDistance: number,
+  ): SimulantMeleeTarget | null => {
+    const playerPosition =
+      physicsCharacterPosition ??
+      new THREE.Vector3(
+        camera.position.x,
+        camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+        camera.position.z,
+      );
+    const playerDistance = Math.hypot(
+      playerPosition.x - simulantPosition.x,
+      playerPosition.z - simulantPosition.z,
+    );
+    const handHeight = simulantPosition.y + SIMULANT_WEAPON_HAND_OFFSET.y;
+    const verticalReach = Math.max(0.8, source.snapshot.rangeMeters + PLAYER_CAPSULE_RADIUS);
+    if (
+      playerDistance <= attackDistance &&
+      Math.abs(playerPosition.y - handHeight) <= verticalReach
+    ) {
+      return { kind: "player" };
+    }
+    if (!grounded) {
+      return null;
+    }
+    const support = explorationWorld?.getMeleeSupportTarget({
+      x: playerPosition.x,
+      y: playerPosition.y,
+      z: playerPosition.z,
+    });
+    if (support === null || support === undefined) {
+      return null;
+    }
+    const supportDistance = Math.hypot(
+      support.position.x - simulantPosition.x,
+      support.position.z - simulantPosition.z,
+    );
+    if (supportDistance > attackDistance + DEBUGGING_TWO_BOX_SIZE * 0.5) {
+      return null;
+    }
+    return {
+      kind: "support-box",
+      objectId: support.objectId,
+      position: support.position,
+    };
+  };
   const damagePlayer = (
     damage: number,
     source: CombatDamageSource = { kind: "impact" },
@@ -13904,6 +14599,8 @@ export const createMahjongTableScene = (
   };
   const resetVitalsState = (): PlayerVitalsState => {
     clearDamageVignettePulses();
+    clearMeleeImpactFlashes();
+    playerKnockbackVelocity.set(0, 0, 0);
     cancelDeathRespawn();
     playerRagdollState = null;
     if (playerRagdollMarker !== null) {
@@ -13921,6 +14618,7 @@ export const createMahjongTableScene = (
     return playerVitals;
   };
   publishPlayerVitals(true);
+  publishKillScore();
   publishPlayerSpeed(0, true);
   const captureSceneState = (): VisualSceneState => {
     const standingEyeHeight =
@@ -14331,6 +15029,7 @@ export const createMahjongTableScene = (
     jumpKeyHeld = false;
     forwardVelocity = 0;
     strafeVelocity = 0;
+    playerKnockbackVelocity.set(0, 0, 0);
     isSprinting = false;
     exerciseIntensity = 0;
     sprintingActivity = false;
@@ -14425,7 +15124,7 @@ export const createMahjongTableScene = (
 
   const setFirstPersonPreset = (): void => {
     const preset = activeSceneCameraPresets.seat;
-    firstPersonGroundY = 0;
+    firstPersonGroundY = isCleanSlateMap ? WAREHOUSE_FLOOR_TOP_Y : 0;
     eyeHeight = STANDING_EYE_HEIGHT;
     isCrouched = false;
     isWalkingMode = false;
@@ -14534,11 +15233,12 @@ export const createMahjongTableScene = (
       isCleanSlateMap && debuggingTwoMap !== null
         ? debuggingTwoMap.spawn
         : resolveRandomSpawnPosition();
-    camera.position.set(
-      spawnPosition.x,
-      spawnPosition.y + STANDING_EYE_HEIGHT - PLAYER_COLLIDER_CENTER_HEIGHT,
-      spawnPosition.z,
-    );
+    const spawnSurfaceY =
+      isCleanSlateMap && debuggingTwoMap !== null
+        ? spawnPosition.y
+        : spawnPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT;
+    firstPersonGroundY = spawnSurfaceY;
+    camera.position.set(spawnPosition.x, spawnSurfaceY + STANDING_EYE_HEIGHT, spawnPosition.z);
     camera.lookAt(0, camera.position.y, 0);
     debugFovOverride = null;
     camera.fov = debugEnabled ? DEBUG_STANDING_FOV : SEAT_STANDING_FOV;
@@ -14632,6 +15332,230 @@ export const createMahjongTableScene = (
     }
     return { x: bestX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: bestZ };
   };
+  const disposeSimulantWeaponModel = (): void => {
+    if (simulantWeaponModel === null) {
+      return;
+    }
+    simulantWeaponModel.removeFromParent();
+    disposeObject(simulantWeaponModel);
+    simulantWeaponModel = null;
+  };
+  const createSimulantWeaponModel = (source: SimulantWeaponSource): THREE.Group => {
+    if (source.kind === "gun") {
+      const model = createWeaponModel(source.weapon, 0.7, false);
+      model.root.name = `SimulantWeapon:${source.weapon}`;
+      model.root.userData = {
+        ...model.root.userData,
+        simulantWeapon: true,
+        weaponRaycastIgnore: true,
+      };
+      model.root.position.set(
+        SIMULANT_WEAPON_HAND_OFFSET.x,
+        SIMULANT_WEAPON_HAND_OFFSET.y,
+        SIMULANT_WEAPON_HAND_OFFSET.z,
+      );
+      return model.root;
+    }
+
+    const sourcePosition = new THREE.Vector3();
+    const sourceQuaternion = new THREE.Quaternion();
+    const sourceScale = new THREE.Vector3();
+    source.sourceMatrix.decompose(sourcePosition, sourceQuaternion, sourceScale);
+    const sourceMaterial = source.mesh.material;
+    const materials = Array.isArray(sourceMaterial)
+      ? sourceMaterial.map((entry) => entry.clone())
+      : [sourceMaterial.clone()];
+    for (const material of materials) {
+      if (material instanceof THREE.MeshStandardMaterial) {
+        material.vertexColors = false;
+        material.color.setHex(source.color);
+      }
+    }
+    const material = materials.length === 1 ? materials[0] : materials;
+    const object = new THREE.Mesh(source.mesh.geometry.clone(), material);
+    object.name = `SimulantWeapon:${String(source.objectId)}`;
+    object.position.set(0, 0, 0);
+    object.quaternion.copy(sourceQuaternion);
+    object.scale.copy(sourceScale);
+    object.castShadow = true;
+    object.receiveShadow = true;
+    object.userData = {
+      weaponVisual: true,
+      weaponRaycastIgnore: true,
+      simulantWeapon: true,
+      meleeObjectId: source.objectId,
+    };
+    const root = new THREE.Group();
+    root.name = `SimulantWeapon:${String(source.objectId)}`;
+    root.userData = {
+      weaponVisual: true,
+      weaponRaycastIgnore: true,
+      simulantWeapon: true,
+    };
+    root.position.set(
+      SIMULANT_WEAPON_HAND_OFFSET.x,
+      SIMULANT_WEAPON_HAND_OFFSET.y,
+      SIMULANT_WEAPON_HAND_OFFSET.z,
+    );
+    root.add(object);
+    return root;
+  };
+  const syncSimulantWeaponPresentation = (): void => {
+    if (simulantWeaponModel === null || simulantWeapon === null) {
+      return;
+    }
+    if (simulantRagdollState !== null || simulantBody === null) {
+      simulantWeaponModel.visible = false;
+      return;
+    }
+    const progress = simulantMeleeSwinging
+      ? Math.min(
+          1,
+          simulantMeleeSwingElapsedSeconds / Math.max(0.001, simulantMeleeSwingDurationSeconds),
+        )
+      : 0;
+    const pose = resolveMeleeSwingPose(progress, simulantMeleeSwingDirection);
+    simulantWeaponModel.position.set(
+      SIMULANT_WEAPON_HAND_OFFSET.x + pose.offsetX,
+      SIMULANT_WEAPON_HAND_OFFSET.y + pose.offsetY,
+      SIMULANT_WEAPON_HAND_OFFSET.z + pose.offsetZ,
+    );
+    simulantWeaponModel.rotation.set(pose.pitchRadians, pose.yawRadians, pose.rollRadians, "XYZ");
+    simulantWeaponModel.visible = true;
+  };
+  const resolveSimulantWeaponTargetPosition = (
+    target: SimulantWeaponTarget,
+  ): THREE.Vector3 | null => {
+    if (target.kind === "gun") {
+      const spawn = weaponRuntime
+        ?.getAvailablePickups()
+        .find((candidate) => candidate.id === target.pickupId);
+      if (spawn === undefined) {
+        return null;
+      }
+      return new THREE.Vector3(spawn.position[0], spawn.position[1], spawn.position[2]);
+    }
+    const pickup = explorationWorld
+      ?.getMeleePickups()
+      .find((candidate) => candidate.objectId === target.objectId);
+    if (pickup === undefined) {
+      return null;
+    }
+    const matrix = new THREE.Matrix4();
+    pickup.mesh.getMatrixAt(pickup.index, matrix);
+    return new THREE.Vector3().setFromMatrixPosition(matrix);
+  };
+  const selectSimulantWeaponTarget = (): SimulantWeaponTarget | null => {
+    let best: { readonly target: SimulantWeaponTarget; readonly distance: number } | null = null;
+    for (const pickup of explorationWorld?.getMeleePickups() ?? []) {
+      const matrix = new THREE.Matrix4();
+      pickup.mesh.getMatrixAt(pickup.index, matrix);
+      const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+      const distance = position.distanceTo(simulantPosition);
+      if (best === null || distance < best.distance) {
+        best = {
+          target: { kind: "melee-prop", objectId: pickup.objectId },
+          distance,
+        };
+      }
+    }
+    for (const spawn of weaponRuntime?.getAvailablePickups() ?? []) {
+      const position = new THREE.Vector3(spawn.position[0], spawn.position[1], spawn.position[2]);
+      const distance = position.distanceTo(simulantPosition);
+      if (best === null || distance < best.distance) {
+        best = {
+          target: { kind: "gun", pickupId: spawn.id, weapon: spawn.weapon },
+          distance,
+        };
+      }
+    }
+    return best?.target ?? null;
+  };
+  const acquireSimulantWeapon = (target: SimulantWeaponTarget): boolean => {
+    if (target.kind === "gun") {
+      const weapon = weaponRuntime?.claimPickupForBot(target.pickupId);
+      if (weapon === null || weapon === undefined) {
+        return false;
+      }
+      simulantWeapon = {
+        kind: "gun",
+        pickupId: target.pickupId,
+        weapon,
+        snapshot: resolveWeaponMeleeAttributes(weapon),
+        color: WEAPON_DEFINITIONS[weapon].color,
+      };
+      disposeSimulantWeaponModel();
+      simulantWeaponModel = createSimulantWeaponModel(simulantWeapon);
+      simulantBody?.add(simulantWeaponModel);
+      return true;
+    }
+    const world = explorationWorld;
+    if (world === null) {
+      return false;
+    }
+    const candidate = world.getMeleePickups().find((pickup) => pickup.objectId === target.objectId);
+    if (candidate === undefined) {
+      return false;
+    }
+    const sourceMatrix = new THREE.Matrix4();
+    candidate.mesh.getMatrixAt(candidate.index, sourceMatrix);
+    const equipped = world.equipMeleeObject(candidate.objectId);
+    if (equipped === null) {
+      return false;
+    }
+    simulantWeapon = {
+      kind: "melee-prop",
+      objectId: equipped.objectId,
+      snapshot: equipped.snapshot,
+      color: equipped.color,
+      sourceMatrix,
+      mesh: candidate.mesh,
+    };
+    disposeSimulantWeaponModel();
+    simulantWeaponModel = createSimulantWeaponModel(simulantWeapon);
+    simulantBody?.add(simulantWeaponModel);
+    return true;
+  };
+  const releaseSimulantWeapon = (): void => {
+    const source = simulantWeapon;
+    if (source !== null) {
+      if (source.kind === "melee-prop") {
+        const dropDirection = new THREE.Vector3(
+          camera.position.x - simulantPosition.x,
+          0,
+          camera.position.z - simulantPosition.z,
+        );
+        if (dropDirection.lengthSq() <= 0.0001) {
+          dropDirection.set(0, 0, -1);
+        } else {
+          dropDirection.normalize();
+        }
+        explorationWorld?.dropMeleeObject(
+          source.objectId,
+          new THREE.Vector3(
+            simulantPosition.x + dropDirection.x * 0.65,
+            Math.max(0.2, simulantPosition.y),
+            simulantPosition.z + dropDirection.z * 0.65,
+          ),
+          Math.atan2(dropDirection.x, dropDirection.z),
+        );
+      } else {
+        weaponRuntime?.releasePickupFromBot(source.pickupId);
+      }
+    }
+    disposeSimulantWeaponModel();
+    simulantWeapon = null;
+  };
+  const resetSimulantWeaponHunt = (): void => {
+    releaseSimulantWeapon();
+    simulantWeaponTarget = null;
+    simulantMeleeSwinging = false;
+    simulantMeleeSwingElapsedSeconds = 0;
+    simulantMeleeSwingDurationSeconds = 0;
+    simulantMeleeHitResolved = false;
+    simulantMeleeTarget = null;
+    simulantMeleeCooldownSeconds = 0;
+  };
   const syncSimulantShieldFlare = (): void => {
     if (simulantShieldFlareMaterial === null) {
       return;
@@ -14657,6 +15581,19 @@ export const createMahjongTableScene = (
       simulantKnockbackVelocity.z,
     );
     simulantMarker.userData.simulantStaggerSeconds = simulantStaggerSeconds;
+    simulantMarker.userData.simulantWeapon =
+      simulantWeapon?.kind === "gun"
+        ? simulantWeapon.weapon
+        : simulantWeapon?.kind === "melee-prop"
+          ? simulantWeapon.snapshot.displayName
+          : null;
+    simulantMarker.userData.simulantWeaponHuntTarget =
+      simulantWeaponTarget?.kind === "gun"
+        ? simulantWeaponTarget.pickupId
+        : simulantWeaponTarget?.kind === "melee-prop"
+          ? String(simulantWeaponTarget.objectId)
+          : null;
+    simulantMarker.userData.simulantMeleeSwinging = simulantMeleeSwinging;
     if (simulantShieldShell !== null) {
       // Once the shield is empty, let the ray continue to the body so the
       // actual head mesh can produce a headshot hit zone. The flare remains
@@ -14668,6 +15605,7 @@ export const createMahjongTableScene = (
   };
   const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
     if (simulantRagdollState !== null || simulantBody === null) {
+      syncSimulantWeaponPresentation();
       return;
     }
     const bodyBaseY =
@@ -14675,11 +15613,13 @@ export const createMahjongTableScene = (
       (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
     simulantBody.position.y = bodyBaseY + motion.verticalOffset;
     simulantBody.rotation.z = motion.roll;
+    syncSimulantWeaponPresentation();
   };
   const respawnSimulant = (): void => {
     if (simulantMarker === null) {
       return;
     }
+    resetSimulantWeaponHunt();
     simulantRagdollState = null;
     const position =
       isCleanSlateMap && debuggingTwoMap !== null
@@ -14723,6 +15663,9 @@ export const createMahjongTableScene = (
     if (simulantRing !== null) {
       simulantRing.visible = false;
     }
+    if (simulantWeaponModel !== null) {
+      simulantWeaponModel.visible = false;
+    }
     if (simulantShieldShell !== null) {
       simulantShieldShell.visible = false;
     }
@@ -14735,6 +15678,9 @@ export const createMahjongTableScene = (
     if (simulantMarker === null) {
       return;
     }
+    releaseSimulantWeapon();
+    simulantWeaponTarget = null;
+    simulantMeleeSwinging = false;
     startSimulantRagdoll();
     simulantWorldVelocity = { x: 0, y: 0, z: 0 };
     simulantKnockbackVelocity.set(0, 0, 0);
@@ -15092,7 +16038,7 @@ export const createMahjongTableScene = (
     setView("seat");
     onWindowBlur();
     ledgeClimbTransition = null;
-    firstPersonGroundY = 0;
+    firstPersonGroundY = isCleanSlateMap ? WAREHOUSE_FLOOR_TOP_Y : 0;
     isCrouched = state.isCrouched;
     isWalkingMode = isCrouched;
     eyeHeight = !debugEnabled
@@ -15601,6 +16547,9 @@ export const createMahjongTableScene = (
     simulantO2: simulantVitals.o2,
     simulantStoppingPower: 0,
     simulantStaggerSeconds: 0,
+    simulantWeapon: null,
+    simulantWeaponHuntTarget: null,
+    simulantMeleeSwinging: false,
   };
   simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
   simulantBody.name = "SimulantCombatBody";
@@ -15943,10 +16892,12 @@ export const createMahjongTableScene = (
   container.dataset.playerWallBraced = "false";
   container.dataset.playerDeathRagdoll = "false";
   container.dataset.simulantDeathRagdoll = "false";
+  container.dataset.playerMeleeImpactOpacity = "0";
+  container.dataset.playerMeleeFocusShiftMeters = "0";
   staticPhysicsBoxes = createStaticPhysicsBoxes(
     scene,
     activeWorldBounds,
-    debuggingTwoMap?.physicsBoxes ?? [],
+    debuggingTwoMap?.staticPhysicsBoxes ?? debuggingTwoMap?.physicsBoxes ?? [],
   );
   const weaponReservedRects: readonly WeaponSpawnRect[] = isCleanSlateMap
     ? []
@@ -16057,6 +17008,16 @@ export const createMahjongTableScene = (
         LOCAL_PLAYER_COMBAT_ACTOR_ID,
         getCombatHitZone(hitObject),
       );
+      if (
+        isMeleeHit &&
+        appliedDamage !== null &&
+        appliedDamage.damage > 0 &&
+        combatTarget?.actorId === SIMULANT_COMBAT_ACTOR_ID
+      ) {
+        // The wielder feels the impact back through the weapon: reverse the
+        // attack vector while the victim receives the physical push vector.
+        applyMeleeViewImpact(context.direction, stoppingPower, -1);
+      }
       const ragdollObjectId =
         explorationWorld?.getRagdollObjectIdForHit(hitObject, context.instanceIndex) ?? null;
       if (ragdollObjectId !== null) {
@@ -16136,6 +17097,15 @@ export const createMahjongTableScene = (
         }
         const applied = applyDamageToHitObject(hitObject, momentum.damage, { kind: "melee" });
         if (applied !== null && target.actorId === SIMULANT_COMBAT_ACTOR_ID) {
+          if (applied.damage > 0) {
+            // A hand-held prop gives the same impact kick as gun melee. Both
+            // use the actual attack vector so diagonal strikes stay diagonal.
+            applyMeleeViewImpact(
+              context.attackDirection,
+              resolveMeleeStoppingPower(momentum.damage),
+              -1,
+            );
+          }
           weaponRuntime?.playMeleeHitEffects(
             context.point,
             context.attackDirection,
@@ -16379,11 +17349,74 @@ export const createMahjongTableScene = (
       simulantKnockbackVelocity.multiplyScalar(
         Math.exp(-SIMULANT_KNOCKBACK_DAMPING_PER_SECOND * safeDelta),
       );
-      const toPlayerX = camera.position.x - simulantPosition.x;
-      const toPlayerZ = camera.position.z - simulantPosition.z;
-      const horizontalDistance = Math.hypot(toPlayerX, toPlayerZ);
+      if (simulantWeapon === null && simulantWeaponTarget === null) {
+        simulantWeaponTarget = selectSimulantWeaponTarget();
+      }
+      let weaponTargetPosition =
+        simulantWeaponTarget === null
+          ? null
+          : resolveSimulantWeaponTargetPosition(simulantWeaponTarget);
+      if (simulantWeaponTarget !== null && weaponTargetPosition === null) {
+        simulantWeaponTarget = selectSimulantWeaponTarget();
+        weaponTargetPosition =
+          simulantWeaponTarget === null
+            ? null
+            : resolveSimulantWeaponTargetPosition(simulantWeaponTarget);
+      }
+      if (
+        simulantWeapon === null &&
+        simulantWeaponTarget !== null &&
+        weaponTargetPosition !== null
+      ) {
+        const targetDistance = Math.hypot(
+          weaponTargetPosition.x - simulantPosition.x,
+          weaponTargetPosition.z - simulantPosition.z,
+        );
+        if (targetDistance <= SIMULANT_WEAPON_PICKUP_DISTANCE_METERS) {
+          const acquired = acquireSimulantWeapon(simulantWeaponTarget);
+          simulantWeaponTarget = acquired ? null : selectSimulantWeaponTarget();
+          weaponTargetPosition =
+            simulantWeaponTarget === null
+              ? null
+              : resolveSimulantWeaponTargetPosition(simulantWeaponTarget);
+        }
+      }
+      const simulantAttackDistance =
+        simulantWeapon === null
+          ? SIMULANT_STOP_DISTANCE_METERS
+          : Math.max(
+              1.35,
+              Math.min(
+                SIMULANT_STOP_DISTANCE_METERS,
+                simulantWeapon.snapshot.rangeMeters * 0.78 + 0.8,
+              ),
+            );
+      const currentSimulantMeleeTarget =
+        simulantWeapon === null
+          ? null
+          : simulantMeleeSwinging && simulantMeleeTarget !== null
+            ? simulantMeleeTarget
+            : resolveSimulantMeleeTarget(simulantWeapon, simulantAttackDistance);
+      if (!simulantMeleeSwinging) {
+        simulantMeleeTarget = currentSimulantMeleeTarget;
+      }
+      const pursuitTarget =
+        simulantWeapon === null && weaponTargetPosition !== null
+          ? weaponTargetPosition
+          : currentSimulantMeleeTarget?.kind === "support-box"
+            ? currentSimulantMeleeTarget.position
+            : camera.position;
+      const pursuitX = pursuitTarget.x - simulantPosition.x;
+      const pursuitZ = pursuitTarget.z - simulantPosition.z;
+      const pursuitDistance = Math.hypot(pursuitX, pursuitZ);
+      const pursuitStopDistance =
+        simulantWeapon === null && weaponTargetPosition !== null
+          ? SIMULANT_WEAPON_PICKUP_DISTANCE_METERS
+          : simulantAttackDistance;
       const simulantMoving =
-        horizontalDistance > SIMULANT_STOP_DISTANCE_METERS && simulantStaggerSeconds <= 0;
+        pursuitDistance > pursuitStopDistance &&
+        simulantStaggerSeconds <= 0 &&
+        !simulantMeleeSwinging;
       simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
         movementMagnitude: simulantMoving ? 1 : 0,
         locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
@@ -16409,11 +17442,11 @@ export const createMahjongTableScene = (
       syncSimulantMarkerVitals();
       if (simulantMoving) {
         const moveDistance = Math.min(
-          horizontalDistance - SIMULANT_STOP_DISTANCE_METERS,
+          pursuitDistance - pursuitStopDistance,
           SIMULANT_TROT_SPEED_METERS_PER_SECOND * safeDelta,
         );
-        simulantPosition.x += (toPlayerX / horizontalDistance) * moveDistance;
-        simulantPosition.z += (toPlayerZ / horizontalDistance) * moveDistance;
+        simulantPosition.x += (pursuitX / pursuitDistance) * moveDistance;
+        simulantPosition.z += (pursuitZ / pursuitDistance) * moveDistance;
         simulantPosition.x = THREE.MathUtils.clamp(
           simulantPosition.x,
           activeWorldBounds.minX + WORLD_SPAWN_MARGIN,
@@ -16445,12 +17478,43 @@ export const createMahjongTableScene = (
             }
           : { x: 0, y: 0, z: 0 };
       simulantMarker.position.copy(simulantPosition);
-      if (horizontalDistance > 0.1 && Number.isFinite(horizontalDistance)) {
+      const facingTarget =
+        currentSimulantMeleeTarget?.kind === "support-box"
+          ? currentSimulantMeleeTarget.position
+          : camera.position;
+      const facingDistance = Math.hypot(
+        facingTarget.x - simulantPosition.x,
+        facingTarget.z - simulantPosition.z,
+      );
+      if (facingDistance > 0.1 && Number.isFinite(facingDistance)) {
         simulantMarker.rotation.y = Math.atan2(
-          camera.position.x - simulantPosition.x,
-          camera.position.z - simulantPosition.z,
+          facingTarget.x - simulantPosition.x,
+          facingTarget.z - simulantPosition.z,
         );
       }
+      simulantMeleeCooldownSeconds = Math.max(0, simulantMeleeCooldownSeconds - safeDelta);
+      if (simulantWeapon !== null) {
+        if (simulantMeleeSwinging) {
+          simulantMeleeSwingElapsedSeconds += safeDelta;
+          const swingProgress = Math.min(
+            1,
+            simulantMeleeSwingElapsedSeconds / Math.max(0.001, simulantMeleeSwingDurationSeconds),
+          );
+          if (!simulantMeleeHitResolved && swingProgress >= 0.5) {
+            simulantMeleeHitResolved = true;
+            resolveSimulantMeleeHit();
+          }
+          if (swingProgress >= 1) {
+            simulantMeleeSwinging = false;
+            simulantMeleeSwingElapsedSeconds = 0;
+            simulantMeleeCooldownSeconds = SIMULANT_MELEE_COOLDOWN_SECONDS;
+            simulantMeleeTarget = null;
+          }
+        } else if (currentSimulantMeleeTarget !== null && simulantMeleeCooldownSeconds <= 0) {
+          startSimulantMeleeSwing(currentSimulantMeleeTarget);
+        }
+      }
+      syncSimulantPresentation(simulantMotion);
       simulantMarker.updateMatrixWorld(true);
     }
     const ragdollDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
@@ -16535,6 +17599,17 @@ export const createMahjongTableScene = (
     let knockImpactDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
     let knockCollisionCount = 0;
     if (firstPersonActive) {
+      // Keep simulant melee recoil in the same authoritative movement path as
+      // keyboard/touch input. The damper receives the resolved displacement
+      // later in this frame, so the camera and viewmodel feel the same push.
+      const playerKnockbackDelta: PhysicsVector = {
+        x: playerKnockbackVelocity.x * delta,
+        y: 0,
+        z: playerKnockbackVelocity.z * delta,
+      };
+      playerKnockbackVelocity.multiplyScalar(
+        Math.exp(-PLAYER_KNOCKBACK_DAMPING_PER_SECOND * delta),
+      );
       if (motionLookEnabled && motionTargetValid) {
         camera.quaternion.slerp(motionTargetQuaternion, 1 - Math.exp(-18 * delta));
       }
@@ -16763,6 +17838,11 @@ export const createMahjongTableScene = (
           coverWall,
         );
       }
+      desiredHorizontalDelta = {
+        x: desiredHorizontalDelta.x + playerKnockbackDelta.x,
+        y: 0,
+        z: desiredHorizontalDelta.z + playerKnockbackDelta.z,
+      };
       let baseCameraY: number;
       let coverSnapDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
       if (physicsRuntime !== null) {
@@ -17605,6 +18685,7 @@ export const createMahjongTableScene = (
       (reticlePresentation.aimNdc.x + 1) * 0.5,
       (reticlePresentation.aimNdc.y + 1) * 0.5,
     );
+    updateMeleeImpactFlashes(delta);
     container.dataset.o2VisionBlur = cameraMotionOffsets.screenBlurPixels.toFixed(3);
     container.dataset.o2VisionVignette = cameraMotionOffsets.screenVignetteStrength.toFixed(3);
     container.dataset.o2VisionContrast = cameraMotionOffsets.screenContrastMultiplier.toFixed(3);
@@ -17653,7 +18734,10 @@ export const createMahjongTableScene = (
     saveSceneState();
     let centerFocusHit: THREE.Intersection | undefined;
     let tileFocusHit: THREE.Intersection | undefined;
-    if (debugBokehEnabled) {
+    const focusTrackingEnabled =
+      debugBokehEnabled || meleeFocusSeverity > 0.001 || meleeDofBoostRemainingSeconds > 0.001;
+    bokehPass.enabled = focusTrackingEnabled;
+    if (focusTrackingEnabled) {
       const reticlePresentation = getReticlePresentation();
       centerFocusHit = findVisibleFocusIntersection(reticlePresentation.aimNdc);
       tileFocusHit =
@@ -17680,7 +18764,11 @@ export const createMahjongTableScene = (
     // a tile, but allow a tile immediately around the reticule to become the
     // subject when the center falls in a narrow gap between tile faces.
     const focusHit = tileFocusHit ?? centerFocusHit;
-    const nextFocusDistance = focusHit?.distance ?? BOKEH_FOCUS_FALLBACK_DISTANCE;
+    const baseFocusDistance = focusHit?.distance ?? BOKEH_FOCUS_FALLBACK_DISTANCE;
+    const nextFocusDistance = resolveMeleeImpactFocusDistance(
+      baseFocusDistance,
+      meleeFocusSeverity,
+    );
     focusTarget = debugBokehEnabled
       ? tileFocusHit !== undefined
         ? "tile"
@@ -17688,12 +18776,15 @@ export const createMahjongTableScene = (
           ? "surface"
           : "fallback"
       : "fallback";
-    focusDistance = THREE.MathUtils.damp(
-      focusDistance,
-      nextFocusDistance,
-      resolveFocusAccommodationDamping(focusDistance, nextFocusDistance, pupilDiameterMm),
-      delta,
-    );
+    focusDistance =
+      meleeFocusSeverity >= 0.999
+        ? nextFocusDistance
+        : THREE.MathUtils.damp(
+            focusDistance,
+            nextFocusDistance,
+            resolveFocusAccommodationDamping(focusDistance, nextFocusDistance, pupilDiameterMm),
+            delta,
+          );
     pupilDiameterMm = THREE.MathUtils.damp(
       pupilDiameterMm,
       resolveHumanEyePupilDiameter(
@@ -17703,7 +18794,11 @@ export const createMahjongTableScene = (
       delta,
     );
     const bokeh = resolveHumanEyeBokeh(focusDistance, pupilDiameterMm);
-    bokehIntensity = bokeh.intensity * debugBokehStrength;
+    const bokehStrength =
+      meleeDofBoostRemainingSeconds > 0.001
+        ? debugBokehStrength * MELEE_IMPACT_DOF_INTENSITY_MULTIPLIER
+        : debugBokehStrength;
+    bokehIntensity = bokeh.intensity * bokehStrength;
     const focusUniform = bokehPass.materialBokeh.uniforms.focus;
     if (focusUniform !== undefined) {
       focusUniform.value = focusDistance;
@@ -17711,10 +18806,10 @@ export const createMahjongTableScene = (
     const apertureUniform = bokehPass.materialBokeh.uniforms.aperture;
     const maxBlurUniform = bokehPass.materialBokeh.uniforms.maxblur;
     if (apertureUniform !== undefined) {
-      apertureUniform.value = bokeh.aperture * debugBokehStrength;
+      apertureUniform.value = bokeh.aperture * bokehStrength;
     }
     if (maxBlurUniform !== undefined) {
-      maxBlurUniform.value = bokeh.maxBlur * debugBokehStrength;
+      maxBlurUniform.value = bokeh.maxBlur * bokehStrength;
     }
     if (debugBoundsVisible) {
       const boundsRoot = getDebugBoundsRoot();
@@ -17853,6 +18948,7 @@ export const createMahjongTableScene = (
       publishPlayerSpeed(0, true);
       disposed = true;
       cancelDeathRespawn();
+      clearMeleeImpactFlashes();
       deathFadeOverlay.remove();
       window.cancelAnimationFrame(animationFrame);
       if (warmupTimer !== 0) {

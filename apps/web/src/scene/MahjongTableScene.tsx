@@ -7,6 +7,7 @@ import {
   type MahjongTableMount,
   type MotionLookStatus,
   type PlayerVitalsState,
+  type KillScoreSnapshot,
   type SceneView,
   type VisualSceneAreaId,
   type WeaponStateSnapshot,
@@ -28,6 +29,7 @@ interface MahjongTableSceneProps {
   readonly onSprintingChange?: (sprinting: boolean) => void;
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
+  readonly onKillScoreChange?: (score: KillScoreSnapshot) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
   readonly onMeleeStateChange?: (state: MeleeStateSnapshot) => void;
 }
@@ -46,6 +48,7 @@ export const MahjongTableScene = ({
   onSprintingChange,
   onSpeedChange,
   onVitalsChange,
+  onKillScoreChange,
   onWeaponStateChange,
   onMeleeStateChange,
 }: MahjongTableSceneProps): React.JSX.Element => {
@@ -58,6 +61,7 @@ export const MahjongTableScene = ({
   const onSprintingChangeRef = useRef(onSprintingChange);
   const onSpeedChangeRef = useRef(onSpeedChange);
   const onVitalsChangeRef = useRef(onVitalsChange);
+  const onKillScoreChangeRef = useRef(onKillScoreChange);
   const onWeaponStateChangeRef = useRef(onWeaponStateChange);
   const onMeleeStateChangeRef = useRef(onMeleeStateChange);
   const onExplorationAreaChangeRef = useRef(onExplorationAreaChange);
@@ -70,6 +74,7 @@ export const MahjongTableScene = ({
   onSprintingChangeRef.current = onSprintingChange;
   onSpeedChangeRef.current = onSpeedChange;
   onVitalsChangeRef.current = onVitalsChange;
+  onKillScoreChangeRef.current = onKillScoreChange;
   onWeaponStateChangeRef.current = onWeaponStateChange;
   onMeleeStateChangeRef.current = onMeleeStateChange;
   onExplorationAreaChangeRef.current = onExplorationAreaChange;
@@ -104,6 +109,7 @@ export const MahjongTableScene = ({
           onSprintingChange: (sprinting) => onSprintingChangeRef.current?.(sprinting),
           onSpeedChange: (speed) => onSpeedChangeRef.current?.(speed),
           onVitalsChange: (vitals) => onVitalsChangeRef.current?.(vitals),
+          onKillScoreChange: (score) => onKillScoreChangeRef.current?.(score),
           onWeaponStateChange: (state) => onWeaponStateChangeRef.current?.(state),
           onMeleeStateChange: (state) => onMeleeStateChangeRef.current?.(state),
           onReady: () => setSceneReady(true),

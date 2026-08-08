@@ -20,10 +20,19 @@ import {
   DEBUGGING_TWO_RACK_LED_BAR_HEIGHT,
   DEBUGGING_TWO_RACK_LED_BAR_WIDTH,
   DEBUGGING_TWO_WORLD_BOUNDS,
+  WAREHOUSE_FLOOR_BASE_COLOR,
+  WAREHOUSE_FLOOR_CLEARCOAT,
+  WAREHOUSE_FLOOR_CLEARCOAT_ROUGHNESS,
+  WAREHOUSE_FLOOR_FINISH_GENERATION,
   WAREHOUSE_FOG_GENERATION,
+  WAREHOUSE_FLOOR_METALNESS,
+  WAREHOUSE_FLOOR_TOP_Y,
+  WAREHOUSE_FLOOR_ROUGHNESS,
   WAREHOUSE_LENS_FLARE_GENERATION,
   WAREHOUSE_LENS_FLARE_SPRITE_COUNT,
   WAREHOUSE_LENS_FLARE_TEXTURE_SIZE,
+  WAREHOUSE_SPOTLIGHT_GENERATION,
+  WAREHOUSE_SPOTLIGHT_QUADRANTS,
 } from "./debugging-two-map.js";
 import { generateWeaponPickupsOnEdges, WEAPON_IDS } from "./weapons.js";
 
@@ -105,10 +114,22 @@ describe("visual map catalog", () => {
     });
 
     expect(first.variant).toBe("Ice-blue data center");
+    expect(first.spawn.y).toBe(WAREHOUSE_FLOOR_TOP_Y);
+    const spawnPlatform = first.root.getObjectByName("DebuggingTwoWarehousePlatform");
+    expect(spawnPlatform).toBeInstanceOf(THREE.Mesh);
+    if (spawnPlatform instanceof THREE.Mesh) {
+      spawnPlatform.updateMatrixWorld(true);
+      expect(new THREE.Box3().setFromObject(spawnPlatform).max.y).toBeCloseTo(
+        WAREHOUSE_FLOOR_TOP_Y,
+        6,
+      );
+    }
     expect(first.physicsBoxes.length).toBeGreaterThan(50);
     expect(first.physicsBoxes).toEqual(second.physicsBoxes);
     expect(first.root.userData.generation).toBe("warehouse-data-center-v1");
-    expect(first.root.userData.physicsGeneration).toBe("warehouse-supported-piles-v5");
+    expect(first.root.userData.physicsGeneration).toBe(
+      "warehouse-supported-piles-v7-tall-towers-rack-dynamics",
+    );
     expect(first.root.userData.boxSizeMeters).toBe(DEBUGGING_TWO_BOX_SIZE);
     expect(first.root.userData.boxGapMeters).toBe(DEBUGGING_TWO_BOX_GAP);
     expect(first.root.userData.fogGeneration).toBe(WAREHOUSE_FOG_GENERATION);
@@ -117,9 +138,13 @@ describe("visual map catalog", () => {
     expect(first.root.userData.boxCount).toBeGreaterThan(300);
     expect(first.root.userData.wallCount).toBeGreaterThanOrEqual(2);
     expect(first.root.userData.wallCrateCount).toBeGreaterThan(60);
+    const tallestTowerCenterY = Math.max(...first.physicsBoxes.map((box) => box.center.y));
+    expect(tallestTowerCenterY).toBeGreaterThan(9);
+    expect(first.root.userData.spotlightGeneration).toBe(WAREHOUSE_SPOTLIGHT_GENERATION);
+    expect(first.root.userData.spotlightCount).toBe(WAREHOUSE_SPOTLIGHT_QUADRANTS.length);
     const warehouseStructure = first.root.getObjectByName("DebuggingTwoWarehouseStructure");
     expect(warehouseStructure?.userData.bakedAreaLighting).toBe(true);
-    expect(warehouseStructure?.userData.generation).toBe("warehouse-wall-area-bake-v2-dim-bottom");
+    expect(warehouseStructure?.userData.generation).toBe("warehouse-wall-area-bake-v3-quadrants");
     const bakedWalls = warehouseStructure?.children.filter(
       (child) => child.userData.warehouseWall === true,
     );
@@ -127,11 +152,11 @@ describe("visual map catalog", () => {
     expect(first.textures).toHaveLength(6);
     expect(first.textures.every((texture) => texture instanceof THREE.DataTexture)).toBe(true);
     expect(first.textures.map((texture) => texture.name)).toEqual([
-      "WarehouseFloorLightMap:center",
-      "WarehouseWallLightMap:north",
-      "WarehouseWallLightMap:south",
-      "WarehouseWallLightMap:east",
-      "WarehouseWallLightMap:west",
+      "WarehouseFloorLightMap:quadrants",
+      "WarehouseWallLightMap:quadrants:north",
+      "WarehouseWallLightMap:quadrants:south",
+      "WarehouseWallLightMap:quadrants:east",
+      "WarehouseWallLightMap:quadrants:west",
       "WarehouseLensFlareSpriteTexture",
     ]);
     expect(
@@ -172,7 +197,7 @@ describe("visual map catalog", () => {
         );
       }),
     ).toBe(true);
-    expect(rackRoot?.userData.generation).toBe("data-center-racks-v1");
+    expect(rackRoot?.userData.generation).toBe("data-center-racks-v2-dynamic-impact");
     expect(rackRoot?.userData.iceBlue).toBe(true);
     expect(DEBUGGING_TWO_RACK_BLINKING_ENABLED).toBe(true);
     expect(rackRoot?.userData.blinkingLedGroups).toBe(3);
@@ -358,7 +383,17 @@ describe("visual map catalog", () => {
       expect(firstBoxRotation.angleTo(expectedRotation)).toBeLessThan(0.0001);
     }
     expect(first.physicsBoxes.every((box) => Math.abs(box.center.x) > 3)).toBe(true);
-    expect(lights.filter((light) => light instanceof THREE.SpotLight)).toHaveLength(1);
+    const spotlights = lights.filter(
+      (light): light is THREE.SpotLight => light instanceof THREE.SpotLight,
+    );
+    expect(spotlights).toHaveLength(WAREHOUSE_SPOTLIGHT_QUADRANTS.length);
+    expect(
+      spotlights.map((light) => [light.position.x, light.position.y, light.position.z]),
+    ).toEqual(WAREHOUSE_SPOTLIGHT_QUADRANTS.map(({ x, z }) => [x, 14.25, z]));
+    expect(spotlights.every((light) => light.name.startsWith("WarehouseQuadrantSpotlight:"))).toBe(
+      true,
+    );
+    expect(spotlights.every((light) => !light.castShadow)).toBe(true);
     expect(lights.filter((light) => light instanceof THREE.RectAreaLight)).toHaveLength(0);
     expect(lights.filter((light) => light instanceof THREE.PointLight)).toHaveLength(0);
     expect(lights.filter((light) => light instanceof THREE.HemisphereLight)).toHaveLength(0);
@@ -395,18 +430,16 @@ describe("visual map catalog", () => {
     const laneLed = laneEmergencyLightGroup?.getObjectByName("WarehouseLaneEmergencyLightLens");
     expect(laneLed).toBeInstanceOf(THREE.Mesh);
     expect((laneLed as THREE.Mesh | undefined)?.geometry).toBeInstanceOf(THREE.BoxGeometry);
-    const centralSpotlight = lights.find((light) => light instanceof THREE.SpotLight);
-    expect(centralSpotlight?.name).toBe("WarehouseCentralSpotlight");
-    expect(centralSpotlight?.position.x).toBe(0);
-    expect(centralSpotlight?.position.y).toBeCloseTo(7.25, 8);
-    expect(centralSpotlight?.position.z).toBe(0);
-    expect(centralSpotlight?.castShadow).toBe(false);
-    expect(industrialLighting?.getObjectByName("WarehouseCentralSpotlightShaft")).toBeInstanceOf(
-      THREE.Mesh,
-    );
-    expect(industrialLighting?.getObjectByName("WarehouseCentralSpotlightPool")).toBeInstanceOf(
-      THREE.Mesh,
-    );
+    expect(
+      industrialLighting?.children.filter((child) =>
+        child.name.startsWith("WarehouseQuadrantSpotlightShaft:"),
+      ),
+    ).toHaveLength(WAREHOUSE_SPOTLIGHT_QUADRANTS.length);
+    expect(
+      industrialLighting?.children.filter((child) =>
+        child.name.startsWith("WarehouseQuadrantSpotlightPool:"),
+      ),
+    ).toHaveLength(WAREHOUSE_SPOTLIGHT_QUADRANTS.length);
     const lensFlareRoot = firstScene.getObjectByName("WarehouseLensFlareSprites");
     expect(lensFlareRoot?.userData.generation).toBe(WAREHOUSE_LENS_FLARE_GENERATION);
     expect(lensFlareRoot?.userData.spriteCount).toBe(WAREHOUSE_LENS_FLARE_SPRITE_COUNT);
@@ -430,10 +463,10 @@ describe("visual map catalog", () => {
     ).toBe(true);
     expect(
       lensFlareRoot?.children.filter((child) => child.userData.element === "halo"),
-    ).toHaveLength(13);
+    ).toHaveLength(WAREHOUSE_LENS_FLARE_SPRITE_COUNT / 2);
     expect(
       lensFlareRoot?.children.filter((child) => child.userData.element === "streak"),
-    ).toHaveLength(13);
+    ).toHaveLength(WAREHOUSE_LENS_FLARE_SPRITE_COUNT / 2);
     const perimeterLights = firstScene.getObjectByName("WarehousePerimeterLights");
     expect(perimeterLights?.userData.generation).toBe("yellow-perimeter-leds-v1");
     const yellowPerimeterLeds = perimeterLights?.getObjectByName("WarehouseYellowPerimeterLEDs");
@@ -473,17 +506,32 @@ describe("visual map catalog", () => {
     const warehousePlatform = first.root.getObjectByName("DebuggingTwoWarehousePlatform");
     expect(warehousePlatform).toBeInstanceOf(THREE.Mesh);
     if (warehousePlatform instanceof THREE.Mesh) {
-      expect(warehousePlatform.material).toBeInstanceOf(THREE.MeshBasicMaterial);
-      if (warehousePlatform.material instanceof THREE.MeshBasicMaterial) {
-        expect(warehousePlatform.material.color.getHex()).toBe(0x000000);
+      expect(warehousePlatform.material).toBeInstanceOf(THREE.MeshPhysicalMaterial);
+      if (warehousePlatform.material instanceof THREE.MeshPhysicalMaterial) {
+        expect(warehousePlatform.material.color.getHex()).toBe(WAREHOUSE_FLOOR_BASE_COLOR);
+        expect(warehousePlatform.material.roughness).toBe(WAREHOUSE_FLOOR_ROUGHNESS);
+        expect(warehousePlatform.material.metalness).toBe(WAREHOUSE_FLOOR_METALNESS);
+        expect(warehousePlatform.material.clearcoat).toBe(WAREHOUSE_FLOOR_CLEARCOAT);
+        expect(warehousePlatform.material.clearcoatRoughness).toBe(
+          WAREHOUSE_FLOOR_CLEARCOAT_ROUGHNESS,
+        );
         expect(warehousePlatform.material.lightMap).toBeInstanceOf(THREE.DataTexture);
         expect(warehousePlatform.material.userData.bakedAreaLighting).toBe(true);
-        expect(warehousePlatform.material.userData.dynamicLightingDisabled).toBe(true);
-        expect(warehousePlatform.material.userData.floorColor).toBe("black");
+        expect(warehousePlatform.material.userData.dynamicLightingDisabled).toBe(false);
+        expect(warehousePlatform.material.userData.dynamicSpecularLighting).toBe(true);
+        expect(warehousePlatform.material.userData.floorColor).toBe("charcoal-metal");
+        expect(warehousePlatform.material.userData.floorFinish).toBe("polished-server-metal");
+        expect(warehousePlatform.material.userData.finishGeneration).toBe(
+          WAREHOUSE_FLOOR_FINISH_GENERATION,
+        );
       }
       expect(warehousePlatform.castShadow).toBe(false);
       expect(warehousePlatform.receiveShadow).toBe(false);
-      expect(warehousePlatform.userData.generation).toBe("warehouse-floor-area-bake-v1-center");
+      expect(warehousePlatform.userData.dynamicLightingDisabled).toBe(false);
+      expect(warehousePlatform.userData.dynamicSpecularLighting).toBe(true);
+      expect(warehousePlatform.userData.floorFinish).toBe("polished-server-metal");
+      expect(warehousePlatform.userData.finishGeneration).toBe(WAREHOUSE_FLOOR_FINISH_GENERATION);
+      expect(warehousePlatform.userData.generation).toBe("warehouse-floor-area-bake-v2-quadrants");
       const platformGeometry = (
         warehousePlatform as unknown as {
           readonly geometry: THREE.BufferGeometry;

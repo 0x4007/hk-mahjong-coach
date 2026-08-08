@@ -75,6 +75,19 @@ export interface CameraWeaponShotInput {
   };
 }
 
+/**
+ * One melee contact delivered to the first-person presentation damper.
+ * `localDirection` is the actual world-space push projected into the camera's
+ * signed local frame: right, forward, and up. The attacker submits the
+ * opposite of the hit direction so the weapon impact recoils back toward the
+ * hand; the victim submits the physical push direction.
+ */
+export interface CameraMeleeImpactInput {
+  readonly localDirection: CameraLocalAcceleration;
+  /** Stopping power in metres/second, before the shared melee cap. */
+  readonly stoppingPower: number;
+}
+
 export interface CameraMotionOffsets {
   /** Presentation roll in radians. */
   readonly roll: number;
@@ -142,6 +155,7 @@ export interface CameraViewmodelTransition {
 export interface CameraMotionDamper {
   readonly update: (input: CameraMotionUpdateInput) => CameraMotionOffsets;
   readonly applyWeaponShotImpulse: (shot: CameraWeaponShotInput) => void;
+  readonly applyMeleeImpactImpulse: (impact: CameraMeleeImpactInput) => void;
   /** Start the short first-person fall/tumble used when the player dies. */
   readonly applyDeathTumble: () => void;
   readonly applyWeaponSwitchImpulse: (input: CameraWeaponSwitchInput) => void;
@@ -332,6 +346,13 @@ export const CAMERA_RECOIL_SPRING = 1200;
  * firing speed only determines how often new impulses enter this state.
  */
 export const CAMERA_RECOIL_DAMPING = 34;
+
+/** Shared melee stopping-power scale used to bound a view impact. */
+export const CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND = 18;
+/** A full-strength lateral strike can turn the view by eleven degrees. */
+export const CAMERA_MELEE_IMPACT_MAX_YAW_RADIANS = (11 * Math.PI) / 180;
+/** Forward/upward impact response stays slightly smaller than the yaw kick. */
+export const CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS = (8 * Math.PI) / 180;
 
 const MIN_DELTA_SECONDS = 0;
 const MAX_DELTA_SECONDS = 0.05;
@@ -564,6 +585,11 @@ export interface CameraWeaponShotImpulse {
   readonly pitch: number;
 }
 
+export interface CameraMeleeImpactImpulse {
+  readonly yaw: number;
+  readonly pitch: number;
+}
+
 export interface CameraWeaponSwitchInput {
   /** Whether an already-held weapon should be shown lowering first. */
   readonly hasOutgoingWeapon: boolean;
@@ -591,6 +617,39 @@ export const resolveCameraWeaponShotImpulse = (
   return {
     yaw: (reticleX / reticleDistance) * kickAngle,
     pitch: (reticleY / reticleDistance) * kickAngle,
+  };
+};
+
+/**
+ * Resolve one melee view kick from the physical push vector.
+ *
+ * The direction is normalized before applying stopping power, so a diagonal
+ * hit remains diagonal instead of becoming stronger than a straight hit.
+ * Positive local forward acceleration pitches the view up through the same
+ * inertial sign used by locomotion; a backward push therefore pitches down.
+ */
+export const resolveCameraMeleeImpactImpulse = (
+  impact: CameraMeleeImpactInput,
+): CameraMeleeImpactImpulse => {
+  const direction = sanitizeCameraLocalAcceleration(impact.localDirection);
+  const directionLength = Math.hypot(direction.right, direction.forward, direction.up);
+  const stoppingPower = Number.isFinite(impact.stoppingPower)
+    ? Math.max(0, impact.stoppingPower)
+    : 0;
+  const strength = clamp(
+    stoppingPower / CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+    0,
+    1,
+  );
+  if (directionLength <= Number.EPSILON || strength <= 0) {
+    return { yaw: 0, pitch: 0 };
+  }
+  return {
+    yaw: (direction.right / directionLength) * CAMERA_MELEE_IMPACT_MAX_YAW_RADIANS * strength,
+    pitch:
+      ((-direction.forward + direction.up) / directionLength) *
+      CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS *
+      strength,
   };
 };
 
@@ -867,6 +926,22 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
 
   const applyWeaponShotImpulse = (shot: CameraWeaponShotInput): void => {
     const impulse = resolveCameraWeaponShotImpulse(shot);
+    if (impulse.yaw === 0 && impulse.pitch === 0) {
+      return;
+    }
+    recoilYaw += impulse.yaw;
+    recoilPitch += impulse.pitch;
+    const recoveryVelocity =
+      CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
+    pendingRecoilRecoveries.push({
+      remainingSeconds: CAMERA_RECOIL_RECOVERY_DELAY_SECONDS,
+      yawVelocity: -impulse.yaw * recoveryVelocity,
+      pitchVelocity: -impulse.pitch * recoveryVelocity,
+    });
+  };
+
+  const applyMeleeImpactImpulse = (impact: CameraMeleeImpactInput): void => {
+    const impulse = resolveCameraMeleeImpactImpulse(impact);
     if (impulse.yaw === 0 && impulse.pitch === 0) {
       return;
     }
@@ -1190,6 +1265,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   return {
     update,
     applyWeaponShotImpulse,
+    applyMeleeImpactImpulse,
     applyDeathTumble,
     applyWeaponSwitchImpulse,
     clearAcceleration,

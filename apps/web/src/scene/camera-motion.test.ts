@@ -22,6 +22,9 @@ import {
   CAMERA_RECOIL_RETURN_VELOCITY,
   CAMERA_RECOIL_SHOT_MULTIPLIER,
   CAMERA_RECOIL_SPRING,
+  CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS,
+  CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+  CAMERA_MELEE_IMPACT_MAX_YAW_RADIANS,
   CAMERA_VIEWMODEL_SWITCH_LOWER_SECONDS,
   CAMERA_VIEWMODEL_SWITCH_RAISE_SECONDS,
   CAMERA_VIEWMODEL_AIMING_OFFSET,
@@ -41,6 +44,7 @@ import {
   resolveCameraGaitAmount,
   resolveCameraGaitOffsets,
   resolveCameraGaitStepFrequency,
+  resolveCameraMeleeImpactImpulse,
   resolveCameraWeaponShotImpulse,
   resolveCameraViewmodelOffset,
   resolveCameraViewmodelTransition,
@@ -710,6 +714,62 @@ describe("camera motion damper", () => {
     }
     expect(Math.abs(settled.recoilYaw)).toBeLessThan(0.0001);
     expect(Math.abs(settled.recoilPitch)).toBeLessThan(0.0001);
+  });
+
+  it("maps the physical melee push into a signed view impulse", () => {
+    const rightPush = resolveCameraMeleeImpactImpulse({
+      localDirection: { right: 1, forward: 0, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+    });
+    const forwardPush = resolveCameraMeleeImpactImpulse({
+      localDirection: { right: 0, forward: 1, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+    });
+    const backwardPush = resolveCameraMeleeImpactImpulse({
+      localDirection: { right: 0, forward: -1, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND / 2,
+    });
+
+    expect(rightPush).toEqual({
+      yaw: CAMERA_MELEE_IMPACT_MAX_YAW_RADIANS,
+      pitch: 0,
+    });
+    expect(forwardPush).toEqual({
+      yaw: 0,
+      pitch: -CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS,
+    });
+    expect(backwardPush.pitch).toBeCloseTo(CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS / 2, 10);
+  });
+
+  it("normalizes diagonal push direction and caps malformed or oversized force", () => {
+    const diagonal = resolveCameraMeleeImpactImpulse({
+      localDirection: { right: 3, forward: 4, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND * 2,
+    });
+    const invalid = resolveCameraMeleeImpactImpulse({
+      localDirection: { right: Number.NaN, forward: 0, up: 0 },
+      stoppingPower: Number.NaN,
+    });
+
+    expect(diagonal.yaw).toBeCloseTo(CAMERA_MELEE_IMPACT_MAX_YAW_RADIANS * 0.6, 10);
+    expect(diagonal.pitch).toBeCloseTo(-CAMERA_MELEE_IMPACT_MAX_PITCH_RADIANS * 0.8, 10);
+    expect(invalid).toEqual({ yaw: 0, pitch: 0 });
+  });
+
+  it("returns a melee impact through the shared damper and recovers", () => {
+    const damper = createCameraMotionDamper();
+    damper.applyMeleeImpactImpulse({
+      localDirection: { right: 0, forward: 1, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+    });
+
+    const kicked = damper.update(idleInput);
+    expect(kicked.recoilPitch).toBeLessThan(0);
+    let recovered = kicked;
+    for (let index = 0; index < 180; index += 1) {
+      recovered = damper.update(idleInput);
+    }
+    expect(Math.abs(recovered.recoilPitch)).toBeLessThan(0.0001);
   });
 
   it("returns every damage-scaled shot kick swiftly through the reticle rest point", () => {

@@ -1,5 +1,113 @@
 # Implementation status
 
+## 2026-08-08 — Damaged Warehouse servers lose their status lights
+
+- Added a per-cabinet damage presentation state to the Warehouse rack resource. A projectile or melee impact marks the
+  hit rack, and any supported racks released by the same collapse lose their steady bars, blinking bars, and glow
+  overlays immediately.
+- The rack-local LED transform path keeps damaged instances hidden while Rapier or fallback physics moves the cabinet,
+  so the lights cannot reappear during the tumble.
+- Extended the server-stack impact regression to verify the impacted rack's LED instance has zero scale after the hit.
+- Validation: pending the next server-owned test-bus snapshot, strict typecheck, targeted formatting, and production
+  build. No browser or HMR acceptance is claimed because no connected Vite session is available.
+
+## 2026-08-08 — Directional melee view impulse
+
+- Added `applyMeleeImpactImpulse` to the centralized camera damper. It uses the same underdamped recoil response as
+  weapon fire, so the camera, reticule, and attached viewmodel recover together.
+- A local melee hit sends the attacker the opposite of the attack vector as weapon recoil. A simulant hit sends the
+  victim the actual resolved away-from-attacker vector used by physical knockback, projected into the victim's camera
+  frame; diagonal and changing attack directions therefore stay directional instead of assuming a fixed facing.
+- Added resolver and damper regression coverage for signed right/forward/backward impulses, diagonal normalization,
+  force capping, malformed input, and recovery. Strict typecheck, lint, and the production web build passed. The latest
+  server-owned aggregate test bus is currently red on one unrelated concurrent Warehouse rack regression; all three new
+  camera-impact tests passed in that snapshot. No browser or HMR acceptance was run because the repository permits only
+  the existing shared browser session.
+
+## 2026-08-08 — Simulant support-box melee
+
+- Added a grounded support query for Warehouse racks. It resolves the lowest connected rack beneath the player's
+  capsule, including yaw-rotated footprints and the existing support pitch.
+- Simulant melee now uses the carried object's normal snapshot and `applyMeleeHit` to strike that rack when the player is
+  outside vertical melee reach. Direct player damage is rejected when the player's height is outside that same reach,
+  preventing melee damage through tall stacks.
+- Added a deterministic Warehouse regression covering support selection and collapse of the connected rack column.
+- Validation: strict typecheck, targeted Prettier, `git diff --check`, and the web production build pass. The current
+  server-owned bus run `1786201782329-17746-f574d208` passes the new support-target regression and 571/572 assertions;
+  its one failure is the unrelated pre-existing rack-LED impact regression. The full workspace build still stops in
+  the unrelated `@hk-mahjong/coach` declaration build. No browser or HMR acceptance is claimed because no connected
+  Vite session is available.
+
+## 2026-08-08 — Warehouse spawn floor alignment
+
+- The Debugging 02 warehouse spawn now stores the rendered floor top as its surface height. The first-person reset path
+  adds standing eye height once, while the floor collider and platform share the same `WAREHOUSE_FLOOR_TOP_Y` datum.
+- Added a map-catalog regression that checks the spawn surface against the platform bounds. This fixes the initial and
+  death-respawn camera/capsule offset that placed the player partly below the warehouse floor.
+
+## 2026-08-08 — Tall Warehouse towers and rack-bound LEDs
+
+- Rebound every steady, blinking, and glow LED instance to a rack-local transform. The Warehouse presentation seam now
+  recomposes those matrices from the live rack body instances after Rapier/fallback updates, so an impacted cabinet keeps
+  its LEDs attached while it tumbles.
+- Raised generated pile heights to five through twelve supported layers, raised the warehouse shell to 16 m, and moved
+  the high-bay and quadrant fixtures upward with the taller towers. The versioned physics marker is
+  `warehouse-supported-piles-v7-tall-towers-rack-dynamics`.
+- Added deterministic catalog and rack-impact regressions for the taller tower envelope and LED transform contract.
+
+## 2026-08-08 — Polished Warehouse floor
+
+- Replaced the Warehouse platform's black `MeshBasicMaterial` with a dark physical metal finish that keeps the baked
+  quadrant lightmap while evaluating direct spotlight highlights. Its roughness, metalness, and clearcoat are tuned to
+  read like the ice-blue server cabinets, with explicit `polished-server-metal-v1` metadata.
+- Updated the map-catalog regression for the physical material, finish values, and dynamic specular-lighting contract.
+- Validation is pending for the next server-owned test-bus snapshot; no Vite development server or connected browser is
+  available for HMR or rendered acceptance.
+
+## 2026-08-08 — Simulant melee pursuit and player impact response
+
+- The local simulant now selects the nearest available warehouse melee prop (or fixed gun pickup), walks to it, carries
+  a visible copy, pursues the player, and repeats alternating melee swings through the shared combat damage router. A
+  claimed pickup is hidden from the world and is released on simulant respawn.
+- Melee damage now drives a temporary full-screen white blend: 0 damage is transparent, 100 damage is 50% white, and
+  200 or more is pure white. The same capped damage ratio moves the bokeh focus plane closer for a short blur response.
+- At 200 damage the focus target reaches zero, and the depth-of-field intensity doubles for a five-second response
+  window so the blur remains obvious after the white flash fades.
+- A newly inserted impact pass keeps that requested opacity through the first rendered frame, so the hit is visible
+  immediately; fading starts on the next frame.
+- Added `melee-impact.ts` pure resolvers and focused coverage for opacity, the zero-focus 200-point cap, the five-second
+  DoF boost, and pulse fade behavior.
+- Validation: server-owned test bus passed 562/562 assertions; strict typecheck, targeted Prettier, production build, and
+  `git diff --check` passed. Targeted scene ESLint still reports existing dirty-checkpoint diagnostics in the large
+  `mahjong-table.ts` file; full `pnpm lint` remains blocked by 86 existing diagnostics outside this feature. No browser
+  or HMR acceptance was run because the repository permits only the existing shared browser session.
+
+The simulant's melee contact now also applies its momentum-scaled stopping power to the local player's horizontal physics
+velocity. The push is directed away from the simulant, capped at the shared melee stopping-power limit, exponentially
+damped, and passed through the Rapier/fallback capsule movement path so walls resolve it naturally. Added pure coverage for
+direction, accumulation/capping, and malformed input handling.
+
+Validation for this addition: server-owned run `1786199982259-17746-6ba51f83` passed 565/565 assertions, including all
+three knockback tests; strict typecheck, targeted Prettier, the production build, and `git diff --check` passed. A later
+aggregate run reported one unrelated Warehouse map-catalog mismatch (`14.25` m actual spotlight height versus a stale
+`7.25` m expectation) from the concurrent tall-tower edits. Targeted ESLint still reports the pre-existing dirty-checkpoint
+diagnostics in `mahjong-table.ts`; no Vite development server or connected browser is available for HMR or rendered
+acceptance.
+
+## 2026-08-08 — Four quadrant Warehouse spotlights
+
+- Replaced the single central Warehouse `SpotLight` with four unshadowed spotlights at the exact centres of the four
+  quadrants: `(-24, 18)`, `(24, 18)`, `(-24, -18)`, and `(24, -18)`. Each light has a matching floor target, visible
+  shaft, and floor pool, all marked with `warehouse-quadrant-spotlights-v1`.
+- Updated the deterministic floor and wall lightmaps to use the nearest quadrant spotlight footprint and expanded the
+  matching flare sprites from one spotlight pair to four. High-bay fixtures, red emissive markers, and the zero point/area
+  light contract remain unchanged.
+- Updated map-catalog and raycast regressions for four spotlights, quadrant positions, new presentation names, and the
+  quadrant bake metadata. Server-owned test-bus run `1786197882281-17746-ee3acee2` passes all 560 assertions; full lint,
+  format check, and the production build pass. Strict typecheck remains blocked by three unrelated dirty-lane errors in
+  `mahjong-table.ts`. No Vite development server or connected browser is available, so HMR and rendered acceptance are
+  not claimed.
+
 ## 2026-08-08 — Warehouse lens-flare sprites
 
 - Added 26 deterministic `THREE.Sprite` elements: halo and horizontal streak pairs for eight high-bay fixtures, the central
@@ -2071,3 +2179,36 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   `1786194787697-42883-f8e06ff0` passed all 556 assertions, including the new regression. Strict typecheck, the web
   production build, targeted Prettier, and `git diff --check` pass. The required Vite HMR request was accepted; no
   additional browser session was opened. Repository-wide lint remains red on 85 pre-existing dirty-checkpoint errors.
+
+## 2026-08-08 — Warehouse server-stack impact physics
+
+- Warehouse rack cabinets now remain static until a projectile or gun-melee hit reaches a rendered server body. The hit
+  server receives a seeded impact launch and angular tumble, and every directly supported server above it is promoted to
+  a Rapier dynamic body so gravity and contact resolution pull the stack down naturally.
+- Rack bodies now have stable exploration physics IDs, share their generated transforms with the rendered instanced mesh,
+  remain valid weapon raycast surfaces, and stay excluded from melee pickup and player-brush knockback. Presentation-only
+  LED bars remain raycast-ignored.
+- Added a scene regression that finds a real generated supported stack, resolves its rack IDs, shoots the lower server, and
+  verifies both the hit server and the supported server above it become dynamic. The map generation marker is now
+  `warehouse-supported-piles-v6-rack-dynamics`.
+- Validation: the server-owned bus snapshot `1786199082128-17746-25922d01` passed all 562 assertions, including the new
+  stack-impact and rack-raycast regressions. `pnpm typecheck`, `pnpm build`, targeted Prettier, and `git diff --check` pass. Targeted
+  ESLint still reports only the existing dirty-checkpoint diagnostics in the large scene file. No Vite server or connected
+  browser is available in this worktree, so HMR and rendered browser acceptance remain pending.
+
+## 2026-08-08 — Hide gun damage and stopping power in the HUD
+
+- The visible weapon loadout HUD now shows firearm ammunition and movement details without damage or stopping-power
+  numbers. Those values remain available to the combat runtime and explicit debug telemetry, but are no longer rendered
+  in active weapon, nearby pickup, or gun-melee help rows.
+
+## 2026-08-08 — Live match kill scoreboard
+
+- Added an immutable `KillScoreSnapshot` for the local match with separate Player and Simulant totals and a last-killer
+  marker. The scene updates it only from lethal combat-router results whose attacker is the player or simulant, so
+  respawns preserve the match totals and unattributed environmental deaths do not award a kill.
+- Added a live, accessible scoreboard panel to the first-person HUD. It exposes `data-player-kills`,
+  `data-simulant-kills`, and `data-last-killer` for smoke/debug inspection while keeping the player-facing labels short.
+- Added pure score reducer coverage for zero state, immutable updates, and both actors. Strict typecheck, targeted
+  ESLint, targeted Prettier, and `git diff --check` pass. The server-owned test bus must publish a post-change snapshot;
+  no Vite client is connected in this worktree, so HMR and rendered browser acceptance remain pending.

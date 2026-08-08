@@ -1,5 +1,75 @@
 # Architecture and implementation log
 
+## 2026-08-08 — Directional melee view impulse
+
+Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the
+attack vector after a successful player-versus-simulant melee hit. The victim receives a kick from the exact simulant-to-
+player push vector that is also passed to `resolvePlayerKnockbackVelocity`, so the view follows the real knockback direction
+instead of assuming that the victim is looking at the attacker. The vector is projected into camera-local right,
+forward, and up axes, then returned through the shared reticule/viewmodel output with an underdamped recovery.
+
+## 2026-08-08 — Simulant support-box melee
+
+The Debugging 02 simulant now checks the player's actual grounded height before applying a melee hit. A player above
+the weapon's vertical reach is no longer damaged through a tall rack stack. When the player is standing on a Warehouse
+server stack, the simulant can instead choose the lowest rack in that connected support column and call the existing
+melee impact path. That path applies the carried tool or gun's resolved stopping power and releases the supported racks,
+so the stack falls through the same dynamic physics and LED attachment rules as a player melee hit.
+
+## 2026-08-08 — Warehouse spawn floor alignment
+
+Debugging 02 treats `WAREHOUSE_FLOOR_TOP_Y` as the single floor datum for the rendered platform, physics floor, and player
+spawn. The first-person controller receives that surface position and adds standing eye height once on initial and death
+respawn, so the warehouse capsule starts supported instead of intersecting the floor.
+
+## 2026-08-08 — Tall Warehouse towers and attached rack LEDs
+
+Warehouse server-cabinet LEDs are authored as local offsets from their owning rack. After each live physics transform,
+the map resource multiplies those offsets by the current rack body matrix for the steady bars, blinking bars, and both
+glow overlays. A shot or melee impact therefore moves and rotates the LEDs with the cabinet instead of leaving them at
+their original world positions.
+
+Ordinary Warehouse piles now generate five to twelve supported layers, with a 16 m shell and raised high-bay/quadrant
+lighting to keep the upper levels readable. The generation marker is
+`warehouse-supported-piles-v7-tall-towers-rack-dynamics`; the map remains deterministic from its room seed.
+
+## 2026-08-08 — Polished Warehouse floor
+
+The Warehouse floor keeps its deterministic quadrant lightmap for low-cost diffuse illumination, but now uses a dark
+`MeshPhysicalMaterial` with `roughness = 0.22`, `metalness = 0.76`, and a `0.62` clearcoat. Direct quadrant spotlights
+therefore create the same restrained metal highlights visible on the server cabinets. The floor remains a non-shadowing
+receiver for performance; only its direct specular response is enabled. The material and platform metadata are tagged
+`warehouse-floor-polished-server-metal-v1`.
+
+## 2026-08-08 — Simulant melee UX test path
+
+The Debugging 02 simulant now hunts the nearest available weapon after spawning. It claims a warehouse prop first when
+one is nearer than a fixed gun pickup, renders the claimed object in its hand, closes on the player, and repeats
+alternating swings until the player dies or the simulant is reset. Pickup ownership is explicit so the local player cannot
+also collect the claimed object, and respawn releases it back to the world.
+
+Player melee hits use a post-process white blend whose initial opacity is `clamp(appliedDamage / 200, 0, 1)`. The first
+rendered frame starts at that opacity immediately; the pulse then fades over 0.42 seconds. The shared bokeh focus target
+moves toward zero by the same damage ratio, reaching zero at 200 damage. Depth-of-field
+intensity doubles for about 5 seconds after the hit. The effect is deliberately presentation-only; combat damage and
+shield/health accounting remain in the existing router and vitals reducer.
+
+When the simulant's melee swing deals damage, its momentum-scaled stopping power now adds a bounded horizontal velocity
+to the local player's physics movement. The impulse points from the simulant toward the player, decays over time, and is
+resolved by the same Rapier/fallback capsule move used by normal input, so walls can stop the push while the centralized
+camera damper receives the resulting displacement. This is physical movement, not a camera-only shake.
+
+## 2026-08-08 — Four quadrant Warehouse spotlights
+
+Warehouse lighting now uses four real, unshadowed spotlights instead of one central light. They are placed at the centres
+of the four rectangular play-space quadrants: `x = -24` or `24`, and `z = -18` or `18`. Each has its own floor target,
+translucent beam shaft, warm floor pool, and additive flare pair. The high-bay fixtures and red/yellow emissive markers
+remain presentation-only, with no runtime point or area lights.
+
+The static floor and wall lightmaps use the nearest quadrant spotlight footprint and are tagged
+`warehouse-floor-area-bake-v2-quadrants` and `warehouse-wall-area-bake-v3-quadrants`. The map root reports the spotlight
+generation and count so diagnostics can verify the four-light layout without relying on rendered pixels.
+
 ## 2026-08-08 — Warehouse lens-flare sprites
 
 The Warehouse now places deterministic additive lens-flare sprites at the eight high-bay fixtures, the central spotlight,
@@ -472,9 +542,10 @@ world adds eight deterministic, named props in the clear warehouse aisles and re
 melee-hit, and projectile-hit paths. Warehouse places one of each fixed weapon at equal intervals around an inset
 rectangular perimeter; Debugging 01 retains the dense obstacle-aware square sampler. The warehouse uses eight warm
 dark high-bay fixtures, one deterministic yellow rectangular LED line around the full perimeter, four red emergency wall
-fixtures, twelve red center-lane floor LEDs, and one low central unshadowed spotlight. It creates no warehouse `RectAreaLight` or emergency `PointLight`
-objects. The warehouse background is black so the explicit spotlight stays isolated. Its translucent shaft, floor pool,
-and ground-truth ambient occlusion provide visible beam and ray-style crate contact cues without volumetric ray tracing.
+fixtures, twelve red center-lane floor LEDs, and four low unshadowed spotlights centered in the warehouse quadrants. It
+creates no warehouse `RectAreaLight` or emergency `PointLight` objects. The warehouse background is black so the explicit
+spotlights stay isolated. Their translucent shafts, floor pools, and ground-truth ambient occlusion provide visible beam
+and ray-style crate contact cues without volumetric ray tracing.
 
 Use the `Map` selector in the upper-left scene controls to switch maps. A change remounts the scene with the selected
 map and updates the HUD. The choice is stored under `hk-mahjong-coach:visual-map:v1`; `?map=debugging-01` or
@@ -1249,7 +1320,8 @@ damage from a fast thrown prop is intentionally deferred to a later pass.
 ## Melee stopping power
 
 Every melee pickup derives a bounded stopping-power value from its resolved damage: `0.12 m/s` per damage point, capped
-at `18 m/s`. The value is presented with the pickup and active melee HUD rows. A successful simulant hit applies this
+at `18 m/s`. The player-facing loadout HUD shows reach and swing details without exposing damage or stopping-power
+numbers; the values remain available to the runtime and explicit debug telemetry. A successful simulant hit applies this
 impulse through the same stagger and knockback path used by projectile stopping power, using momentum-scaled damage so
 sprinting, opposing motion, and falling strikes carry more force. World ragdolls receive the pickup's stopping-power
 impulse as their minimum horizontal launch velocity, while callers without the stat retain the legacy swing-speed
@@ -1326,3 +1398,35 @@ Pressing `F` for gun melee interrupts an active reload and starts the normal sha
 for both clip and round reloads. Any rounds already inserted by a round reload remain loaded; the unfinished reload timer,
 return pose, and reload HUD state are discarded. The melee strike still uses the selected gun's size-derived reach,
 damage, stopping power, and O₂ cost, and it does not consume ammunition.
+
+## Warehouse server-stack impact physics
+
+Warehouse's ice-blue data-center cabinets use the generated one-metre supported pile layout as their physics source. Each
+cabinet has a stable runtime ID and starts as a static streamed collider, so the storage floor is solid and inexpensive.
+The rack body is a weapon-raycast surface; the status bars and glow meshes are presentation-only and remain ignored by
+hitscan weapons.
+
+The first projectile or gun-melee hit on a cabinet releases that cabinet into Rapier dynamics with an impact launch and
+angular tumble. The runtime follows the exact same x/z support cell and `warehouse-supported-piles-v6-rack-dynamics` layer
+pitch to release directly supported cabinets above it in the same frame. Their gravity, friction, restitution, and contacts
+then produce the downward tumble. Rack cabinets are not melee pickups and cannot be toppled by simply brushing into them.
+This is local presentation physics; it does not change the authoritative mahjong engine or add networked state.
+
+An impacted cabinet also loses its status-light effect immediately. The steady bars, phase-blinking bars, and their glow
+overlays are attached to the live rack matrix but use zero-scale instances after damage, so the lights stay off while the
+cabinet falls. Cabinets released above a damaged support are treated as part of the same damaged collapse and also lose
+their indicators. A fresh map mount restores the seeded light pattern.
+
+## Gun HUD stat visibility
+
+The visible loadout HUD keeps firearm ammunition and controls readable without exposing damage or stopping-power numbers.
+Those values remain part of the deterministic weapon and combat model and remain available in the explicit debug telemetry
+panel for local tuning.
+
+## Match kill scoreboard
+
+The first-person match HUD includes a live `Match kills` panel with separate `Player` and `Simulant` totals. The totals
+belong to the current scene match: a map or room remount starts both at zero, while normal death respawns leave them
+unchanged. A total changes only when the shared combat damage router reports a lethal result with `player` or
+`bot:simulant` as the attacker. This keeps the scoreboard tied to the same shield/health and death lifecycle as the
+combat presentation and avoids crediting an environmental or unattributed death.
