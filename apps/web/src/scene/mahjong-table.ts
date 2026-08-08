@@ -52,8 +52,19 @@ import {
   type WeaponSpawnRect,
   type WeaponStateSnapshot,
 } from "./weapons.js";
+import {
+  resolveMeleeLongestSizeMeters,
+  resolveMeleeO2Cost,
+  resolveMeleeRangeMeters,
+  resolveMeleeSwing,
+  resolveMeleeSwingPose,
+  type MeleeObjectSnapshot,
+  type MeleeStateSnapshot,
+  type MeleeSwingDirection,
+} from "./melee.js";
 
 export type { WeaponId, WeaponInventorySnapshot, WeaponStateSnapshot } from "./weapons.js";
+export type { MeleeObjectSnapshot, MeleeStateSnapshot } from "./melee.js";
 
 import {
   createFallbackMahjongPhysics,
@@ -66,6 +77,7 @@ import {
 import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_LANDING_BASE_COST,
   O2_LANDING_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
   O2_SPRINT_DRAIN_PER_SECOND,
@@ -91,6 +103,7 @@ import {
   PLAYER_WALK_SPEED_RATIO,
   resolveImpactDamage,
   resolveLandingO2Cost,
+  resolveLandingO2OverflowDamage,
 } from "./player-impact.js";
 import {
   PLAYER_CAPSULE_CENTER_HEIGHT,
@@ -108,7 +121,10 @@ import {
 import {
   CAMERA_VIEWMODEL_STANDING_OFFSET,
   createCameraMotionDamper,
+  resolveCameraLocalAccelerationFromVelocityDelta,
   resolveCameraViewmodelTransition,
+  type CameraLocalFrame,
+  type CameraMotionVector,
   type CameraViewmodelOffset,
   type CameraViewmodelTransition,
   type CameraLocalAcceleration,
@@ -130,7 +146,12 @@ import {
   setO2BlurPassVignette,
   type DamageVignetteKind,
 } from "./o2-blur.js";
-import { isPlayerTouchingWall } from "./wall-contact.js";
+import {
+  clampPlayerPositionToWallTangent,
+  projectPlayerMovementToWallTangent,
+  resolvePlayerWallContact,
+  type PlayerWallContact,
+} from "./wall-contact.js";
 import {
   applySniperScopeProjection,
   createSniperScopePass,
@@ -204,6 +225,26 @@ export const resolveReloadAimingDownSights = (
   aimingDownSightsRequested: boolean,
   reloading: boolean,
 ): boolean => aimingDownSightsRequested && !reloading;
+
+/**
+ * Cover is an explicit zoom transition, not a side effect of walking into a
+ * wall while already zoomed. The caller supplies the pending zoom-on edge
+ * after the physics contact probe has run for the current frame.
+ */
+export const resolveCoverModeFromAimTransition = (
+  coverMode: boolean,
+  zoomActivated: boolean,
+  aimingDownSights: boolean,
+  touchingWall: boolean,
+): boolean => aimingDownSights && touchingWall && (coverMode || zoomActivated);
+
+/** Resolve the A/D strafe input used by cover presentation. */
+export const resolveCoverLeanInput = (coverMode: boolean, strafeInput: number): number => {
+  if (!coverMode) {
+    return 0;
+  }
+  return Number.isFinite(strafeInput) ? THREE.MathUtils.clamp(strafeInput, -1, 1) : 0;
+};
 
 export const MOVEMENT_DOUBLE_TAP_WINDOW_MS = 300;
 
@@ -345,26 +386,35 @@ export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
 
 const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
 const VISUAL_SCENE_FALL_RESET_Y = -2;
+const WORLD_SPAWN_MARGIN = 1;
+const WORLD_SPAWN_ATTEMPTS = 24;
+const WORLD_SPAWN_DROP_HEIGHT = 80;
+const WORLD_SPAWN_DROP_DISTANCE = WORLD_SPAWN_DROP_HEIGHT * 2;
+const PLAYER_DEATH_RESPAWN_DELAY_MS = 3_000;
+const PLAYER_DEATH_FADE_DURATION_MS = 650;
+const PLAYER_RESPAWN_FADE_IN_DURATION_MS = 260;
 const SIMULANT_STOP_DISTANCE_METERS = 2.4;
-const SIMULANT_MIN_START_DISTANCE_METERS = 32;
+// Keep the 250 m FPS world bounded to 125 m from the origin in each direction.
+// Coarse chunks preserve long traversal sightlines while keeping the resident
+// grid compact enough for the runner prototype.
+const SIMULANT_MIN_START_DISTANCE_METERS = 180;
 const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.09;
 const SIMULANT_BODY_TARGET_HEIGHT_METERS = 1.8;
-const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.15;
-const SIMULANT_MOVE_SPEED_METERS_PER_SECOND = 2.8;
-const SIMULANT_ATTACK_DISTANCE_METERS = 2.7;
-const SIMULANT_ATTACK_DAMAGE_PER_SECOND = 7;
-const SIMULANT_RESPAWN_DELAY_MS = 3000;
-// Keep the FPS world compact: five 50 m chunks per axis make an exact
-// 250 m × 250 m navigable square while retaining a useful amount of seeded
-// neighbourhood variation around the authored play areas.
-export const EXPLORATION_CHUNK_SIZE = 50;
-export const EXPLORATION_CHUNKS_PER_SIDE = 2;
+const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.05;
+export const EXPLORATION_CHUNK_SIZE = 100;
+export const EXPLORATION_CHUNKS_PER_SIDE = 1.25;
 export const EXPLORATION_WORLD_SIZE_METERS =
-  EXPLORATION_CHUNK_SIZE * (EXPLORATION_CHUNKS_PER_SIDE * 2 + 1);
-const EXPLORATION_DENSITY_MULTIPLIER = 2;
+  EXPLORATION_CHUNK_SIZE * EXPLORATION_CHUNKS_PER_SIDE * 2;
+const EXPLORATION_DENSITY_MULTIPLIER = 2.85;
 const EXPLORATION_DENSITY_SCALE =
   EXPLORATION_DENSITY_MULTIPLIER * Math.sqrt(EXPLORATION_CHUNK_SIZE / 8);
+const EXPLORATION_DISTRICT_ELEVATION_MIN = 0.65;
+const EXPLORATION_DISTRICT_ELEVATION_MAX = 3.15;
+const EXPLORATION_BUILDING_ELEVATION_LIFT = 1.15;
+const EXPLORATION_BUILDING_FEATURE_LIFT = 0.75;
 export const EXPLORATION_WORLD_HALF_SIZE = EXPLORATION_WORLD_SIZE_METERS / 2;
+export const EXPLORATION_WORLD_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
+const SIMULANT_SPAWN_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
 const WORLD_BOUNDS = {
   minX: -EXPLORATION_WORLD_HALF_SIZE,
   maxX: EXPLORATION_WORLD_HALF_SIZE,
@@ -837,6 +887,7 @@ export interface MahjongTableSceneOptions {
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
+  readonly onMeleeStateChange?: (state: MeleeStateSnapshot) => void;
   readonly onReady?: () => void;
   readonly quality?: VisualQualityPreset | "auto";
   readonly roomSeed?: string;
@@ -1411,6 +1462,12 @@ const WALK_SPEED_RATIO = PLAYER_WALK_SPEED_RATIO;
 const TROT_SPEED_MULTIPLIER = PLAYER_TROT_MULTIPLIER;
 const CROUCH_SPEED_MULTIPLIER = 0.5;
 const WALK_SPEED_MULTIPLIER = PLAYER_WALK_MULTIPLIER;
+const SIMULANT_TROT_SPEED_METERS_PER_SECOND =
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND * TROT_SPEED_MULTIPLIER;
+const SIMULANT_TROT_SPEED_RATIO =
+  SIMULANT_TROT_SPEED_METERS_PER_SECOND / (PLAYER_MOVE_SPEED_METERS_PER_SECOND * SPRINT_MULTIPLIER);
+const SIMULANT_TROT_LOCOMOTION_BLEND =
+  (TROT_SPEED_MULTIPLIER / SPRINT_MULTIPLIER - WALK_SPEED_RATIO) / (1 - WALK_SPEED_RATIO);
 
 export interface PlayerMovementSpeedInput {
   readonly crouching: boolean;
@@ -1445,6 +1502,18 @@ export const resolvePlayerMovementSpeedMultiplier = ({
   return reloading ? Math.min(requestedMultiplier, TROT_SPEED_MULTIPLIER) : requestedMultiplier;
 };
 
+/** Apply the same per-projectile damage payload used by the ordinary weapon path. */
+export const resolveSimulantShotDamage = (
+  damagePerProjectile: number,
+  projectileCount = 1,
+): number => {
+  const damage = Number.isFinite(damagePerProjectile) ? Math.max(0, damagePerProjectile) : 0;
+  const projectiles = Number.isFinite(projectileCount)
+    ? Math.max(0, Math.floor(projectileCount))
+    : 0;
+  return damage * projectiles;
+};
+
 const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
 const RETICLE_AIM_SWAY_PIXELS_PER_RADIAN = 260;
 const RETICLE_HEAD_BOB_PIXELS_PER_METER = 160;
@@ -1469,7 +1538,7 @@ export const resolveWeaponShotReticleOffset = (
     CameraMotionOffsets,
     "roll" | "verticalOffset" | "aimSwayX" | "aimSwayY" | "recoilYaw" | "recoilPitch"
   > &
-    Partial<Pick<CameraMotionOffsets, "headBobLateral" | "headBobPitch">>,
+    Partial<Pick<CameraMotionOffsets, "coverLeanRoll" | "headBobLateral" | "headBobPitch">>,
   includeRecoil = true,
   recoilFeedbackMultiplier = 1,
 ): ReticleBobbingOffset => {
@@ -1477,9 +1546,10 @@ export const resolveWeaponShotReticleOffset = (
     ? Math.max(0, Math.min(1, recoilFeedbackMultiplier))
     : 0;
   const recoilScale = includeRecoil ? safeRecoilFeedbackMultiplier : 0;
+  const reticleRoll = motion.roll - (motion.coverLeanRoll ?? 0);
   return {
     x:
-      (motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
+      (reticleRoll * RETICLE_SWAY_PIXELS_PER_RADIAN +
         (motion.headBobLateral ?? 0) * RETICLE_HEAD_BOB_LATERAL_PIXELS_PER_METER +
         motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
         motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN * recoilScale) *
@@ -2216,6 +2286,16 @@ export const clipExplorationRectAroundPlayAreas = (
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const smoothStep = (value: number): number => value * value * (3 - 2 * value);
 
+const resolveClimbingTransitionY = (transition: ClimbingTransition, elapsed: number): number => {
+  const progress = smoothStep(
+    THREE.MathUtils.clamp(elapsed / Math.max(transition.duration, Number.EPSILON), 0, 1),
+  );
+  return transition.phase === "vault"
+    ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
+        Math.sin(progress * Math.PI) * transition.arcHeight
+    : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+};
+
 const hashNoise = (seed: string, x: number, z: number, salt: string): number => {
   const random = createSeededRandom(`${seed}|${salt}|${String(x)}|${String(z)}`);
   return random.nextFloat();
@@ -2566,6 +2646,36 @@ export const resolveVaultTraversalDuration = (heightAboveFeet: number): number =
     VAULT_MAX_DURATION_SECONDS,
     normalizedHeight,
   );
+};
+/**
+ * Resolve the discrete O₂ charge for a vault or wall climb from its height.
+ * The smallest vaultable ledges are free; a two-metre traversal costs the
+ * same 10 O₂ reference charge as a full landing, with a linear curve between
+ * those endpoints.
+ */
+export const resolveVaultTraversalO2Cost = (heightAboveFeet: number): number => {
+  const safeHeight = Number.isFinite(heightAboveFeet) ? Math.max(0, heightAboveFeet) : 0;
+  const normalizedHeight = THREE.MathUtils.clamp(
+    (safeHeight - VAULT_MIN_HEIGHT) / (VAULT_MAX_HEIGHT - VAULT_MIN_HEIGHT),
+    0,
+    1,
+  );
+  return O2_LANDING_BASE_COST * normalizedHeight;
+};
+/**
+ * Scale traversal time from the current O₂ reserve. Empty O₂ keeps the existing
+ * maximum duration as the slowest case; full O₂ doubles traversal speed.
+ */
+export const resolveO2ScaledTraversalDuration = (
+  baseDurationSeconds: number,
+  oxygenRatio: number,
+): number => {
+  const safeDuration = Number.isFinite(baseDurationSeconds) ? Math.max(0, baseDurationSeconds) : 0;
+  const safeOxygenRatio = Number.isFinite(oxygenRatio)
+    ? THREE.MathUtils.clamp(oxygenRatio, 0, 1)
+    : 0;
+  const durationMultiplier = 2 ** -safeOxygenRatio;
+  return safeDuration * durationMultiplier;
 };
 /** Scale the over-the-top arc with the same continuous height mapping. */
 export const resolveVaultTraversalArcHeight = (heightAboveFeet: number): number => {
@@ -4475,6 +4585,25 @@ interface WeaponAudioSpatialOutput {
 
 const getWeaponAccent = (weapon: WeaponId): string =>
   `#${new THREE.Color(WEAPON_DEFINITIONS[weapon].color).getHexString()}`;
+interface MeleeRuntime {
+  readonly update: (
+    deltaSeconds: number,
+    cameraPosition: THREE.Vector3,
+    aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
+    controlsActive: boolean,
+    viewActive: boolean,
+    viewmodelOffset: CameraViewmodelOffset,
+    viewmodelTransition: CameraViewmodelTransition,
+  ) => void;
+  readonly setFireHeld: (held: boolean) => void;
+  readonly fire: () => boolean;
+  readonly interact: () => boolean;
+  readonly isActive: () => boolean;
+  readonly holster: () => boolean;
+  readonly dropActiveObject: (playerVelocity?: PhysicsVector) => boolean;
+  readonly getSnapshot: () => MeleeStateSnapshot;
+  readonly dispose: () => void;
+}
 
 /** Shared near-black finish for every procedural gun body and sight detail. */
 const WEAPON_BLACK = 0x050607;
@@ -6764,6 +6893,463 @@ const createWeaponRuntime = (
   };
 };
 
+interface MeleeViewModelResources {
+  readonly root: THREE.Group;
+  readonly object: THREE.Mesh;
+}
+
+interface MeleeImpactEffect {
+  readonly object: THREE.Mesh;
+  remainingSeconds: number;
+}
+
+/**
+ * Runtime for claiming the same seeded knockable props used by the world
+ * ragdoll path. It deliberately lives beside the gun runtime so both tools
+ * share the reticle, camera-child viewmodel, and pointer input without
+ * changing the authoritative physics representation.
+ */
+const createMeleeRuntime = (
+  scene: THREE.Scene,
+  camera: THREE.PerspectiveCamera,
+  explorationWorld: ExplorationWorld,
+  onStateChange?: (state: MeleeStateSnapshot) => void,
+  onMeleeSwing?: (damage: number) => number,
+  onMeleeEquip?: () => void,
+): MeleeRuntime => {
+  const effectRoot = new THREE.Group();
+  effectRoot.name = "MeleeEffectsRoot";
+  effectRoot.userData = { weaponVisual: true, dofIgnore: true };
+  scene.add(effectRoot);
+  const impactEffects: MeleeImpactEffect[] = [];
+  const raycaster = new THREE.Raycaster();
+  raycaster.camera = camera;
+  const aimTargetWorld = new THREE.Vector3();
+  const aimTargetLocal = new THREE.Vector3();
+  const aimDirectionLocal = new THREE.Vector3();
+  const aimQuaternion = new THREE.Quaternion();
+  const objectForward = new THREE.Vector3(0, 0, -1);
+  const latestCameraPosition = new THREE.Vector3();
+  const latestAimDirection = new THREE.Vector3(0, 0, -1);
+  const dropDirection = new THREE.Vector3();
+  const dropPosition = new THREE.Vector3();
+  let activePickup: ExplorationMeleePickup | null = null;
+  let viewModel: MeleeViewModelResources | null = null;
+  let nearby: MeleeStateSnapshot["nearby"] = null;
+  let swinging = false;
+  let swingElapsedSeconds = 0;
+  let swingDurationSeconds = 0;
+  let swingDirection: MeleeSwingDirection = "right-to-left";
+  let nextSwingDirection: MeleeSwingDirection = "right-to-left";
+  let swingHitResolved = false;
+  let swings = 0;
+  let hits = 0;
+  let lastDamage = 0;
+  let lastOxygenCost = 0;
+  let fireHeld = false;
+  let controlsActive = false;
+  let viewActive = false;
+  let latestAimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  } | null = null;
+  let latestViewmodelOffset: CameraViewmodelOffset = { x: 0, y: 0, z: 0 };
+  let latestViewmodelTransition: CameraViewmodelTransition = {
+    phase: "idle",
+    progress: 1,
+    offset: { x: 0, y: 0, z: 0 },
+    pitchRadians: 0,
+    yawRadians: 0,
+    rollRadians: 0,
+  };
+  let lastSerializedSnapshot = "";
+
+  const getSnapshot = (): MeleeStateSnapshot => ({
+    active: activePickup?.snapshot ?? null,
+    nearby,
+    swinging,
+    swings,
+    hits,
+    lastDamage,
+    lastOxygenCost,
+  });
+  const emitState = (force = false): void => {
+    const snapshot = getSnapshot();
+    const serialized = JSON.stringify(snapshot);
+    if (force || serialized !== lastSerializedSnapshot) {
+      lastSerializedSnapshot = serialized;
+      onStateChange?.(snapshot);
+    }
+  };
+
+  const disposeViewModel = (): void => {
+    if (viewModel === null) {
+      return;
+    }
+    camera.remove(viewModel.root);
+    disposeObject(viewModel.root);
+    viewModel = null;
+  };
+  const createViewModel = (
+    pickup: ExplorationMeleePickup,
+    sourceMatrix?: THREE.Matrix4,
+  ): MeleeViewModelResources => {
+    const root = new THREE.Group();
+    root.name = `MeleeObject:${String(pickup.objectId)}`;
+    root.userData = { weaponVisual: true, dofIgnore: true };
+    const instanceMatrix = sourceMatrix?.clone() ?? new THREE.Matrix4();
+    if (sourceMatrix === undefined) {
+      pickup.mesh.getMatrixAt(pickup.index, instanceMatrix);
+    }
+    const instanceQuaternion = new THREE.Quaternion();
+    const instanceScale = new THREE.Vector3();
+    instanceMatrix.decompose(new THREE.Vector3(), instanceQuaternion, instanceScale);
+    // Use the source InstancedMesh geometry/material instead of inventing a
+    // proxy shape. The instance matrix supplies the prop's authored rotation,
+    // proportions, and full world size; do not rescale it for the viewmodel.
+    const geometry = pickup.mesh.geometry.clone();
+    geometry.computeBoundingBox();
+    const sourceSize = new THREE.Vector3();
+    geometry.boundingBox?.getSize(sourceSize);
+    const scaledSourceSize = sourceSize.multiply(
+      new THREE.Vector3(
+        Math.abs(instanceScale.x),
+        Math.abs(instanceScale.y),
+        Math.abs(instanceScale.z),
+      ),
+    );
+    const longestAxis = new THREE.Vector3(1, 0, 0);
+    if (scaledSourceSize.y > scaledSourceSize.x && scaledSourceSize.y >= scaledSourceSize.z) {
+      longestAxis.set(0, 1, 0);
+    } else if (scaledSourceSize.z > scaledSourceSize.x) {
+      longestAxis.set(0, 0, 1);
+    }
+    const uprightGripQuaternion = new THREE.Quaternion().setFromUnitVectors(
+      longestAxis,
+      new THREE.Vector3(0, 1, 0),
+    );
+    const sourceLength = Math.max(scaledSourceSize.x, scaledSourceSize.y, scaledSourceSize.z);
+    const sourceMaterial = pickup.mesh.material;
+    const material = Array.isArray(sourceMaterial)
+      ? sourceMaterial.map((entry) => entry.clone())
+      : sourceMaterial.clone();
+    const object = new THREE.Mesh(geometry, material);
+    object.name = "MeleeRagdollObject";
+    // Put the player's hand near the butt end of the full-size source prop.
+    // The center is offset along the now-upright source axis so the bottom of
+    // a pole sits at the hand instead of pivoting around its center of mass.
+    object.position.set(0, sourceLength * 0.38, -0.1);
+    // Keep the longest source axis upright. The swing pose then rotates that
+    // axis through the outward baseball-bat arc instead of laying a pole
+    // sideways and making it look like a katana.
+    object.quaternion.copy(instanceQuaternion).multiply(uprightGripQuaternion);
+    object.scale.copy(instanceScale);
+    object.castShadow = true;
+    object.receiveShadow = true;
+    object.userData = {
+      weaponVisual: true,
+      dofIgnore: true,
+      meleeObjectId: pickup.objectId,
+      meleeDamage: pickup.snapshot.damage,
+      meleeVolumeM3: pickup.snapshot.volumeM3,
+    };
+    root.add(object);
+    root.add(createRightHandViewModel());
+    root.position.set(
+      CAMERA_VIEWMODEL_STANDING_OFFSET.x + 0.12,
+      CAMERA_VIEWMODEL_STANDING_OFFSET.y - 0.08,
+      CAMERA_VIEWMODEL_STANDING_OFFSET.z - 0.08,
+    );
+    root.visible = false;
+    camera.add(root);
+    return { root, object };
+  };
+
+  /** Resolve a pickup's distance from its collider centre without exposing it in the HUD. */
+  const findNearestMeleePickup = (position: THREE.Vector3): ExplorationMeleePickup | null => {
+    let best: { readonly pickup: ExplorationMeleePickup; readonly distance: number } | null = null;
+    for (const pickup of explorationWorld.getMeleePickups()) {
+      const instanceMatrix = new THREE.Matrix4();
+      pickup.mesh.getMatrixAt(pickup.index, instanceMatrix);
+      const instancePosition = new THREE.Vector3().setFromMatrixPosition(instanceMatrix);
+      const distance = instancePosition.distanceTo(position);
+      if (distance > WEAPON_PICKUP_RANGE_METERS) {
+        continue;
+      }
+      if (best === null || distance < best.distance) {
+        best = { pickup, distance };
+      }
+    }
+    return best?.pickup ?? null;
+  };
+
+  const addImpact = (hit: THREE.Intersection, color: number): void => {
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 1,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const impact = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), material);
+    impact.name = "MeleeImpact";
+    impact.position.copy(hit.point);
+    impact.userData = { weaponVisual: true, dofIgnore: true };
+    effectRoot.add(impact);
+    impactEffects.push({ object: impact, remainingSeconds: 0.16 });
+  };
+
+  const resolveSwingHit = (): void => {
+    if (activePickup === null || latestAimRay === null) {
+      return;
+    }
+    scene.updateMatrixWorld(true);
+    raycaster.set(latestAimRay.origin, latestAimRay.direction);
+    raycaster.near = 0.12;
+    raycaster.far = activePickup.snapshot.rangeMeters;
+    const hit = scene.children
+      .filter((object) => object.name !== "LightingRoot" && object.name !== "DebugRoot")
+      .flatMap((object) => raycaster.intersectObject(object, true))
+      .find(
+        (intersection) =>
+          !isWeaponVisual(intersection.object) && !(intersection.object instanceof THREE.Sprite),
+      );
+    if (hit === undefined) {
+      return;
+    }
+    addImpact(hit, activePickup.color);
+    const objectId = explorationWorld.getMeleeObjectIdForHit(hit.object, hit.instanceId);
+    if (objectId === null) {
+      hit.object.userData.lastMeleeHit = {
+        damage: activePickup.snapshot.damage,
+        volumeM3: activePickup.snapshot.volumeM3,
+      };
+      return;
+    }
+    const didApply = explorationWorld.applyMeleeHit(
+      objectId,
+      {
+        x: latestAimRay.direction.x,
+        y: latestAimRay.direction.y,
+        z: latestAimRay.direction.z,
+      },
+      activePickup.snapshot.swingSpeedRadiansPerSecond,
+    );
+    if (didApply) {
+      hits += 1;
+      lastDamage = activePickup.snapshot.damage;
+      emitState(true);
+    }
+  };
+
+  const trySwing = (): boolean => {
+    if (
+      !controlsActive ||
+      activePickup === null ||
+      latestAimRay === null ||
+      swinging ||
+      latestViewmodelTransition.phase !== "idle"
+    ) {
+      return false;
+    }
+    const swing = resolveMeleeSwing(activePickup.snapshot.volumeM3);
+    swingDirection = nextSwingDirection;
+    nextSwingDirection = swingDirection === "right-to-left" ? "left-to-right" : "right-to-left";
+    swingDurationSeconds = swing.swingDurationSeconds;
+    swingElapsedSeconds = 0;
+    swingHitResolved = false;
+    swinging = true;
+    swings += 1;
+    lastDamage = swing.damage;
+    lastOxygenCost = onMeleeSwing?.(swing.damage) ?? resolveMeleeO2Cost(swing.damage);
+    emitState(true);
+    return true;
+  };
+
+  const interact = (): boolean => {
+    if (activePickup !== null) {
+      return true;
+    }
+    if (!controlsActive) {
+      return false;
+    }
+    const candidate = findNearestMeleePickup(latestCameraPosition);
+    if (candidate === null) {
+      return false;
+    }
+    const sourceMatrix = new THREE.Matrix4();
+    candidate.mesh.getMatrixAt(candidate.index, sourceMatrix);
+    const equipped = explorationWorld.equipMeleeObject(candidate.objectId);
+    if (equipped === null) {
+      return false;
+    }
+    activePickup = equipped;
+    swingDirection = "right-to-left";
+    nextSwingDirection = "right-to-left";
+    viewModel = createViewModel(equipped, sourceMatrix);
+    onMeleeEquip?.();
+    emitState(true);
+    return true;
+  };
+
+  const dropActiveObject = (playerVelocity?: PhysicsVector): boolean => {
+    if (activePickup === null) {
+      return false;
+    }
+    dropDirection.copy(latestAimDirection).setY(0);
+    if (dropDirection.lengthSq() <= 0.0001) {
+      dropDirection.set(0, 0, -1);
+    } else {
+      dropDirection.normalize();
+    }
+    dropPosition.copy(latestCameraPosition).addScaledVector(dropDirection, 1.1);
+    dropPosition.y = Math.max(0.2, latestCameraPosition.y - PLAYER_CAPSULE_CENTER_HEIGHT);
+    const didDrop = explorationWorld.dropMeleeObject(
+      activePickup.objectId,
+      dropPosition,
+      Math.atan2(dropDirection.x, dropDirection.z),
+      playerVelocity,
+    );
+    if (!didDrop) {
+      return false;
+    }
+    swinging = false;
+    swingElapsedSeconds = 0;
+    disposeViewModel();
+    activePickup = null;
+    emitState(true);
+    return true;
+  };
+
+  const update = (
+    deltaSeconds: number,
+    cameraPosition: THREE.Vector3,
+    aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
+    active: boolean,
+    visibleInView: boolean,
+    viewmodelOffset: CameraViewmodelOffset,
+    viewmodelTransition: CameraViewmodelTransition,
+  ): void => {
+    const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    controlsActive = active;
+    viewActive = visibleInView;
+    latestCameraPosition.copy(cameraPosition);
+    latestAimRay = aimRay;
+    latestAimDirection.copy(aimRay.direction);
+    latestViewmodelOffset = viewmodelOffset;
+    latestViewmodelTransition = viewmodelTransition;
+    if (fireHeld && activePickup !== null && !swinging) {
+      trySwing();
+    }
+    if (swinging) {
+      swingElapsedSeconds += safeDelta;
+      const progress = Math.min(1, swingElapsedSeconds / Math.max(0.001, swingDurationSeconds));
+      if (!swingHitResolved && progress >= 0.5) {
+        swingHitResolved = true;
+        resolveSwingHit();
+      }
+      if (progress >= 1) {
+        swinging = false;
+        swingElapsedSeconds = 0;
+        // The follow-through ends in the mirrored high-ready pose for the
+        // next alternating swing, so the bat does not snap back across the
+        // screen between attacks.
+        swingDirection = nextSwingDirection;
+        emitState(true);
+      }
+    }
+    const nearest = activePickup === null ? findNearestMeleePickup(cameraPosition) : null;
+    const nextNearby =
+      nearest === null
+        ? null
+        : {
+            ...nearest.snapshot,
+            distanceMeters: (() => {
+              const matrix = new THREE.Matrix4();
+              nearest.mesh.getMatrixAt(nearest.index, matrix);
+              return new THREE.Vector3().setFromMatrixPosition(matrix).distanceTo(cameraPosition);
+            })(),
+          };
+    if (JSON.stringify(nextNearby) !== JSON.stringify(nearby)) {
+      nearby = nextNearby;
+      emitState();
+    }
+    if (viewModel !== null) {
+      const pose = swinging
+        ? resolveMeleeSwingPose(
+            Math.min(1, swingElapsedSeconds / Math.max(0.001, swingDurationSeconds)),
+            swingDirection,
+          )
+        : resolveMeleeSwingPose(0, swingDirection);
+      aimTargetWorld.copy(aimRay.origin).addScaledVector(aimRay.direction, 32);
+      aimTargetLocal.copy(aimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
+      viewModel.root.position.set(
+        latestViewmodelOffset.x + pose.offsetX + latestViewmodelTransition.offset.x,
+        latestViewmodelOffset.y + pose.offsetY + latestViewmodelTransition.offset.y,
+        latestViewmodelOffset.z + pose.offsetZ + latestViewmodelTransition.offset.z,
+      );
+      aimDirectionLocal.copy(aimTargetLocal).sub(viewModel.root.position);
+      if (aimDirectionLocal.lengthSq() > 0.0001) {
+        aimDirectionLocal.normalize();
+        aimQuaternion.setFromUnitVectors(objectForward, aimDirectionLocal);
+        viewModel.root.quaternion.copy(aimQuaternion);
+        const swingEuler = new THREE.Euler(
+          pose.pitchRadians + latestViewmodelTransition.pitchRadians,
+          pose.yawRadians + latestViewmodelTransition.yawRadians,
+          pose.rollRadians + latestViewmodelTransition.rollRadians,
+          "XYZ",
+        );
+        viewModel.root.quaternion.multiply(new THREE.Quaternion().setFromEuler(swingEuler));
+      }
+      viewModel.root.visible = viewActive && controlsActive && activePickup !== null;
+    }
+    for (let index = impactEffects.length - 1; index >= 0; index -= 1) {
+      const effect = impactEffects[index];
+      if (effect === undefined) {
+        continue;
+      }
+      effect.remainingSeconds -= safeDelta;
+      effect.object.scale.setScalar(1 + (0.16 - Math.max(0, effect.remainingSeconds)) * 3);
+      if (effect.object.material instanceof THREE.MeshBasicMaterial) {
+        effect.object.material.opacity = Math.max(0, effect.remainingSeconds / 0.16);
+      }
+      if (effect.remainingSeconds <= 0) {
+        effect.object.removeFromParent();
+        disposeObject(effect.object);
+        impactEffects.splice(index, 1);
+      }
+    }
+  };
+
+  const setFireHeld = (held: boolean): void => {
+    fireHeld = held;
+  };
+  const holster = (): boolean => dropActiveObject();
+  const dispose = (): void => {
+    disposeViewModel();
+    for (const effect of impactEffects) {
+      effect.object.removeFromParent();
+      disposeObject(effect.object);
+    }
+    impactEffects.length = 0;
+    effectRoot.removeFromParent();
+    disposeObject(effectRoot);
+  };
+  emitState(true);
+  return {
+    update,
+    setFireHeld,
+    fire: trySwing,
+    interact,
+    isActive: () => activePickup !== null,
+    holster,
+    dropActiveObject,
+    getSnapshot,
+    dispose,
+  };
+};
+
 interface FocusCalibrationHallwayResources {
   readonly root: THREE.Group;
   readonly labels: readonly THREE.Sprite[];
@@ -8592,8 +9178,34 @@ interface ExplorationWorld {
   readonly getArea: () => string;
   readonly getLoadedChunkCount: () => number;
   readonly getPhysicsBoxes: () => readonly PhysicsBox[];
+  readonly getMeleePickups: () => readonly ExplorationMeleePickup[];
+  readonly getMeleeObjectIdForHit: (
+    object: THREE.Object3D,
+    instanceIndex: number | undefined,
+  ) => number | null;
+  readonly equipMeleeObject: (objectId: number) => ExplorationMeleePickup | null;
+  readonly dropMeleeObject: (
+    objectId: number,
+    position: THREE.Vector3,
+    rotationY: number,
+    releaseVelocity?: PhysicsVector,
+  ) => boolean;
+  readonly applyMeleeHit: (
+    objectId: number,
+    direction: PhysicsVector,
+    swingSpeed: number,
+  ) => boolean;
   readonly getPhysicsVersion: () => number;
   readonly dispose: () => void;
+}
+
+interface ExplorationMeleePickup {
+  readonly objectId: number;
+  readonly snapshot: MeleeObjectSnapshot;
+  readonly mesh: THREE.InstancedMesh;
+  readonly index: number;
+  readonly halfExtents: PhysicsVector;
+  readonly color: number;
 }
 
 interface ExplorationChunk {
@@ -8609,18 +9221,26 @@ interface ExplorationKnockable {
   readonly baseScale: THREE.Vector3;
   readonly baseQuaternion: THREE.Quaternion;
   readonly halfExtents: PhysicsVector;
+  readonly displayName: string;
+  readonly color: number;
   readonly rotationY?: number;
   readonly physicsId: number;
   readonly fallAxis: THREE.Vector3;
   readonly launchLinearVelocity: THREE.Vector3;
   readonly launchAngularVelocity: THREE.Vector3;
   isKnocked: boolean;
+  isEquipped: boolean;
   angle: number;
   angularVelocity: number;
   targetAngle: number;
   hasBodyState: boolean;
   kickCooldownSeconds: number;
 }
+
+const refreshKnockableMeshBounds = (mesh: THREE.InstancedMesh): void => {
+  mesh.computeBoundingBox();
+  mesh.computeBoundingSphere();
+};
 
 interface ExplorationBuildingSpec {
   readonly x: number;
@@ -8760,6 +9380,8 @@ export const createExplorationWorld = (
   const knockedRestitution = 0.35;
   const knockedFriction = 0.21;
   const knockRehitCooldownSeconds = 0.12;
+  const droppedRagdollLiftVelocity = 0.32;
+  const droppedRagdollSpinVelocity = 2.6;
   let nextKnockablePhysicsId = 0;
   const knockAxis = new THREE.Vector3(0, 0, 1);
   const knockDirection = new THREE.Vector3();
@@ -8768,6 +9390,28 @@ export const createExplorationWorld = (
   const knockMatrix = new THREE.Matrix4();
   let physicsVersion = 0;
   let currentArea = "Penthouse";
+
+  const activateKnockableRagdoll = (
+    knockable: ExplorationKnockable,
+    direction: PhysicsVector,
+  ): void => {
+    knockDirection.set(direction.x, 0, direction.z);
+    if (knockDirection.lengthSq() <= Number.EPSILON) {
+      knockDirection.set(0, 0, -1);
+    } else {
+      knockDirection.normalize();
+    }
+    knockable.isKnocked = true;
+    knockable.angle = 0;
+    knockable.hasBodyState = false;
+    knockable.kickCooldownSeconds = knockRehitCooldownSeconds;
+    knockAxis.set(knockDirection.z, 0, -knockDirection.x);
+    if (knockAxis.lengthSq() <= Number.EPSILON) {
+      knockAxis.set(1, 0, 0);
+    }
+    knockAxis.normalize();
+    knockable.fallAxis.copy(knockAxis);
+  };
 
   // Existing generator branches use this name; keep every streamed building,
   // prop, window, bridge, and beacon out of all authored play-area squares.
@@ -8815,7 +9459,14 @@ export const createExplorationWorld = (
     }
   };
 
+  const chunkCoordinate = (value: number): number =>
+    Math.floor((value + EXPLORATION_CHUNK_SIZE / 2) / EXPLORATION_CHUNK_SIZE);
   const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
+  // Keep the playable square bounds unchanged, but omit diagonal chunks whose
+  // centres sit beyond the compact radial footprint.
+  const shouldRenderExplorationChunk = (chunkX: number, chunkZ: number): boolean =>
+    Math.hypot(chunkX * EXPLORATION_CHUNK_SIZE, chunkZ * EXPLORATION_CHUNK_SIZE) <=
+    EXPLORATION_WORLD_RADIUS_METERS;
   const describeArea = (position: THREE.Vector3): string => {
     const playArea = PLAY_AREA_BOUNDS.find(
       (bounds) =>
@@ -8852,7 +9503,11 @@ export const createExplorationWorld = (
     if (style === undefined) {
       throw new Error("Exploration zone styles are empty");
     }
-    const terrainHeight = THREE.MathUtils.lerp(0.45, 1.7, biome.elevation);
+    const terrainHeight = THREE.MathUtils.lerp(
+      EXPLORATION_DISTRICT_ELEVATION_MIN,
+      EXPLORATION_DISTRICT_ELEVATION_MAX,
+      biome.elevation,
+    );
     const featureBias = biome.featureNoise;
     const routeSeed = createSeededRandom(
       `${normalizedSeed}|exploration-route|${String(chunkX)}|${String(chunkZ)}`,
@@ -8946,7 +9601,8 @@ export const createExplorationWorld = (
     const buildingCount = Math.max(
       1,
       Math.round(
-        (style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE,
+        (style.buildingDensity + terrainHeight * 1.72 + featureBias * 1.15) *
+          EXPLORATION_DENSITY_SCALE,
       ),
     );
     const buildingSpecs: ExplorationBuildingSpec[] = [];
@@ -8971,7 +9627,8 @@ export const createExplorationWorld = (
       const height = quantizeScale(
         style.buildingHeightMin +
           random.nextFloat() * (style.buildingHeightMax - style.buildingHeightMin) +
-          terrainHeight * 0.8,
+          terrainHeight * EXPLORATION_BUILDING_ELEVATION_LIFT +
+          featureBias * EXPLORATION_BUILDING_FEATURE_LIFT,
       );
       const depth = quantizeScale(1 + random.nextFloat() * (1 + terrainHeight));
       const rotation = random.nextInt(4) * (Math.PI / 2);
@@ -9157,6 +9814,7 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
     }> = [];
     const citySignCount = Math.max(
       1,
@@ -9171,6 +9829,7 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
     }> = [];
     const utilityPostCount = Math.max(
       1,
@@ -9183,6 +9842,7 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
     }> = [];
     for (let index = 0; index < propCount; index += 1) {
       position.set(
@@ -9229,6 +9889,7 @@ export const createExplorationWorld = (
         scale: scale.clone(),
         halfExtents,
         rotationY,
+        displayName: "Ragdoll Prop",
       });
     }
     for (let index = 0; index < citySignCount; index += 1) {
@@ -9283,6 +9944,7 @@ export const createExplorationWorld = (
         scale: scale.clone(),
         halfExtents: { x: baseHalfWidth, y: baseHalfHeight, z: baseHalfDepth },
         rotationY,
+        displayName: "Ragdoll Sign",
       });
     }
     for (let index = 0; index < utilityPostCount; index += 1) {
@@ -9331,6 +9993,7 @@ export const createExplorationWorld = (
         scale: scale.clone(),
         halfExtents: { x: baseHalfWidth, y: scale.y / 2, z: baseHalfDepth },
         rotationY,
+        displayName: "Ragdoll Utility Post",
       });
     }
     if (propMatrices.length > 0) {
@@ -9358,6 +10021,8 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          color: style.prop,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9365,6 +10030,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.75,
@@ -9400,6 +10066,8 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          color: style.accent,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9407,6 +10075,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.52,
@@ -9442,6 +10111,8 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          color: style.path,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9449,6 +10120,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.52,
@@ -9468,6 +10140,7 @@ export const createExplorationWorld = (
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
+      readonly displayName: string;
     }> = [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
@@ -9507,6 +10180,7 @@ export const createExplorationWorld = (
         scale: beaconScale.clone(),
         halfExtents: { x: 0.06, y: 0.06, z: 0.06 },
         rotationY: 0,
+        displayName: "Ragdoll Beacon",
       });
     }
     if (beaconMatrices.length > 0) {
@@ -9533,6 +10207,8 @@ export const createExplorationWorld = (
           baseScale: transform.scale,
           baseQuaternion: transform.quaternion,
           halfExtents: transform.halfExtents,
+          displayName: transform.displayName,
+          color: style.accent,
           rotationY: transform.rotationY,
           fallAxis: new THREE.Vector3(0, 0, 1),
           launchLinearVelocity: new THREE.Vector3(),
@@ -9540,6 +10216,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isEquipped: false,
           angle: 0,
           angularVelocity: 0,
           targetAngle: Math.PI * 0.68,
@@ -9571,16 +10248,16 @@ export const createExplorationWorld = (
 
   const preloadAllChunks = (): void => {
     let physicsChanged = false;
-    // The bounds are half a chunk beyond the outer chunk centres. Explicitly
-    // preload the symmetric -2…2 grid so the 250 m square has no partial or
-    // empty sixth row caused by boundary rounding.
-    const minChunkX = -EXPLORATION_CHUNKS_PER_SIDE;
-    const maxChunkX = EXPLORATION_CHUNKS_PER_SIDE;
-    const minChunkZ = -EXPLORATION_CHUNKS_PER_SIDE;
-    const maxChunkZ = EXPLORATION_CHUNKS_PER_SIDE;
+    const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX);
+    const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX);
+    const minChunkZ = chunkCoordinate(WORLD_BOUNDS.minZ);
+    const maxChunkZ = chunkCoordinate(WORLD_BOUNDS.maxZ);
 
     for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
       for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+        if (!shouldRenderExplorationChunk(chunkX, chunkZ)) {
+          continue;
+        }
         const key = chunkKey(chunkX, chunkZ);
         if (activeChunks.has(key)) {
           continue;
@@ -9624,6 +10301,7 @@ export const createExplorationWorld = (
     for (const dynamicBodyState of dynamicBodyStates) {
       dynamicStateById.set(dynamicBodyState.dynamicId, dynamicBodyState);
     }
+    const updatedMeshes = new Set<THREE.InstancedMesh>();
     const impactMagnitude = Math.hypot(impactDelta.x, impactDelta.z);
     const impactSpeed = impactMagnitude / Math.max(deltaSeconds, 1 / 240);
     const shouldKnock =
@@ -9637,6 +10315,9 @@ export const createExplorationWorld = (
 
     for (const chunk of activeChunks.values()) {
       for (const knockable of chunk.knockableProps) {
+        if (knockable.isEquipped) {
+          continue;
+        }
         const wasKnocked = knockable.isKnocked;
         if (knockable.kickCooldownSeconds > 0) {
           knockable.kickCooldownSeconds = Math.max(0, knockable.kickCooldownSeconds - deltaSeconds);
@@ -9794,11 +10475,66 @@ export const createExplorationWorld = (
         }
         knockable.mesh.setMatrixAt(knockable.index, knockMatrix);
         knockable.mesh.instanceMatrix.needsUpdate = true;
+        updatedMeshes.add(knockable.mesh);
       }
+    }
+    for (const mesh of updatedMeshes) {
+      refreshKnockableMeshBounds(mesh);
     }
     if (physicsChanged) {
       physicsVersion += 1;
     }
+  };
+
+  const writeKnockableMatrix = (
+    knockable: ExplorationKnockable,
+    position: THREE.Vector3,
+    quaternion: THREE.Quaternion,
+    scale: THREE.Vector3,
+  ): void => {
+    knockMatrix.compose(position, quaternion, scale);
+    knockable.mesh.setMatrixAt(knockable.index, knockMatrix);
+    knockable.mesh.instanceMatrix.needsUpdate = true;
+    refreshKnockableMeshBounds(knockable.mesh);
+  };
+
+  const meleeLongestSize = (knockable: ExplorationKnockable): number =>
+    resolveMeleeLongestSizeMeters(knockable.halfExtents);
+
+  const meleeVolume = (knockable: ExplorationKnockable): number =>
+    Math.max(
+      0.0001,
+      8 * knockable.halfExtents.x * knockable.halfExtents.y * knockable.halfExtents.z,
+    );
+
+  const toMeleePickup = (knockable: ExplorationKnockable): ExplorationMeleePickup => {
+    const swing = resolveMeleeSwing(meleeVolume(knockable));
+    return {
+      objectId: knockable.physicsId,
+      snapshot: {
+        objectId: knockable.physicsId,
+        displayName: knockable.displayName,
+        volumeM3: swing.volumeM3,
+        rangeMeters: resolveMeleeRangeMeters(meleeLongestSize(knockable)),
+        swingSpeedRadiansPerSecond: swing.swingSpeedRadiansPerSecond,
+        damage: swing.damage,
+        oxygenCost: swing.oxygenCost,
+      },
+      mesh: knockable.mesh,
+      index: knockable.index,
+      halfExtents: knockable.halfExtents,
+      color: knockable.color,
+    };
+  };
+
+  const findKnockable = (objectId: number): ExplorationKnockable | null => {
+    for (const chunk of activeChunks.values()) {
+      const knockable = chunk.knockableProps.find((candidate) => candidate.physicsId === objectId);
+      if (knockable !== undefined) {
+        return knockable;
+      }
+    }
+    return null;
   };
 
   const dispose = (): void => {
@@ -9844,6 +10580,9 @@ export const createExplorationWorld = (
       for (const chunk of activeChunks.values()) {
         boxes.push(...chunk.physicsBoxes);
         for (const knockable of chunk.knockableProps) {
+          if (knockable.isEquipped) {
+            continue;
+          }
           if (knockable.isKnocked) {
             boxes.push({
               center: {
@@ -9884,6 +10623,96 @@ export const createExplorationWorld = (
         }
       }
       return boxes;
+    },
+    getMeleePickups: () => {
+      const pickups: ExplorationMeleePickup[] = [];
+      for (const chunk of activeChunks.values()) {
+        for (const knockable of chunk.knockableProps) {
+          if (!knockable.isKnocked && !knockable.isEquipped) {
+            pickups.push(toMeleePickup(knockable));
+          }
+        }
+      }
+      return pickups;
+    },
+    getMeleeObjectIdForHit: (object, instanceIndex) => {
+      if (!(object instanceof THREE.InstancedMesh) || instanceIndex === undefined) {
+        return null;
+      }
+      for (const chunk of activeChunks.values()) {
+        const knockable = chunk.knockableProps.find(
+          (candidate) => candidate.mesh === object && candidate.index === instanceIndex,
+        );
+        if (knockable !== undefined && !knockable.isEquipped) {
+          return knockable.physicsId;
+        }
+      }
+      return null;
+    },
+    equipMeleeObject: (objectId) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
+        return null;
+      }
+      knockable.isEquipped = true;
+      writeKnockableMatrix(
+        knockable,
+        knockable.basePosition,
+        knockable.baseQuaternion,
+        new THREE.Vector3(0, 0, 0),
+      );
+      physicsVersion += 1;
+      return toMeleePickup(knockable);
+    },
+    dropMeleeObject: (objectId, position, rotationY, releaseVelocity) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || !knockable.isEquipped) {
+        return false;
+      }
+      knockable.isEquipped = false;
+      knockable.basePosition.copy(position);
+      knockable.baseQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotationY);
+      activateKnockableRagdoll(knockable, {
+        x: Math.sin(rotationY),
+        y: 0,
+        z: Math.cos(rotationY),
+      });
+      const releaseX =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.x) ? releaseVelocity.x : 0;
+      const releaseY =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.y) ? releaseVelocity.y : 0;
+      const releaseZ =
+        releaseVelocity !== undefined && Number.isFinite(releaseVelocity.z) ? releaseVelocity.z : 0;
+      knockable.angularVelocity = droppedRagdollSpinVelocity;
+      knockable.launchLinearVelocity.set(releaseX, releaseY + droppedRagdollLiftVelocity, releaseZ);
+      knockable.launchAngularVelocity.copy(knockAxis).multiplyScalar(droppedRagdollSpinVelocity);
+      writeKnockableMatrix(
+        knockable,
+        knockable.basePosition,
+        knockable.baseQuaternion,
+        knockable.baseScale,
+      );
+      physicsVersion += 1;
+      return true;
+    },
+    applyMeleeHit: (objectId, direction, swingSpeed) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
+        return false;
+      }
+      const safeSwingSpeed = Number.isFinite(swingSpeed) ? Math.max(0, swingSpeed) : 0;
+      const swingScale = THREE.MathUtils.clamp(safeSwingSpeed / 8, 0.35, 2.2);
+      activateKnockableRagdoll(knockable, direction);
+      knockable.launchLinearVelocity.set(
+        knockDirection.x * knockLinearImpulseScale * swingScale * 2.4,
+        knockLiftImpulse + swingScale * 0.45,
+        knockDirection.z * knockLinearImpulseScale * swingScale * 2.4,
+      );
+      knockable.launchAngularVelocity
+        .copy(knockAxis)
+        .multiplyScalar(knockAngularImpulseScale * (swingScale + 0.4));
+      physicsVersion += 1;
+      return true;
     },
     getPhysicsVersion: () => physicsVersion,
     dispose,
@@ -10182,6 +11011,7 @@ export const createMahjongTableScene = (
   const cameraRecoilEuler = new THREE.Euler(0, 0, 0, "YXZ");
   const cameraMotionRight = new THREE.Vector3();
   const cameraMotionForward = new THREE.Vector3();
+  const cameraMotionUp = new THREE.Vector3();
   const quality = resolveQuality(requestedQuality);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   renderer.shadowMap.enabled = quality.shadows !== "off";
@@ -10199,6 +11029,19 @@ export const createMahjongTableScene = (
   container.dataset.sceneQuality = quality.preset;
   container.dataset.controlActive = "false";
   container.replaceChildren(renderer.domElement);
+  const deathFadeOverlay = document.createElement("div");
+  deathFadeOverlay.setAttribute("aria-hidden", "true");
+  deathFadeOverlay.dataset.playerDeathFade = "true";
+  deathFadeOverlay.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:2147483647",
+    "pointer-events:none",
+    "background:#000",
+    "opacity:0",
+    "transition:opacity 260ms ease-out",
+  ].join(";");
+  container.append(deathFadeOverlay);
 
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   const roomEnvironment = new RoomEnvironment();
@@ -10753,10 +11596,12 @@ export const createMahjongTableScene = (
   };
   let jumpOffset = 0;
   let verticalVelocity = 0;
+  let presentationWorldVelocity: CameraMotionVector = { x: 0, y: 0, z: 0 };
   let grounded = true;
   let physicsRuntime: MahjongPhysicsRuntime | null = null;
   let physicsCharacterPosition: PhysicsVector | null = null;
   let weaponRuntime: WeaponRuntime | null = null;
+  let meleeRuntime: MeleeRuntime | null = null;
   let staticPhysicsBoxes: readonly PhysicsBox[] = [];
   let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
   let appliedPhysicsVersion = -1;
@@ -10764,11 +11609,18 @@ export const createMahjongTableScene = (
   let wallHangState: WallHangState | null = null;
   let wallClimbTransition: WallClimbTransition | null = null;
   let wallHangElapsed = 0;
+  // Keep the live wall-hang path disabled while its feel is being revisited.
+  // The resolver and state code stay in place for the offline movement tests.
+  const isLiveWallHangingEnabled = (): boolean => false;
   let touchingWall = false;
+  let wallContact: PlayerWallContact | null = null;
   let wallBracedAim = false;
+  let coverMode = false;
+  let coverActivationPending = false;
+  let coverActivationPendingWall: PlayerWallContact | null = null;
+  let coverWall: PlayerWallContact | null = null;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
-  let wallImpactActive = false;
   const cameraMotion = createCameraMotionDamper();
   let touchMovementActive = false;
   let touchForward = 0;
@@ -10778,12 +11630,16 @@ export const createMahjongTableScene = (
   let lastSceneStateSaveAt = Number.NEGATIVE_INFINITY;
   let lastSceneStateSerialized: string | null = null;
   const simulantRandom = createSeededRandom(`${roomSeed}|simulant-combat-v1`);
+  const playerRespawnRandom = createSeededRandom(`${roomSeed}|player-death-respawn-v1`);
   let simulantMarker: THREE.Group | null = null;
+  let simulantBody: THREE.Group | null = null;
   let simulantRespawnTimer = 0;
   const simulantPosition = new THREE.Vector3();
+  const simulantPerspectiveRig = createCameraMotionDamper();
   let simulantVitals = createPlayerVitals();
-  let simulantAttackCooldown = 0;
   let playerVitals = createPlayerVitals();
+  let deathFadeStartTimer = 0;
+  let deathRespawnTimer = 0;
   let vitalsPublishElapsed = 0;
   let speedPublishElapsed = 0;
   let publishedPlayerSpeed: number | null = null;
@@ -10850,15 +11706,58 @@ export const createMahjongTableScene = (
     nextVitals.oxygenRecoveryDelaySeconds !== playerVitals.oxygenRecoveryDelaySeconds ||
     nextVitals.holdingBreath !== playerVitals.holdingBreath ||
     nextVitals.holdBreathLocked !== playerVitals.holdBreathLocked;
+  const cancelDeathRespawn = (): void => {
+    if (deathFadeStartTimer !== 0) {
+      window.clearTimeout(deathFadeStartTimer);
+      deathFadeStartTimer = 0;
+    }
+    if (deathRespawnTimer !== 0) {
+      window.clearTimeout(deathRespawnTimer);
+      deathRespawnTimer = 0;
+    }
+  };
+  const scheduleDeathRespawn = (): void => {
+    cancelDeathRespawn();
+    deathFadeOverlay.style.transition = "none";
+    deathFadeOverlay.style.opacity = "0";
+    deathFadeStartTimer = window.setTimeout(() => {
+      deathFadeStartTimer = 0;
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_DEATH_FADE_DURATION_MS}ms ease-in`;
+      deathFadeOverlay.style.opacity = "1";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS - PLAYER_DEATH_FADE_DURATION_MS);
+    deathRespawnTimer = window.setTimeout(() => {
+      deathRespawnTimer = 0;
+      resetToSpawn();
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_RESPAWN_FADE_IN_DURATION_MS}ms ease-out`;
+      deathFadeOverlay.style.opacity = "0";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
+  };
+  const handlePlayerKilled = (): void => {
+    cameraMotion.applyDeathTumble();
+    pressedKeys.clear();
+    jumpKeyHeld = false;
+    touchMovementActive = false;
+    touchForward = 0;
+    touchRight = 0;
+    isSprinting = false;
+    forwardVelocity = 0;
+    strafeVelocity = 0;
+    verticalVelocity = 0;
+    meleeRuntime?.setFireHeld(false);
+    weaponRuntime?.setFireHeld(false);
+    scheduleDeathRespawn();
+  };
   const damagePlayer = (damage: number): PlayerVitalsDamageResult => {
+    const wasDead = playerVitals.isDead;
     const result = applyPlayerDamage(playerVitals, damage);
     if (result.damage > 0) {
       playerVitals = result.state;
       addDamageVignette("shield", result.shieldDamage);
       addDamageVignette("health", result.healthDamage);
       publishPlayerVitals(true);
-      if (result.killed) {
+      if (!wasDead && result.killed) {
         weaponRuntime?.recordDeath();
+        handlePlayerKilled();
       }
     }
     return result;
@@ -10868,10 +11767,16 @@ export const createMahjongTableScene = (
     if (oxygenCost <= 0 || playerVitals.isDead) {
       return;
     }
+    const shortfallDamage = resolveLandingO2OverflowDamage(
+      downwardSpeed,
+      oxygenCost,
+      playerVitals.o2,
+    );
     const result = applyPlayerO2ImpactCost(
       playerVitals,
       oxygenCost,
       O2_LANDING_RECOVERY_DELAY_SECONDS,
+      shortfallDamage,
     );
     if (result.oxygenSpent <= 0 && result.damage <= 0) {
       return;
@@ -10882,6 +11787,7 @@ export const createMahjongTableScene = (
     publishPlayerVitals(true);
     if (result.killed) {
       weaponRuntime?.recordDeath();
+      handlePlayerKilled();
     }
   };
   const spendPlayerO2 = (oxygenCost: number, recoveryDelaySeconds = 0): boolean => {
@@ -10916,7 +11822,20 @@ export const createMahjongTableScene = (
       weaponRuntime?.isReloading() ?? false,
     );
     const aimingChanged = aimingDownSights !== nextAiming;
+    const zoomActivated = !aimingDownSights && nextAiming;
     aimingDownSights = nextAiming;
+    if (!nextAiming) {
+      coverMode = false;
+      coverActivationPending = false;
+      coverActivationPendingWall = null;
+      coverWall = null;
+    } else if (aimingChanged && zoomActivated) {
+      // The contact flag is the last completed physics probe. This records
+      // contact at the zoom-on edge, so walking into a wall while already
+      // zoomed cannot arm cover later.
+      coverActivationPending = touchingWall;
+      coverActivationPendingWall = wallContact;
+    }
     const nextVitals = setPlayerHoldingBreath(
       playerVitals,
       holdingBreath && nextAiming,
@@ -11018,13 +11937,21 @@ export const createMahjongTableScene = (
     }
     const targetPosition = resolveWallClimbTarget(wall);
     const climbHeight = Math.max(0, targetPosition.y - wall.target.y);
+    const oxygenRatio = playerVitals.o2 / PLAYER_MAX_O2;
+    const traversalO2Cost = resolveVaultTraversalO2Cost(climbHeight);
+    if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+      return;
+    }
     const preservedSpeed = Math.hypot(wall.preservedForwardVelocity, wall.preservedStrafeVelocity);
     wallClimbTransition = {
-      duration: resolveVaultTraversalDuration(climbHeight),
+      duration: resolveO2ScaledTraversalDuration(
+        resolveVaultTraversalDuration(climbHeight),
+        oxygenRatio,
+      ),
       arcHeight: resolveVaultTraversalArcHeight(climbHeight),
       elapsed: 0,
       phase: "vault",
-      traversalHeightMeters: wall.box.halfExtents.y * 2,
+      traversalHeightMeters: climbHeight,
       startX: wall.target.x,
       startY: wall.target.y,
       startZ: wall.target.z,
@@ -11046,7 +11973,7 @@ export const createMahjongTableScene = (
   };
   const resetCameraMotion = (): void => {
     cameraMotion.reset();
-    wallImpactActive = false;
+    presentationWorldVelocity = { x: 0, y: verticalVelocity, z: 0 };
     camera.updateMatrix();
   };
   const movementKeys = MOVEMENT_KEY_CODES;
@@ -11147,7 +12074,9 @@ export const createMahjongTableScene = (
       event.preventDefault();
       if (event.code === "KeyE") {
         if (!event.repeat) {
-          weaponRuntime?.interact();
+          if (!meleeRuntime?.interact()) {
+            weaponRuntime?.interact();
+          }
         }
       } else if (event.code === "KeyR") {
         if (!event.repeat) {
@@ -11155,12 +12084,15 @@ export const createMahjongTableScene = (
         }
       } else if (event.code === "KeyQ") {
         if (!event.repeat) {
-          weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
+          if (!meleeRuntime?.dropActiveObject(resolvePlayerWorldVelocity())) {
+            weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
+          }
         }
       } else if (/^Digit[0-6]$/u.test(event.code)) {
         if (!event.repeat) {
           const selectedWeapon = resolveWeaponHotkey(event.code);
           if (selectedWeapon === null) {
+            meleeRuntime?.holster();
             weaponRuntime?.holster();
           } else if (selectedWeapon !== undefined) {
             weaponRuntime?.cycleWeaponTo(selectedWeapon);
@@ -11214,7 +12146,7 @@ export const createMahjongTableScene = (
     return isCrouched;
   };
   const jump = (): boolean => {
-    if (activeView === "seat" && wallHangState !== null) {
+    if (isLiveWallHangingEnabled() && activeView === "seat" && wallHangState !== null) {
       beginWallClimb();
       return isCrouched;
     }
@@ -11232,7 +12164,6 @@ export const createMahjongTableScene = (
       isCrouched = resolveCrouchedStateAfterJump(isCrouched, true);
       verticalVelocity = launchSpeed;
       grounded = false;
-      cameraMotion.applyJumpImpulse(launchSpeed);
     }
     return isCrouched;
   };
@@ -11257,6 +12188,10 @@ export const createMahjongTableScene = (
     leftCommandHeld = false;
     rightMouseAiming = false;
     syncAimingFromInput();
+    wallContact = null;
+    coverActivationPendingWall = null;
+    coverWall = null;
+    meleeRuntime?.setFireHeld(false);
     weaponRuntime?.setFireHeld(false);
     lastMovementTapAtByKey.clear();
     ledgeClimbTransition = null;
@@ -11294,8 +12229,14 @@ export const createMahjongTableScene = (
     if (event.button !== 0) {
       return;
     }
-    weaponRuntime?.setFireHeld(true);
-    weaponRuntime?.fire();
+    const activeMeleeRuntime = meleeRuntime;
+    if (activeMeleeRuntime?.isActive()) {
+      activeMeleeRuntime.setFireHeld(true);
+      activeMeleeRuntime.fire();
+    } else {
+      weaponRuntime?.setFireHeld(true);
+      weaponRuntime?.fire();
+    }
   };
   const onWindowMouseUp = (event: MouseEvent): void => {
     if (event.button === 2) {
@@ -11304,6 +12245,7 @@ export const createMahjongTableScene = (
     if (event.button !== 0) {
       return;
     }
+    meleeRuntime?.setFireHeld(false);
     weaponRuntime?.setFireHeld(false);
   };
   window.addEventListener("keydown", onKeyDown, true);
@@ -11426,16 +12368,13 @@ export const createMahjongTableScene = (
     isSprinting = false;
     lastMovementTapAtByKey.clear();
 
-    const preset = cameraPresets.seat;
-    if (debugEnabled) {
-      camera.position.set(preset.position.x, STANDING_EYE_HEIGHT, preset.position.z);
-      const firstPersonTarget = preset.target.clone();
-      firstPersonTarget.y += STANDING_EYE_HEIGHT - preset.position.y;
-      camera.lookAt(firstPersonTarget);
-    } else {
-      camera.position.copy(preset.position);
-      camera.lookAt(preset.target);
-    }
+    const spawnPosition = resolveRandomSpawnPosition();
+    camera.position.set(
+      spawnPosition.x,
+      spawnPosition.y + STANDING_EYE_HEIGHT - PLAYER_COLLIDER_CENTER_HEIGHT,
+      spawnPosition.z,
+    );
+    camera.lookAt(0, camera.position.y, 0);
     debugFovOverride = null;
     camera.fov = debugEnabled ? DEBUG_STANDING_FOV : SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
@@ -11446,37 +12385,72 @@ export const createMahjongTableScene = (
     saveSceneState(true);
   };
 
-  const resolveSimulantSpawnPosition = (): PhysicsVector => {
-    const maximumRadius = Math.max(
-      SIMULANT_MIN_START_DISTANCE_METERS,
-      Math.min(EXPLORATION_WORLD_HALF_SIZE - 4, 48),
-    );
-    for (let attempt = 0; attempt < 24; attempt += 1) {
-      const angle = simulantRandom.nextFloat() * Math.PI * 2;
-      const radius = SIMULANT_MIN_START_DISTANCE_METERS + simulantRandom.nextFloat() * 12;
-      const x = THREE.MathUtils.clamp(
-        camera.position.x + Math.cos(angle) * radius,
-        WORLD_BOUNDS.minX + 2,
-        WORLD_BOUNDS.maxX - 2,
+  const resolveRandomSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const spawnRangeX = maxX - minX;
+    const spawnRangeZ = maxZ - minZ;
+    const fallbackX = THREE.MathUtils.clamp(WORLD_BOUNDS.minX + spawnRangeX / 2, minX, maxX);
+    const fallbackZ = THREE.MathUtils.clamp(WORLD_BOUNDS.minZ + spawnRangeZ / 2, minZ, maxZ);
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const sampleX =
+        spawnRangeX > 0 ? minX + spawnRangeX * playerRespawnRandom.nextFloat() : fallbackX;
+      const sampleZ =
+        spawnRangeZ > 0 ? minZ + spawnRangeZ * playerRespawnRandom.nextFloat() : fallbackZ;
+      if (physicsRuntime === null) {
+        return { x: sampleX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: sampleZ };
+      }
+      const settled = physicsRuntime.move(
+        { x: sampleX, y: WORLD_SPAWN_DROP_HEIGHT, z: sampleZ },
+        { x: 0, y: -WORLD_SPAWN_DROP_DISTANCE, z: 0 },
       );
-      const z = THREE.MathUtils.clamp(
-        camera.position.z + Math.sin(angle) * radius,
-        WORLD_BOUNDS.minZ + 2,
-        WORLD_BOUNDS.maxZ - 2,
-      );
-      if (Math.hypot(x - camera.position.x, z - camera.position.z) >= maximumRadius * 0.55) {
-        return { x, y: 0, z };
+      if (
+        Number.isFinite(settled.position.x) &&
+        Number.isFinite(settled.position.y) &&
+        Number.isFinite(settled.position.z) &&
+        settled.grounded
+      ) {
+        return {
+          x: THREE.MathUtils.clamp(settled.position.x, minX, maxX),
+          y: settled.position.y,
+          z: THREE.MathUtils.clamp(settled.position.z, minZ, maxZ),
+        };
       }
     }
-    return {
-      x: THREE.MathUtils.clamp(
-        camera.position.x + maximumRadius,
-        WORLD_BOUNDS.minX + 2,
-        WORLD_BOUNDS.maxX - 2,
-      ),
-      y: 0,
-      z: THREE.MathUtils.clamp(camera.position.z, WORLD_BOUNDS.minZ + 2, WORLD_BOUNDS.maxZ - 2),
-    };
+    return { x: fallbackX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: fallbackZ };
+  };
+  const resolveSimulantSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const playerX = camera.position.x;
+    const playerZ = camera.position.z;
+    let bestDistance = Number.NEGATIVE_INFINITY;
+    let bestX = minX;
+    let bestZ = minZ;
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const angle = simulantRandom.nextFloat() * Math.PI * 2;
+      const sampleX = Math.cos(angle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const sampleZ = Math.sin(angle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const candidateX = THREE.MathUtils.clamp(sampleX, minX, maxX);
+      const candidateZ = THREE.MathUtils.clamp(sampleZ, minZ, maxZ);
+      const distanceToPlayer =
+        Number.isFinite(playerX) && Number.isFinite(playerZ)
+          ? Math.hypot(candidateX - playerX, candidateZ - playerZ)
+          : Number.POSITIVE_INFINITY;
+      if (distanceToPlayer > bestDistance) {
+        bestDistance = distanceToPlayer;
+        bestX = candidateX;
+        bestZ = candidateZ;
+      }
+      if (distanceToPlayer >= SIMULANT_MIN_START_DISTANCE_METERS) {
+        return { x: candidateX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: candidateZ };
+      }
+    }
+    return { x: bestX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: bestZ };
   };
   const syncSimulantMarkerVitals = (): void => {
     if (simulantMarker === null) {
@@ -11484,6 +12458,16 @@ export const createMahjongTableScene = (
     }
     simulantMarker.userData.simulantHealth = simulantVitals.health;
     simulantMarker.userData.simulantShield = simulantVitals.shield;
+    simulantMarker.userData.simulantO2 = simulantVitals.o2;
+  };
+  const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
+    const bodyBaseY =
+      SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+      (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+    if (simulantBody !== null) {
+      simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+      simulantBody.rotation.z = motion.roll;
+    }
   };
   const respawnSimulant = (): void => {
     if (simulantMarker === null) {
@@ -11494,7 +12478,7 @@ export const createMahjongTableScene = (
     simulantMarker.position.copy(simulantPosition);
     simulantMarker.visible = true;
     simulantVitals = createPlayerVitals();
-    simulantAttackCooldown = 0;
+    simulantPerspectiveRig.reset();
     syncSimulantMarkerVitals();
   };
   const scheduleSimulantRespawn = (): void => {
@@ -11508,7 +12492,7 @@ export const createMahjongTableScene = (
     simulantRespawnTimer = window.setTimeout(() => {
       simulantRespawnTimer = 0;
       respawnSimulant();
-    }, SIMULANT_RESPAWN_DELAY_MS);
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
   };
   const getSimulantHitObject = (hitObject: THREE.Object3D): THREE.Object3D | null => {
     let current: THREE.Object3D | null = hitObject;
@@ -12272,17 +13256,18 @@ export const createMahjongTableScene = (
     simulantCombatMarker: true,
     simulantHealth: simulantVitals.health,
     simulantShield: simulantVitals.shield,
+    simulantO2: simulantVitals.o2,
   };
-  const simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
+  simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
   simulantBody.name = "SimulantCombatBody";
   simulantMarker.add(simulantBody);
   const simulantRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.48, 0.022, 8, 32),
+    new THREE.RingGeometry(0.15, 0.27, 18),
     new THREE.MeshBasicMaterial({
       color: COLORS.red,
       transparent: true,
-      opacity: 0.82,
-      depthWrite: false,
+      opacity: 0.45,
+      side: THREE.DoubleSide,
       toneMapped: false,
     }),
   );
@@ -12623,6 +13608,33 @@ export const createMahjongTableScene = (
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
     },
   );
+  if (explorationWorld !== null) {
+    meleeRuntime = createMeleeRuntime(
+      scene,
+      camera,
+      explorationWorld,
+      options.onMeleeStateChange,
+      (damage) => {
+        const oxygenConsumed = spendPlayerProjectileO2(damage, 1);
+        const motion = cameraMotion.getOffsets();
+        cameraMotion.applyWeaponShotImpulse({
+          damage,
+          reticleOffset: resolveWeaponShotReticleOffset(
+            motion,
+            true,
+            aimingDownSights ? ZOOM_RECOIL_FEEDBACK_MULTIPLIER : 1,
+          ),
+        });
+        return oxygenConsumed;
+      },
+      () => {
+        // A claimed ragdoll object occupies the player's hand. Keep the gun
+        // instance in its inventory, but holster its viewmodel until the
+        // object is dropped or manually re-equipped.
+        weaponRuntime?.holster();
+      },
+    );
+  }
   // Keep the same collision/traversal path active while Rapier's optional
   // WASM module is loading.  The previous null-runtime window let the camera
   // move through the training wall before the async initialisation settled,
@@ -12678,9 +13690,10 @@ export const createMahjongTableScene = (
     readonly aimNdc: THREE.Vector2;
   } => {
     const motion = cameraMotion.getOffsets();
+    const reticleRoll = motion.roll - motion.coverLeanRoll;
     const bobbingOffset: ReticleBobbingOffset = {
       x:
-        motion.roll * RETICLE_SWAY_PIXELS_PER_RADIAN +
+        reticleRoll * RETICLE_SWAY_PIXELS_PER_RADIAN +
         motion.headBobLateral * RETICLE_HEAD_BOB_LATERAL_PIXELS_PER_METER +
         motion.aimSwayX * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
         motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN,
@@ -12722,6 +13735,8 @@ export const createMahjongTableScene = (
       cameraMotionRight.normalize();
       presentationOffsetX += cameraMotionRight.x * motion.headBobLateral;
       presentationOffsetZ += cameraMotionRight.z * motion.headBobLateral;
+      presentationOffsetX += cameraMotionRight.x * motion.coverLeanOffset;
+      presentationOffsetZ += cameraMotionRight.z * motion.coverLeanOffset;
     }
     cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
     cameraMotionForward.y = 0;
@@ -12759,7 +13774,6 @@ export const createMahjongTableScene = (
   };
   const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
   const COLLISION_DAMAGE_COOLDOWN_SECONDS = 0.8;
-  const CAMERA_WALL_IMPACT_SPEED_THRESHOLD = 0.5;
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") {
       saveSceneState(true);
@@ -12810,37 +13824,61 @@ export const createMahjongTableScene = (
     if (vitalsChanged || (playerVitals.shield < PLAYER_MAX_SHIELD && vitalsPublishElapsed >= 0.1)) {
       publishPlayerVitals();
     }
-    if (simulantMarker !== null && simulantMarker.visible && !playerVitals.isDead) {
+    if (simulantMarker !== null && !playerVitals.isDead) {
+      const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
       const toPlayerX = camera.position.x - simulantPosition.x;
       const toPlayerZ = camera.position.z - simulantPosition.z;
-      const distance = Math.hypot(toPlayerX, toPlayerZ);
-      if (distance > SIMULANT_STOP_DISTANCE_METERS) {
+      const horizontalDistance = Math.hypot(toPlayerX, toPlayerZ);
+      const simulantMoving = horizontalDistance > SIMULANT_STOP_DISTANCE_METERS;
+      simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
+        movementMagnitude: simulantMoving ? 1 : 0,
+        locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
+        walking: simulantMoving,
+        sprinting: false,
+        aimingDownSights: false,
+      });
+      const simulantMotion = simulantPerspectiveRig.update({
+        deltaSeconds: safeDelta,
+        localAcceleration: { right: 0, forward: 0, up: 0 },
+        movementMagnitude: simulantMoving ? 1 : 0,
+        movementSpeedRatio: simulantMoving ? SIMULANT_TROT_SPEED_RATIO : 0,
+        oxygenRatio: simulantVitals.o2 / PLAYER_MAX_O2,
+        crouching: false,
+        shiftEnabled: false,
+        bobEnabled: true,
+        aimingDownSights: false,
+        holdingBreath: false,
+        stabilizedByWall: false,
+        traversalActive: false,
+      });
+      syncSimulantPresentation(simulantMotion);
+      syncSimulantMarkerVitals();
+      if (horizontalDistance > SIMULANT_STOP_DISTANCE_METERS) {
         const moveDistance = Math.min(
-          SIMULANT_MOVE_SPEED_METERS_PER_SECOND * delta,
-          Math.max(0, distance - SIMULANT_STOP_DISTANCE_METERS),
+          horizontalDistance - SIMULANT_STOP_DISTANCE_METERS,
+          SIMULANT_TROT_SPEED_METERS_PER_SECOND * safeDelta,
         );
-        simulantPosition.x += (toPlayerX / Math.max(distance, 0.0001)) * moveDistance;
-        simulantPosition.z += (toPlayerZ / Math.max(distance, 0.0001)) * moveDistance;
+        simulantPosition.x += (toPlayerX / horizontalDistance) * moveDistance;
+        simulantPosition.z += (toPlayerZ / horizontalDistance) * moveDistance;
         simulantPosition.x = THREE.MathUtils.clamp(
           simulantPosition.x,
-          WORLD_BOUNDS.minX + 1,
-          WORLD_BOUNDS.maxX - 1,
+          WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN,
         );
         simulantPosition.z = THREE.MathUtils.clamp(
           simulantPosition.z,
-          WORLD_BOUNDS.minZ + 1,
-          WORLD_BOUNDS.maxZ - 1,
+          WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN,
         );
       }
       simulantMarker.position.copy(simulantPosition);
-      if (distance > 0.001) {
-        simulantMarker.rotation.y = Math.atan2(toPlayerX, toPlayerZ);
+      if (horizontalDistance > 0.1 && Number.isFinite(horizontalDistance)) {
+        simulantMarker.rotation.y = Math.atan2(
+          camera.position.x - simulantPosition.x,
+          camera.position.z - simulantPosition.z,
+        );
       }
-      simulantAttackCooldown = Math.max(0, simulantAttackCooldown - delta);
-      if (distance <= SIMULANT_ATTACK_DISTANCE_METERS && simulantAttackCooldown <= 0) {
-        damagePlayer(SIMULANT_ATTACK_DAMAGE_PER_SECOND * 0.25);
-        simulantAttackCooldown = 0.25;
-      }
+      simulantMarker.updateMatrixWorld(true);
     }
     syncDofIntensityForZoom();
     const currentTimestamp = performance.now();
@@ -13040,7 +14078,7 @@ export const createMahjongTableScene = (
         });
         currentMoveSpeed = moveSpeed * speedMultiplier;
       }
-      if (wallHangState !== null) {
+      if (isLiveWallHangingEnabled() && wallHangState !== null) {
         wallHangElapsed = Math.min(wallHangElapsed + delta, WALL_HANG_SETTLE_DURATION);
         if (forward < -0.1) {
           wallHangState = null;
@@ -13051,12 +14089,15 @@ export const createMahjongTableScene = (
           beginWallClimb();
         }
       }
-      const isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
+      const isWallTraversalActive =
+        (isLiveWallHangingEnabled() && wallHangState !== null) || wallClimbTransition !== null;
       const desiredForward = isWallTraversalActive ? 0 : forward * inputScale * currentMoveSpeed;
       const desiredStrafe = isWallTraversalActive ? 0 : right * inputScale * currentMoveSpeed;
-      let localAcceleration: CameraLocalAcceleration = { right: 0, forward: 0 };
+      const previousPresentationWorldVelocity = presentationWorldVelocity;
+      const velocityDeltaSeconds = Math.max(delta, 1 / 120);
+      let resolvedWorldVelocity: CameraMotionVector;
       const maxMoveSpeed = moveSpeed * SPRINT_MULTIPLIER;
-      const movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
+      let movementSpeedRatio = THREE.MathUtils.clamp(currentMoveSpeed / maxMoveSpeed, 0, 1);
       movementMagnitudeActivity = movementMagnitude;
       locomotionBlendActivity = crouching
         ? 0
@@ -13081,17 +14122,9 @@ export const createMahjongTableScene = (
       if (isWallTraversalActive) {
         forwardVelocity = 0;
         strafeVelocity = 0;
-        wallImpactActive = false;
       } else {
-        const previousForwardVelocity = forwardVelocity;
-        const previousStrafeVelocity = strafeVelocity;
         forwardVelocity = THREE.MathUtils.damp(forwardVelocity, desiredForward, 10, delta);
         strafeVelocity = THREE.MathUtils.damp(strafeVelocity, desiredStrafe, 10, delta);
-        const accelerationDelta = Math.max(delta, 1 / 120);
-        localAcceleration = {
-          right: (strafeVelocity - previousStrafeVelocity) / accelerationDelta,
-          forward: (forwardVelocity - previousForwardVelocity) / accelerationDelta,
-        };
       }
       const movementStart = camera.position.clone();
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(forwardVelocity) > 0.001) {
@@ -13100,7 +14133,16 @@ export const createMahjongTableScene = (
       if (!isLedgeClimbing && !isWallTraversalActive && Math.abs(strafeVelocity) > 0.001) {
         firstPersonControls.moveRight(strafeVelocity * delta);
       }
-      const desiredHorizontalDelta = camera.position.clone().sub(movementStart);
+      let desiredHorizontalDelta: PhysicsVector = camera.position.clone().sub(movementStart);
+      if (coverMode && coverWall !== null) {
+        // Once cover is engaged, keep locomotion on the wall face even when
+        // the player turns to look around the corner. This removes the
+        // camera-relative strafe's outward normal component before physics.
+        desiredHorizontalDelta = projectPlayerMovementToWallTangent(
+          desiredHorizontalDelta,
+          coverWall,
+        );
+      }
       let baseCameraY: number;
       if (physicsRuntime !== null) {
         camera.position.copy(movementStart);
@@ -13116,28 +14158,48 @@ export const createMahjongTableScene = (
             camera.position.x = target.x;
             camera.position.z = target.z;
             baseCameraY = target.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+            resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
           } else {
             const transition = wallClimbTransition;
             if (transition === null) {
               baseCameraY = camera.position.y;
+              resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
             } else {
+              const previousTransitionProgress = smoothStep(
+                THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
+              );
+              const previousTransitionX = THREE.MathUtils.lerp(
+                transition.startX,
+                transition.targetX,
+                previousTransitionProgress,
+              );
+              const previousTransitionZ = THREE.MathUtils.lerp(
+                transition.startZ,
+                transition.targetZ,
+                previousTransitionProgress,
+              );
+              const previousTransitionY = resolveClimbingTransitionY(
+                transition,
+                transition.elapsed,
+              );
               transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
+              const transitionY = resolveClimbingTransitionY(transition, transition.elapsed);
               const progress = smoothStep(
                 THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
               );
-              const transitionY =
-                THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
-                (transition.phase === "vault"
-                  ? Math.sin(progress * Math.PI) * transition.arcHeight
-                  : 0);
+              verticalVelocity = (transitionY - previousTransitionY) / velocityDeltaSeconds;
               const position: PhysicsVector = {
                 x: THREE.MathUtils.lerp(transition.startX, transition.targetX, progress),
                 y: transitionY,
                 z: THREE.MathUtils.lerp(transition.startZ, transition.targetZ, progress),
               };
+              resolvedWorldVelocity = {
+                x: (position.x - previousTransitionX) / velocityDeltaSeconds,
+                y: verticalVelocity,
+                z: (position.z - previousTransitionZ) / velocityDeltaSeconds,
+              };
               physicsCharacterPosition = position;
               grounded = false;
-              verticalVelocity = 0;
               jumpOffset = Math.max(0, position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
               camera.position.x = position.x;
               camera.position.z = position.z;
@@ -13195,6 +14257,7 @@ export const createMahjongTableScene = (
                   camera.position.z = landedPosition.z;
                   baseCameraY = landedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
                   wallClimbTransition = null;
+                  resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
                 }
               }
             }
@@ -13222,54 +14285,14 @@ export const createMahjongTableScene = (
           });
           if (movement.collisions > 0 && delta > 0) {
             const requestedVelocity = {
-              x: desiredHorizontalDelta.x / delta,
-              z: desiredHorizontalDelta.z / delta,
+              x: desiredHorizontalDelta.x / velocityDeltaSeconds,
+              z: desiredHorizontalDelta.z / velocityDeltaSeconds,
             };
             const resolvedVelocity = {
-              x: (movement.position.x - characterPosition.x) / delta,
-              z: (movement.position.z - characterPosition.z) / delta,
+              x: (movement.position.x - characterPosition.x) / velocityDeltaSeconds,
+              z: (movement.position.z - characterPosition.z) / velocityDeltaSeconds,
             };
             const requestedSpeed = Math.hypot(requestedVelocity.x, requestedVelocity.z);
-            const velocityChange = {
-              x: resolvedVelocity.x - requestedVelocity.x,
-              z: resolvedVelocity.z - requestedVelocity.z,
-            };
-            const velocityChangeMagnitude = Math.hypot(velocityChange.x, velocityChange.z);
-            const boundedVelocityChangeMagnitude = Math.min(
-              requestedSpeed,
-              velocityChangeMagnitude,
-            );
-            const velocityChangeScale =
-              velocityChangeMagnitude > Number.EPSILON
-                ? boundedVelocityChangeMagnitude / velocityChangeMagnitude
-                : 0;
-            const horizontalImpact =
-              boundedVelocityChangeMagnitude > CAMERA_WALL_IMPACT_SPEED_THRESHOLD;
-            if (horizontalImpact && !wallImpactActive && velocityChangeScale > 0) {
-              cameraMotionRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
-              cameraMotionRight.y = 0;
-              cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-              cameraMotionForward.y = 0;
-              if (
-                cameraMotionRight.lengthSq() > 0.0001 &&
-                cameraMotionForward.lengthSq() > 0.0001
-              ) {
-                cameraMotionRight.normalize();
-                cameraMotionForward.normalize();
-                const accelerationDelta = Math.max(delta, 1 / 120);
-                const rightVelocityChange =
-                  velocityChange.x * velocityChangeScale * cameraMotionRight.x +
-                  velocityChange.z * velocityChangeScale * cameraMotionRight.z;
-                const forwardVelocityChange =
-                  velocityChange.x * velocityChangeScale * cameraMotionForward.x +
-                  velocityChange.z * velocityChangeScale * cameraMotionForward.z;
-                localAcceleration = {
-                  right: localAcceleration.right + rightVelocityChange / accelerationDelta,
-                  forward: localAcceleration.forward + forwardVelocityChange / accelerationDelta,
-                };
-              }
-            }
-            wallImpactActive = horizontalImpact;
             if (impactDamageCooldown <= 0) {
               const velocityDrop = Math.hypot(
                 requestedVelocity.x - resolvedVelocity.x,
@@ -13285,8 +14308,6 @@ export const createMahjongTableScene = (
                 impactDamageCooldown = COLLISION_DAMAGE_COOLDOWN_SECONDS;
               }
             }
-          } else {
-            wallImpactActive = false;
           }
           knockImpactDelta = {
             x: desiredHorizontalDelta.x,
@@ -13294,11 +14315,18 @@ export const createMahjongTableScene = (
             z: desiredHorizontalDelta.z,
           };
           knockCollisionCount = movement.collisions;
-          const clampedPosition: PhysicsVector = {
+          let clampedPosition: PhysicsVector = {
             x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
             y: movement.position.y,
             z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
           };
+          if (coverMode && coverWall !== null) {
+            // The physics controller stops at the wall face but can slide past
+            // the end of a thin box because there is no longer a side face to
+            // collide with. Keep the cover capsule inside the engaged face's
+            // tangent span so A/D cannot silently drop wall contact.
+            clampedPosition = clampPlayerPositionToWallTangent(clampedPosition, coverWall);
+          }
           const canUseAirborneTraversal =
             !grounded &&
             (!movement.grounded || verticalVelocity > 0) &&
@@ -13349,6 +14377,7 @@ export const createMahjongTableScene = (
           // Require the horizontal approach itself to be blocked before the
           // wall resolver is allowed to consider a candidate.
           if (
+            isLiveWallHangingEnabled() &&
             vaultTarget === null &&
             ledgeClimbTransition === null &&
             canUseAirborneTraversal &&
@@ -13365,10 +14394,6 @@ export const createMahjongTableScene = (
                     ...staticPhysicsBoxes,
                     ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
                   ];
-            // Use Rapier's corrected contact position first. This prevents a
-            // ceiling or unrelated side contact from stealing a nearby wall.
-            // For a long horizontal sweep, retry the safe pre-move point only
-            // when the approach itself was blocked.
             wallHangResolution = resolveWallHangTargetDetails(
               clampedPosition,
               wallApproach,
@@ -13380,65 +14405,75 @@ export const createMahjongTableScene = (
               wallHangPhysicsBoxes,
             );
           }
-          const climbTarget = vaultTarget;
+          let climbTarget = vaultTarget;
           if (climbTarget !== null && ledgeClimbTransition === null) {
-            const climbStartX = clampedPosition.x;
-            const climbStartY = clampedPosition.y;
-            const climbStartZ = clampedPosition.z;
-            const clampedX = THREE.MathUtils.clamp(
-              climbTarget.x,
-              WORLD_BOUNDS.minX,
-              WORLD_BOUNDS.maxX,
-            );
-            const clampedZ = THREE.MathUtils.clamp(
-              climbTarget.z,
-              WORLD_BOUNDS.minZ,
-              WORLD_BOUNDS.maxZ,
-            );
-            const momentum = resolveLedgeClimbMomentum(
-              desiredForward,
-              desiredStrafe,
-              forwardVelocity,
-              strafeVelocity,
-              isSprinting,
-              moveSpeed,
-            );
-            const preservedSpeed = Math.hypot(
-              momentum.preservedForwardVelocity,
-              momentum.preservedStrafeVelocity,
-            );
+            const traversalTarget = climbTarget;
             // Use the feet height before this frame's physics move. A jump can
-            // already be rising when the box is detected; timing from the
-            // post-move position would shorten a measured two-metre vault.
-            const climbHeight = Math.max(0, climbTarget.y - characterPosition.y);
-            const landingBoostDistance =
-              preservedSpeed > 0
-                ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
-                : 0;
-            clampedPosition.x = clampedX;
-            clampedPosition.z = clampedZ;
-            clampedPosition.y = climbTarget.y;
-            ledgeClimbTransition = {
-              duration: resolveVaultTraversalDuration(climbHeight),
-              arcHeight: resolveVaultTraversalArcHeight(climbHeight),
-              elapsed: 0,
-              phase: "vault",
-              traversalHeightMeters: climbHeight,
-              startX: climbStartX,
-              startY: climbStartY,
-              startZ: climbStartZ,
-              targetX: clampedPosition.x,
-              targetY: clampedPosition.y,
-              targetZ: clampedPosition.z,
-              preservedForwardVelocity: momentum.preservedForwardVelocity,
-              preservedStrafeVelocity: momentum.preservedStrafeVelocity,
-              preserveSprinting: momentum.preserveSprinting,
-              landingBoostDistance,
-            };
-            grounded = true;
-            verticalVelocity = 0;
+            // already be rising when the box is detected; timing and O₂ cost
+            // from the post-move position would undercharge a measured vault.
+            const climbHeight = Math.max(0, traversalTarget.y - characterPosition.y);
+            const oxygenRatio = playerVitals.o2 / PLAYER_MAX_O2;
+            const traversalO2Cost = resolveVaultTraversalO2Cost(climbHeight);
+            if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
+              climbTarget = null;
+            } else {
+              const climbStartX = clampedPosition.x;
+              const climbStartY = clampedPosition.y;
+              const climbStartZ = clampedPosition.z;
+              const clampedX = THREE.MathUtils.clamp(
+                traversalTarget.x,
+                WORLD_BOUNDS.minX,
+                WORLD_BOUNDS.maxX,
+              );
+              const clampedZ = THREE.MathUtils.clamp(
+                traversalTarget.z,
+                WORLD_BOUNDS.minZ,
+                WORLD_BOUNDS.maxZ,
+              );
+              const momentum = resolveLedgeClimbMomentum(
+                desiredForward,
+                desiredStrafe,
+                forwardVelocity,
+                strafeVelocity,
+                isSprinting,
+                moveSpeed,
+              );
+              const preservedSpeed = Math.hypot(
+                momentum.preservedForwardVelocity,
+                momentum.preservedStrafeVelocity,
+              );
+              const landingBoostDistance =
+                preservedSpeed > 0
+                  ? Math.min(LEDGE_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
+                  : 0;
+              clampedPosition.x = clampedX;
+              clampedPosition.z = clampedZ;
+              clampedPosition.y = traversalTarget.y;
+              ledgeClimbTransition = {
+                duration: resolveO2ScaledTraversalDuration(
+                  resolveVaultTraversalDuration(climbHeight),
+                  oxygenRatio,
+                ),
+                arcHeight: resolveVaultTraversalArcHeight(climbHeight),
+                elapsed: 0,
+                phase: "vault",
+                traversalHeightMeters: climbHeight,
+                startX: climbStartX,
+                startY: climbStartY,
+                startZ: climbStartZ,
+                targetX: clampedPosition.x,
+                targetY: clampedPosition.y,
+                targetZ: clampedPosition.z,
+                preservedForwardVelocity: momentum.preservedForwardVelocity,
+                preservedStrafeVelocity: momentum.preservedStrafeVelocity,
+                preserveSprinting: momentum.preserveSprinting,
+                landingBoostDistance,
+              };
+              grounded = true;
+              verticalVelocity = 0;
+            }
           }
-          if (wallHangResolution !== null && climbTarget === null) {
+          if (isLiveWallHangingEnabled() && wallHangResolution !== null && climbTarget === null) {
             const wallMomentum = resolveLedgeClimbMomentum(
               desiredForward,
               desiredStrafe,
@@ -13479,17 +14514,20 @@ export const createMahjongTableScene = (
               : climbTarget === null
                 ? movement.grounded && verticalVelocity <= 0
                 : true;
+          resolvedWorldVelocity =
+            climbTarget !== null || wallHangResolution !== null
+              ? { x: 0, y: 0, z: 0 }
+              : {
+                  x: (clampedPosition.x - characterPosition.x) / velocityDeltaSeconds,
+                  y: grounded ? 0 : verticalVelocity,
+                  z: (clampedPosition.z - characterPosition.z) / velocityDeltaSeconds,
+                };
           if (
             !wasGrounded &&
             movement.grounded &&
             climbTarget === null &&
             wallHangResolution === null
           ) {
-            const landingVelocity = Math.max(0, -verticalVelocity);
-            cameraMotion.applyLandingImpulse({
-              downwardVelocity: landingVelocity,
-              downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
-            });
             applyLandingO2(maximumFallSpeed);
           }
           if (grounded) {
@@ -13504,7 +14542,22 @@ export const createMahjongTableScene = (
           baseCameraY = clampedPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
           if (ledgeClimbTransition !== null) {
             const transition = ledgeClimbTransition;
+            const previousTransitionProgress = smoothStep(
+              THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
+            );
+            const previousTransitionX = THREE.MathUtils.lerp(
+              transition.startX,
+              transition.targetX,
+              previousTransitionProgress,
+            );
+            const previousTransitionZ = THREE.MathUtils.lerp(
+              transition.startZ,
+              transition.targetZ,
+              previousTransitionProgress,
+            );
+            const previousTransitionY = resolveClimbingTransitionY(transition, transition.elapsed);
             transition.elapsed = Math.min(transition.elapsed + delta, transition.duration);
+            const transitionY = resolveClimbingTransitionY(transition, transition.elapsed);
             const progress = smoothStep(
               THREE.MathUtils.clamp(transition.elapsed / transition.duration, 0, 1),
             );
@@ -13518,11 +14571,12 @@ export const createMahjongTableScene = (
               transition.targetZ,
               progress,
             );
-            const transitionY =
-              transition.phase === "vault"
-                ? THREE.MathUtils.lerp(transition.startY, transition.targetY, progress) +
-                  Math.sin(progress * Math.PI) * transition.arcHeight
-                : THREE.MathUtils.lerp(transition.startY, transition.targetY, progress);
+            verticalVelocity = (transitionY - previousTransitionY) / velocityDeltaSeconds;
+            resolvedWorldVelocity = {
+              x: (transitionX - previousTransitionX) / velocityDeltaSeconds,
+              y: verticalVelocity,
+              z: (transitionZ - previousTransitionZ) / velocityDeltaSeconds,
+            };
             camera.position.x = transitionX;
             camera.position.z = transitionZ;
             baseCameraY = resolveLedgeClimbTargetCameraY(transitionY);
@@ -13570,6 +14624,7 @@ export const createMahjongTableScene = (
                   z: targetZ,
                 };
                 camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+                resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
               }
             }
             if (transition.phase === "landingBoost" && transition.elapsed >= transition.duration) {
@@ -13586,6 +14641,7 @@ export const createMahjongTableScene = (
                 z: targetZ,
               };
               camera.position.set(targetX, resolveLedgeClimbTargetCameraY(targetY), targetZ);
+              resolvedWorldVelocity = { x: 0, y: 0, z: 0 };
             }
           }
         }
@@ -13610,11 +14666,6 @@ export const createMahjongTableScene = (
           if (jumpOffset <= 0) {
             jumpOffset = 0;
             if (!wasGrounded) {
-              const landingVelocity = Math.max(0, -verticalVelocity);
-              cameraMotion.applyLandingImpulse({
-                downwardVelocity: landingVelocity,
-                downwardAcceleration: landingVelocity / Math.max(delta, 1 / 120),
-              });
               applyLandingO2(maximumFallSpeed);
               maximumFallSpeed = 0;
             }
@@ -13623,6 +14674,11 @@ export const createMahjongTableScene = (
           }
         }
         baseCameraY = firstPersonGroundY + eyeHeight + jumpOffset;
+        resolvedWorldVelocity = {
+          x: (camera.position.x - movementStart.x) / velocityDeltaSeconds,
+          y: grounded ? 0 : verticalVelocity,
+          z: (camera.position.z - movementStart.z) / velocityDeltaSeconds,
+        };
       }
       const wallContactPosition = physicsCharacterPosition ?? {
         x: camera.position.x,
@@ -13633,31 +14689,142 @@ export const createMahjongTableScene = (
         dynamicPhysicsBoxes.length === 0
           ? staticPhysicsBoxes
           : [...staticPhysicsBoxes, ...dynamicPhysicsBoxes];
-      touchingWall = isPlayerTouchingWall(wallContactPosition, wallContactBoxes, {
+      wallContact = resolvePlayerWallContact(wallContactPosition, wallContactBoxes, {
         radius: PLAYER_COLLIDER_RADIUS,
         halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
       });
+      touchingWall = wallContact !== null;
       wallBracedAim = touchingWall && aimingDownSights;
+      const wasCoverMode = coverMode;
+      coverMode = resolveCoverModeFromAimTransition(
+        coverMode,
+        coverActivationPending,
+        aimingDownSights,
+        touchingWall,
+      );
+      if (!coverMode) {
+        coverWall = null;
+      } else if (!wasCoverMode) {
+        coverWall = coverActivationPendingWall ?? wallContact;
+      } else if (coverWall === null) {
+        coverWall = wallContact;
+      }
+      coverActivationPending = false;
+      coverActivationPendingWall = null;
+      const wasGroundedBeforeHeldJump = grounded;
+      const wasHangingBeforeHeldJump = wallHangState !== null;
       if (jumpKeyHeld) {
         jump();
+      }
+      if (
+        wasGroundedBeforeHeldJump &&
+        !wasHangingBeforeHeldJump &&
+        wallClimbTransition === null &&
+        !grounded &&
+        verticalVelocity > 0
+      ) {
+        resolvedWorldVelocity = {
+          ...resolvedWorldVelocity,
+          y: verticalVelocity,
+        };
+      }
+      // Input can remain held against a wall edge after the controller has
+      // clamped the capsule. Drive gait, O₂ workload, and the viewmodel's
+      // movement factor from the resolved horizontal velocity so a blocked
+      // strafe does not keep producing a walking bounce.
+      const resolvedHorizontalSpeed = Math.hypot(resolvedWorldVelocity.x, resolvedWorldVelocity.z);
+      const movementReferenceSpeed =
+        currentMoveSpeed > Number.EPSILON ? currentMoveSpeed : maxMoveSpeed;
+      movementMagnitude = THREE.MathUtils.clamp(
+        resolvedHorizontalSpeed / movementReferenceSpeed,
+        0,
+        1,
+      );
+      movementSpeedRatio = THREE.MathUtils.clamp(resolvedHorizontalSpeed / maxMoveSpeed, 0, 1);
+      movementMagnitudeActivity = movementMagnitude;
+      locomotionBlendActivity = crouching
+        ? 0
+        : THREE.MathUtils.clamp(
+            (movementSpeedRatio - WALK_SPEED_RATIO) / (1 - WALK_SPEED_RATIO),
+            0,
+            1,
+          );
+      exerciseIntensity = THREE.MathUtils.clamp(
+        movementMagnitude * (crouching ? 1 : movementSpeedRatio),
+        0,
+        1,
+      );
+      if (!grounded) {
+        exerciseIntensity = Math.max(exerciseIntensity, 0.25);
+      }
+      sprintingActivity = !crouching && movementMagnitude > 0.05 && sprintingMovement;
+      crouchWalkingActivity = crouching && movementMagnitude > 0.05;
+      walkingActivity =
+        !crouching && movementMagnitude > 0.05 && !sprintingActivity && !isWallTraversalActive;
+      const supportStop =
+        resolvedWorldVelocity.y === 0 &&
+        previousPresentationWorldVelocity.y < -Number.EPSILON &&
+        (grounded ||
+          wallHangState !== null ||
+          ledgeClimbTransition !== null ||
+          wallClimbTransition !== null);
+      presentationWorldVelocity = resolvedWorldVelocity;
+      // PointerLockControls moves parallel to the world XZ plane. Use the
+      // same yaw-only body basis for delta-v projection; looking up or down
+      // must not turn horizontal braking into a fake vertical load. Vertical
+      // acceleration remains world-up, which gives the full signed six-way
+      // response without inventing a camera-pitch axis.
+      cameraMotionRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+      cameraMotionRight.y = 0;
+      if (cameraMotionRight.lengthSq() > 0.0001) {
+        cameraMotionRight.normalize();
+      } else {
+        cameraMotionRight.set(1, 0, 0);
+      }
+      cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      cameraMotionForward.y = 0;
+      if (cameraMotionForward.lengthSq() > 0.0001) {
+        cameraMotionForward.normalize();
+      } else {
+        cameraMotionForward.set(0, 0, -1);
+      }
+      cameraMotionUp.set(0, 1, 0);
+      const cameraMotionFrame: CameraLocalFrame = {
+        right: cameraMotionRight,
+        forward: cameraMotionForward,
+        up: cameraMotionUp,
+      };
+      let localAcceleration: CameraLocalAcceleration =
+        resolveCameraLocalAccelerationFromVelocityDelta(
+          resolvedWorldVelocity,
+          previousPresentationWorldVelocity,
+          velocityDeltaSeconds,
+          cameraMotionFrame,
+        );
+      if (supportStop) {
+        // A downward velocity removed by support is felt as a downward load,
+        // so keep the camera's weight-response sign opposite the raw upward
+        // contact impulse while retaining the measured delta-v magnitude.
+        localAcceleration = {
+          ...localAcceleration,
+          up: previousPresentationWorldVelocity.y / velocityDeltaSeconds,
+        };
       }
       const activeTraversal =
         ledgeClimbTransition !== null && ledgeClimbTransition.phase === "vault"
           ? {
-              kind: "vault" as const,
               duration: ledgeClimbTransition.duration,
-              height: ledgeClimbTransition.traversalHeightMeters,
             }
           : wallClimbTransition !== null && wallClimbTransition.phase === "vault"
             ? {
-                kind: "wall-climb" as const,
                 duration: wallClimbTransition.duration,
-                height: wallClimbTransition.traversalHeightMeters,
               }
             : null;
       applyFirstPersonCameraMotion(baseCameraY, {
         deltaSeconds: delta,
-        localAcceleration: debugCameraShiftEnabled ? localAcceleration : { right: 0, forward: 0 },
+        localAcceleration: debugCameraShiftEnabled
+          ? localAcceleration
+          : { right: 0, forward: 0, up: localAcceleration.up },
         movementMagnitude,
         movementSpeedRatio,
         oxygenRatio: playerVitals.o2 / PLAYER_MAX_O2,
@@ -13667,17 +14834,13 @@ export const createMahjongTableScene = (
         aimingDownSights,
         holdingBreath: playerVitals.holdingBreath,
         stabilizedByWall: wallBracedAim,
+        coverMode,
+        coverLean: resolveCoverLeanInput(coverMode, right),
         grounded,
         traversalActive: activeTraversal !== null,
         ...(activeTraversal?.duration === undefined
           ? {}
           : { traversalDurationSeconds: activeTraversal.duration }),
-        ...(activeTraversal === null
-          ? {}
-          : {
-              traversalKind: activeTraversal.kind,
-              traversalHeightMeters: activeTraversal.height,
-            }),
       });
     } else {
       exerciseIntensity = 0;
@@ -13718,8 +14881,18 @@ export const createMahjongTableScene = (
       wallClimbTransition !== null ? "climbing" : wallHangState !== null ? "hanging" : "none";
     container.dataset.playerWallContact = touchingWall ? "true" : "false";
     container.dataset.playerWallBraced = wallBracedAim ? "true" : "false";
+    container.dataset.playerCoverMode = coverMode ? "true" : "false";
     camera.updateMatrixWorld(true);
     weaponRuntime?.update(
+      delta,
+      camera.position,
+      getAimRay(),
+      firstPersonActive,
+      activeView === "seat" && firstPersonControls.enabled,
+      cameraMotion.getOffsets().viewmodelOffset,
+      cameraMotion.getOffsets().viewmodelTransition,
+    );
+    meleeRuntime?.update(
       delta,
       camera.position,
       getAimRay(),
@@ -13900,11 +15073,25 @@ export const createMahjongTableScene = (
     setTouchMovementVector,
     toggleCrouch,
     jump,
-    fire: () => weaponRuntime?.fire(),
+    fire: () => {
+      if (meleeRuntime?.isActive()) {
+        meleeRuntime.fire();
+        return;
+      }
+      weaponRuntime?.fire();
+    },
     reload: () => weaponRuntime?.reload(),
-    interact: () => weaponRuntime?.interact(),
+    interact: () => {
+      if (!meleeRuntime?.interact()) {
+        weaponRuntime?.interact();
+      }
+    },
     cycleWeapon: (direction = 1) => weaponRuntime?.cycleWeapon(direction),
-    dropActiveWeapon: () => weaponRuntime?.dropActiveWeapon(),
+    dropActiveWeapon: () => {
+      if (!meleeRuntime?.dropActiveObject(resolvePlayerWorldVelocity())) {
+        weaponRuntime?.dropActiveWeapon();
+      }
+    },
     cycleWeaponTo: (weapon) => weaponRuntime?.cycleWeaponTo(weapon),
     setReticlePosition: setFocusReticle,
     getReticleBobbingOffset,
@@ -13964,6 +15151,8 @@ export const createMahjongTableScene = (
       saveSceneState(true);
       publishPlayerSpeed(0, true);
       disposed = true;
+      cancelDeathRespawn();
+      deathFadeOverlay.remove();
       window.cancelAnimationFrame(animationFrame);
       if (warmupTimer !== 0) {
         window.clearTimeout(warmupTimer);
@@ -14006,8 +15195,17 @@ export const createMahjongTableScene = (
       physicsRuntime?.dispose();
       physicsRuntime = null;
       physicsCharacterPosition = null;
+      if (simulantRespawnTimer !== 0) {
+        window.clearTimeout(simulantRespawnTimer);
+        simulantRespawnTimer = 0;
+      }
+      simulantMarker?.removeFromParent();
+      simulantMarker = null;
+      simulantBody = null;
       weaponRuntime?.dispose();
       weaponRuntime = null;
+      meleeRuntime?.dispose();
+      meleeRuntime = null;
       explorationWorld?.dispose();
       explorationWorld = null;
       disposeObject(scene);

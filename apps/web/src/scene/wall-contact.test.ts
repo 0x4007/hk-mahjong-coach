@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isPlayerTouchingWall } from "./wall-contact.js";
+import {
+  clampPlayerPositionToWallTangent,
+  isPlayerTouchingWall,
+  projectPlayerMovementToWallTangent,
+  resolvePlayerWallContact,
+} from "./wall-contact.js";
 import type { PhysicsBox } from "./mahjong-physics.js";
 
 const CAPSULE = { radius: 0.26, halfHeight: 0.6 } as const;
@@ -44,5 +49,61 @@ describe("player wall contact", () => {
 
   it("returns false for a nearby but non-contacting wall", () => {
     expect(isPlayerTouchingWall({ x: 0, y: 0.86, z: -2.7 }, [wall], CAPSULE)).toBe(false);
+  });
+
+  it("limits cover strafe to the wall face while preserving the normal position", () => {
+    const contact = resolvePlayerWallContact({ x: 0, y: 0.86, z: -2.39 }, [wall], CAPSULE);
+    expect(contact).not.toBeNull();
+    if (contact === null) {
+      return;
+    }
+
+    expect(contact.tangentLimit).toBeCloseTo(1.705, 8);
+    const clamped = clampPlayerPositionToWallTangent({ x: 4, y: 0.86, z: -2.39 }, contact);
+    expect(clamped.x).toBeCloseTo(contact.tangentLimit, 8);
+    expect(clamped.z).toBeCloseTo(-2.39, 8);
+  });
+
+  it("uses the rotated wall tangent when limiting cover strafe", () => {
+    const rotatedWall: PhysicsBox = {
+      ...wall,
+      center: { x: 2, y: 2, z: 0 },
+      rotationY: Math.PI / 4,
+    };
+    const contact = resolvePlayerWallContact(
+      { x: 1.49, y: 0.86, z: -0.51 },
+      [rotatedWall],
+      CAPSULE,
+    );
+    expect(contact).not.toBeNull();
+    if (contact === null) {
+      return;
+    }
+
+    const beyondEnd = {
+      x: rotatedWall.center.x + contact.tangent.x * 4 + contact.normal.x * 0.39,
+      y: 0.86,
+      z: rotatedWall.center.z + contact.tangent.z * 4 + contact.normal.z * 0.39,
+    };
+    const clamped = clampPlayerPositionToWallTangent(beyondEnd, contact);
+    const tangentCoordinate =
+      (clamped.x - rotatedWall.center.x) * contact.tangent.x +
+      (clamped.z - rotatedWall.center.z) * contact.tangent.z;
+    expect(tangentCoordinate).toBeCloseTo(contact.tangentLimit, 8);
+    expect(
+      (clamped.x - beyondEnd.x) * contact.normal.x + (clamped.z - beyondEnd.z) * contact.normal.z,
+    ).toBeCloseTo(0, 8);
+  });
+
+  it("projects cover movement onto the wall tangent", () => {
+    const contact = resolvePlayerWallContact({ x: 0, y: 0.86, z: -2.39 }, [wall], CAPSULE);
+    expect(contact).not.toBeNull();
+    if (contact === null) {
+      return;
+    }
+
+    const projected = projectPlayerMovementToWallTangent({ x: 1.5, y: 0, z: -0.75 }, contact);
+    expect(projected.x).toBeCloseTo(1.5, 8);
+    expect(projected.z).toBeCloseTo(0, 8);
   });
 });

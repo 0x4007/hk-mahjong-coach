@@ -238,12 +238,14 @@ export const applyPlayerO2Cost = (
  * Spend O₂ for a physical exertion event, carrying any unpaid cost into the
  * normal shield-then-health damage path. Discrete actions remain atomic via
  * applyPlayerO2Cost; landings are deliberately allowed to spend a partial
- * reserve before they hurt the player.
+ * reserve before they hurt the player. A caller may supply a resolved damage
+ * amount for the shortfall when the physical event has its own grace curve.
  */
 export const applyPlayerO2ImpactCost = (
   state: PlayerVitalsState,
   oxygenCost: number,
   recoveryDelaySeconds = 0,
+  shortfallDamage?: number,
 ): PlayerVitalsO2ImpactResult => {
   const cost = normalizeDamage(oxygenCost);
   if (cost <= 0 || state.isDead) {
@@ -265,8 +267,10 @@ export const applyPlayerO2ImpactCost = (
     state.holdingBreath,
     state.holdBreathLocked,
   );
-  const overflowDamage = cost - oxygenSpent;
-  const damageResult = applyPlayerDamage(afterOxygen, overflowDamage);
+  const oxygenShortfall = cost - oxygenSpent;
+  const damageOnShortfall =
+    oxygenShortfall > 0 ? normalizeDamage(shortfallDamage ?? oxygenShortfall) : 0;
+  const damageResult = applyPlayerDamage(afterOxygen, damageOnShortfall);
   return {
     ...damageResult,
     oxygenCost: cost,

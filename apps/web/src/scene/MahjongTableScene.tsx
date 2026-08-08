@@ -10,6 +10,7 @@ import {
   type SceneView,
   type VisualSceneAreaId,
   type WeaponStateSnapshot,
+  type MeleeStateSnapshot,
 } from "./mahjong-table.js";
 
 interface MahjongTableSceneProps {
@@ -26,6 +27,7 @@ interface MahjongTableSceneProps {
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
   readonly onWeaponStateChange?: (state: WeaponStateSnapshot) => void;
+  readonly onMeleeStateChange?: (state: MeleeStateSnapshot) => void;
 }
 
 export const MahjongTableScene = ({
@@ -42,6 +44,7 @@ export const MahjongTableScene = ({
   onSpeedChange,
   onVitalsChange,
   onWeaponStateChange,
+  onMeleeStateChange,
 }: MahjongTableSceneProps): React.JSX.Element => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mountRef = useRef<MahjongTableMount | null>(null);
@@ -53,6 +56,7 @@ export const MahjongTableScene = ({
   const onSpeedChangeRef = useRef(onSpeedChange);
   const onVitalsChangeRef = useRef(onVitalsChange);
   const onWeaponStateChangeRef = useRef(onWeaponStateChange);
+  const onMeleeStateChangeRef = useRef(onMeleeStateChange);
   const onExplorationAreaChangeRef = useRef(onExplorationAreaChange);
   const debugRef = useRef(debug);
   const viewRef = useRef(view);
@@ -64,6 +68,7 @@ export const MahjongTableScene = ({
   onSpeedChangeRef.current = onSpeedChange;
   onVitalsChangeRef.current = onVitalsChange;
   onWeaponStateChangeRef.current = onWeaponStateChange;
+  onMeleeStateChangeRef.current = onMeleeStateChange;
   onExplorationAreaChangeRef.current = onExplorationAreaChange;
   debugRef.current = debug;
   viewRef.current = view;
@@ -96,6 +101,7 @@ export const MahjongTableScene = ({
           onSpeedChange: (speed) => onSpeedChangeRef.current?.(speed),
           onVitalsChange: (vitals) => onVitalsChangeRef.current?.(vitals),
           onWeaponStateChange: (state) => onWeaponStateChangeRef.current?.(state),
+          onMeleeStateChange: (state) => onMeleeStateChangeRef.current?.(state),
           onReady: () => setSceneReady(true),
           roomSeed: roomSeedRef.current,
           ...(enabledAreas === undefined ? {} : { enabledAreas }),

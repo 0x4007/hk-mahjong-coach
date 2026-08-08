@@ -232,7 +232,8 @@
   table composition.
 - Development mode accepts `?debug=1` and adds a visual panel for the table/room/skyline/asset camera
   presets, adaptive/high/medium/low quality mode, Bokeh/GTAO, physical/simple glass, motion feel, FOV,
-  exposure, tone mapper, fog density, skyline visibility, lighting, DPR, and live renderer metrics. The
+  exposure, tone mapper, skyline visibility, lighting, DPR, and live renderer metrics. Fog is intentionally
+  absent from the panel and disabled in the renderer. The
   quality selector applies its DPR, shadow, post-effect, glass, ambient-animation, and skyline-LOD defaults
   immediately; each individual control can then be overridden without remounting the app. In production, only the
   adaptive/high/medium/low quality selector remains visible for users; this value is persisted in local storage so

@@ -19,15 +19,21 @@
 - Weapon generation is disabled at the profile/stat level. The roster is exactly six fixed weapons with six persistent
   inventory slots and number-row selection `1`–`6`; `0` holsters. The old parametric drop hook remains a compatibility
   no-op and is not advertised in the HUD.
+- All six fixed weapons use the visual-table skinned viewmodels and pickup models. The pistol, shotgun, machine gun,
+  sniper, carbine, and submachine gun each have distinct receiver, barrel, and sight details; the sniper and carbine
+  retain their scoped optics. The merged weapon module is byte-identical to visual-table's current working copy.
 - A deterministic red simulant is spawned at a safe distance, charges the player, takes hits from the weapon ray, deals
   close-range damage, and respawns after defeat. This is a local presentation target, not authoritative game state.
+- Player death starts the visual-table camera tumble, black death fade, seeded respawn, and input/fire reset. The
+  `?debug=1` panel includes a `Suicide` control for testing this loop.
 - Scene fog is disabled in the renderer and the legacy persisted fog preference is forced to zero, so saved debug
   settings cannot restore the effect.
-- The checkpoint test-bus run recorded 463/468 passing assertions. The five failures were the pre-existing core-engine
-  and simulation property cases that also fail in the occupied parametric-guns lane; all weapon and scene focused
-  assertions passed. The final powder/thermal smoke split was applied after that snapshot; the follow-up strict
-  typecheck and web production build passed. Browser/audio acceptance was not run because another worktree owns port
-  4173 and the repository forbids opening a second browser session.
+- The latest server-owned test-bus run `1786166626340-3683-ed9e9389` recorded 491/495 passing assertions. The four
+  failures are the pre-existing `packages/test-fixtures` core-engine and seeded-simulation property cases; all weapon
+  and scene suites passed, including the death-tumble regression. The final powder/thermal smoke split was applied
+  after the earlier snapshot; the follow-up strict typecheck and web production build passed. The checkpoint server is on port `4174`, but the connected Chrome
+  extension timed out while creating a test tab, so rendered weapon, smoke, and audio acceptance still needs a live
+  browser tab.
 
 ## Current milestone
 
@@ -242,12 +248,13 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   is repositioned inside the compact boundary instead of being clipped by movement limits.
 - Mobile browsers keep the landscape guidance in shipping and expose motion look, touch swipe, joystick,
   crouch, and jump against the same composed initial camera.
-- Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper, fog,
-  skyline visibility, and renderer metrics. Skyline windows are batched with `InstancedMesh`, and the
+- Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper,
+  skyline visibility, and renderer metrics. Fog is intentionally absent from the panel and disabled in the renderer.
+  Skyline windows are batched with `InstancedMesh`, and the
   three hero landmarks have distance-based `LOD` silhouettes. The documented screenshot checkpoint uses
   the existing Playwright CLI at a fixed 1440×900 desktop viewport.
 - Normal development mode preloads `/__codex/visual-debug-state` before mounting the Three.js scene, so a
-  fresh origin such as a Cloudflare tunnel receives the saved fog and lighting values on its first render;
+  fresh origin such as a Cloudflare tunnel receives the saved lighting values on its first render;
   debug mode remains the only writer, and a bounded read timeout falls back to the normal defaults.
 - The visual preview's Vite and Fastify hosts bind to `0.0.0.0` for same-LAN iPhone testing. Vite now
   serves HTTPS with an ignored, locally generated certificate covering the host's current LAN IPv4

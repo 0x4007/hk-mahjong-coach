@@ -1,1 +1,40 @@
-{"savedAt":"2026-08-08T00:54:44.792Z","scene":{"roomSeed":"room-01","roomVariant":"Northstone","explorationArea":"Climbing gym","cameraPreset":"climbingGym","fov":90,"exposure":0.9660773989193019,"toneMapper":"agx","fogDensity":0,"sunYaw":2.305390786134123,"sunElevation":0.8494595713390564,"sunIntensity":2.2,"environmentIntensity":0.82,"environmentRotation":0,"redAccentIntensity":1.1,"cyanEmissiveIntensity":1.05,"shadowQuality":"high","quality":"high","glassMode":"physical","ambientAnimationRate":1,"dprCap":1.75,"wireframe":false,"boundsVisible":false,"bokehEnabled":true,"bokehStrength":12.5,"ambientOcclusionEnabled":false,"autoExposureEnabled":true,"cameraShiftEnabled":true,"cameraBobEnabled":true,"enabledAreas":{"focusCalibration":false,"penthouse":false,"climbingGym":true,"parametricBarracks":false,"targetRange":false}}}
+{
+  "savedAt": "2026-08-08T00:54:44.792Z",
+  "scene": {
+    "roomSeed": "room-01",
+    "roomVariant": "Northstone",
+    "explorationArea": "Climbing gym",
+    "cameraPreset": "climbingGym",
+    "fov": 90,
+    "exposure": 0.9660773989193019,
+    "toneMapper": "agx",
+    "fogDensity": 0,
+    "sunYaw": 2.305390786134123,
+    "sunElevation": 0.8494595713390564,
+    "sunIntensity": 2.2,
+    "environmentIntensity": 0.82,
+    "environmentRotation": 0,
+    "redAccentIntensity": 1.1,
+    "cyanEmissiveIntensity": 1.05,
+    "shadowQuality": "high",
+    "quality": "high",
+    "glassMode": "physical",
+    "ambientAnimationRate": 1,
+    "dprCap": 1.75,
+    "wireframe": false,
+    "boundsVisible": false,
+    "bokehEnabled": true,
+    "bokehStrength": 12.5,
+    "ambientOcclusionEnabled": false,
+    "autoExposureEnabled": true,
+    "cameraShiftEnabled": true,
+    "cameraBobEnabled": true,
+    "enabledAreas": {
+      "focusCalibration": false,
+      "penthouse": false,
+      "climbingGym": true,
+      "parametricBarracks": false,
+      "targetRange": false
+    }
+  }
+}

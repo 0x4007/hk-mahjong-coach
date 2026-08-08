@@ -22,6 +22,8 @@ import {
   resolveVaultTarget,
   resolveVaultTraversalArcHeight,
   resolveVaultTraversalDuration,
+  resolveVaultTraversalO2Cost,
+  resolveO2ScaledTraversalDuration,
   resolveWallClimbTarget,
   resolveWallHangTarget,
   resolveWallHangTargetDetails,
@@ -46,8 +48,11 @@ import {
   resolveWeaponShotReticleOffset,
   ZOOM_RECOIL_FEEDBACK_MULTIPLIER,
   resolveDesktopAimInput,
+  resolveCoverLeanInput,
+  resolveCoverModeFromAimTransition,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
+  resolveSimulantShotDamage,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
   isLeftCommandKeyEvent,
@@ -58,6 +63,7 @@ import {
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
+import { O2_LANDING_BASE_COST } from "./player-vitals.js";
 import {
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
   PLAYER_SPRINT_MULTIPLIER,
@@ -370,6 +376,25 @@ describe("left Command keyboard binding", () => {
   });
 });
 
+describe("cover mode", () => {
+  it("arms only when zoom is activated while wall contact is present", () => {
+    expect(resolveCoverModeFromAimTransition(false, false, true, true)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(false, true, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(false, true, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(true, true, false, true)).toBe(false);
+  });
+
+  it("uses only A/D strafe input for cover lean", () => {
+    expect(resolveCoverLeanInput(false, 1)).toBe(0);
+    expect(resolveCoverLeanInput(true, 1)).toBe(1);
+    expect(resolveCoverLeanInput(true, -1)).toBe(-1);
+    expect(resolveCoverLeanInput(true, -0.4)).toBe(-0.4);
+    expect(resolveCoverLeanInput(true, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
 describe("movement sprint double-tap", () => {
   const movementKeys = [
     "KeyW",
@@ -467,6 +492,20 @@ describe("reticule-anchored seat zoom", () => {
 });
 
 describe("shot direction reticule", () => {
+  it("does not turn cover roll into an optical reticle shift", () => {
+    const motion = {
+      roll: 0.2,
+      coverLeanRoll: 0.2,
+      verticalOffset: 0,
+      aimSwayX: 0,
+      aimSwayY: 0,
+      recoilYaw: 0,
+      recoilPitch: 0,
+    };
+
+    expect(resolveWeaponShotReticleOffset(motion, false)).toEqual({ x: 0, y: 0 });
+  });
+
   it("keeps full hip-fire recoil feedback and damps it for zoom direction selection", () => {
     const motion = {
       roll: 0.01,
@@ -606,23 +645,84 @@ describe("exploration room exclusion", () => {
   });
 });
 
-describe("append-only exploration chunks", () => {
-  it("preloads all exploration chunks up front and retains them", () => {
+describe("simulant shot payload", () => {
+  it("uses the same per-projectile damage payload as the ordinary weapon path", () => {
+    expect(resolveSimulantShotDamage(28)).toBe(28);
+    expect(resolveSimulantShotDamage(16, 8)).toBe(128);
+  });
+
+  it("rejects non-finite or negative payload inputs", () => {
+    expect(resolveSimulantShotDamage(Number.NaN, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, Number.NaN)).toBe(0);
+    expect(resolveSimulantShotDamage(-16, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, -2)).toBe(0);
+  });
+});
+
+describe("exploration chunk footprint", () => {
+  it("preloads the central and edge chunks while omitting the four corners", () => {
     const scene = new THREE.Scene();
-    const world = createExplorationWorld(scene, "append-only-test");
+    const world = createExplorationWorld(scene, "compact-footprint-test");
 
     expect(EXPLORATION_WORLD_SIZE_METERS).toBe(250);
     expect(EXPLORATION_WORLD_HALF_SIZE).toBe(125);
-    expect(EXPLORATION_CHUNK_SIZE).toBe(50);
-    expect(EXPLORATION_CHUNKS_PER_SIDE).toBe(2);
-    expect(world.getLoadedChunkCount()).toBe(25);
+    expect(EXPLORATION_CHUNK_SIZE).toBe(100);
+    expect(EXPLORATION_CHUNKS_PER_SIDE).toBe(1.25);
+    expect(world.getLoadedChunkCount()).toBe(5);
+    const root = scene.getObjectByName("ExplorationWorldRoot");
+    expect(root).not.toBeNull();
+    expect(root?.getObjectByName("ExplorationChunk:-1:-1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:-1:1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:1:-1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:1:1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:0:0")).not.toBeUndefined();
     world.update(new THREE.Vector3(16, 0, 0));
     const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBe(25);
+    expect(expandedCount).toBe(5);
 
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);
     world.dispose();
+  });
+
+  it("recomputes moved prop bounds and drops held props into a ragdoll body", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "ragdoll-drop-bounds-test");
+    const pickup = world.getMeleePickups()[0];
+    if (pickup === undefined) {
+      throw new Error("Expected at least one exploration melee pickup");
+    }
+    const sourceMatrix = new THREE.Matrix4();
+    pickup.mesh.getMatrixAt(pickup.index, sourceMatrix);
+    const sourcePosition = new THREE.Vector3().setFromMatrixPosition(sourceMatrix);
+    const dropPosition = new THREE.Vector3(
+      sourcePosition.x < 0 ? EXPLORATION_WORLD_HALF_SIZE - 1 : -EXPLORATION_WORLD_HALF_SIZE + 1,
+      1,
+      sourcePosition.z < 0 ? EXPLORATION_WORLD_HALF_SIZE - 1 : -EXPLORATION_WORLD_HALF_SIZE + 1,
+    );
+
+    try {
+      expect(world.equipMeleeObject(pickup.objectId)).not.toBeNull();
+      expect(world.dropMeleeObject(pickup.objectId, dropPosition, 0)).toBe(true);
+
+      const droppedMatrix = new THREE.Matrix4();
+      pickup.mesh.getMatrixAt(pickup.index, droppedMatrix);
+      const droppedPosition = new THREE.Vector3().setFromMatrixPosition(droppedMatrix);
+      expect(pickup.mesh.boundingSphere?.containsPoint(droppedPosition)).toBe(true);
+
+      const droppedBody = world.getPhysicsBoxes().find((box) => box.dynamicId === pickup.objectId);
+      expect(droppedBody?.dynamic).toBe(true);
+      expect(droppedBody?.linearVelocity?.y).toBeGreaterThan(0);
+      expect(
+        Math.hypot(
+          droppedBody?.angularVelocity?.x ?? 0,
+          droppedBody?.angularVelocity?.y ?? 0,
+          droppedBody?.angularVelocity?.z ?? 0,
+        ),
+      ).toBeGreaterThan(0);
+    } finally {
+      world.dispose();
+    }
   });
 
   it("keeps every authored training pad inside the compact map bounds", () => {
@@ -644,6 +744,24 @@ describe("ledge vaulting helpers", () => {
     expect(resolveVaultTraversalDuration(1)).toBeLessThan(1);
     expect(resolveVaultTraversalArcHeight(0.45)).toBeCloseTo(0.03, 6);
     expect(resolveVaultTraversalArcHeight(2)).toBeCloseTo(0.24, 6);
+  });
+
+  it("scales a maximum traversal from slow empty O₂ to fast full O₂", () => {
+    const maximumDuration = resolveVaultTraversalDuration(2);
+
+    expect(maximumDuration).toBeCloseTo(1, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 1)).toBeCloseTo(0.5, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 0.5)).toBeCloseTo(2 ** -0.5, 6);
+    expect(resolveO2ScaledTraversalDuration(maximumDuration, 0)).toBeCloseTo(1, 6);
+  });
+
+  it("charges traversal O₂ continuously from the minimum vault to two metres", () => {
+    expect(resolveVaultTraversalO2Cost(0.1)).toBe(0);
+    expect(resolveVaultTraversalO2Cost(0.15)).toBeCloseTo(0, 8);
+    expect(resolveVaultTraversalO2Cost(1.075)).toBeCloseTo(O2_LANDING_BASE_COST / 2, 8);
+    expect(resolveVaultTraversalO2Cost(2)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
+    expect(resolveVaultTraversalO2Cost(3)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
+    expect(resolveVaultTraversalO2Cost(Number.NaN)).toBe(0);
   });
 
   it("keeps a procedural rotated box on the same local vault path", () => {
