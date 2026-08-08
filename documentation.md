@@ -1,5 +1,136 @@
 # Architecture and implementation log
 
+## 2026-08-08 — Opaque-blinking Warehouse rack indicators
+
+Warehouse server racks now use eight larger boxed status bars around all four vertical faces of each rack. Bars are split
+across one steady and three room-seeded blink groups, so a visible bar is available from any aisle direction. Four shared
+additive alpha overlays provide a halo, while the bar bases stay opaque and opt out of map fog. This replaces the tiny
+single-face pixel planes that were too easy to lose against the black room.
+
+## 2026-08-08 — Warehouse aisle fog
+
+The Warehouse now uses a fixed, map-local `THREE.Fog` haze: dark blue-grey `0x07131c`, starting at 10 m and reaching full
+fade at 92 m. This preserves the black background and makes the long crate aisles recede without changing the authored
+Penthouse. The old persisted debug fog field remains a compatibility value and cannot tune or disable the Warehouse haze.
+
+## 2026-08-08 — Baked central Warehouse floor pool
+
+The platform keeps its black-room presentation but now carries a small deterministic `warehouse-floor-area-bake-v1-center`
+lightmap. It adds only a subdued warm pool around the central spotlight footprint; outside that pool the floor remains near
+black. Its diffuse material base is exact black, so the lightmap cannot brighten the floor; the separate emissive LEDs and
+spotlight pool remain visible. The platform uses world-aligned `uv1`/`uv2`, a `MeshBasicMaterial` lightmap, and no dynamic
+shadow receiver work, while the spotlight remains available for crates and other moving geometry.
+
+## 2026-08-08 — Dim lower-band Warehouse wall bake
+
+The wall bake is now deliberately low and local. `warehouse-wall-area-bake-v2-dim-bottom` fades the centre and perimeter
+contributions toward the floor and clamps them to exact black above 4.25 m, including the wall top faces. Emergency wall
+fixtures remain emissive red meshes; their baked contribution is only a soft nearby lower-wall halo.
+
+## 2026-08-08 — Warehouse rack pixel LEDs
+
+Warehouse server racks now cover each front face with an 8-by-7 grid of tiny square ice-blue pixels instead of flat
+horizontal light bars. The grid stays deterministic, and the existing steady/blinking instanced groups still provide
+asynchronous activity without allocating one light per rack. Each pixel's steady/blinking membership and phase-group
+assignment are randomized from the room seed, so the face is not a fixed checkerboard while replaying the same seed
+still reproduces the same pattern. Rack bodies, LED meshes, and the supported pile physics remain unchanged.
+
+## 2026-08-08 — Baked Warehouse wall area lighting
+
+The Warehouse perimeter walls now use a deterministic static bake instead of dynamic material lighting. Four generated
+`DataTexture` lightmaps encode a dark industrial base with a warm centre pool, yellow perimeter spill, and soft red
+emergency-fixture tint. Each wall has world-aligned `uv1` coordinates (and an explicit `uv2` alias for diagnostics) and a
+`MeshBasicMaterial` with `lightMap`, so the renderer does not evaluate the central spotlight or dynamic shadow receiver for
+those surfaces. The central unshadowed spotlight still lights crates and other dynamic geometry. The bake is tagged
+`warehouse-wall-area-bake-v1`, returned in the map resource texture list, and disposed with the Warehouse scene.
+
+## 2026-08-08 — Ice-blue data-center rack experiment
+
+The Warehouse presentation now experiments with a data-center look while keeping the supported pile physics unchanged.
+Each generated crate plan renders as a dark server-rack cabinet with an 8-by-7 front pixel grid. The dots are split
+using a room-seeded random assignment across steady and three phase-offset blinking instanced meshes, so the room has
+asynchronous cold-blue activity without allocating one light per server. Rack bodies and LED meshes are
+presentation-only and remain ignored by weapon raycasts. The map reports `Ice-blue data center` as its local variant and
+uses the `warehouse-data-center-v1` presentation marker.
+
+## 2026-08-08 — Yellow perimeter LED line
+
+The Warehouse now uses one shared instanced mesh for yellow rectangular LEDs around the complete inset perimeter. The line
+covers all four edges and corners with yellow-only emissive material, remains at floor height, and creates no runtime area,
+point, or shadow light. The central unshadowed spotlight remains the only real Warehouse light.
+
+## 2026-08-08 — Warehouse floor LEDs without runtime area lights
+
+The warehouse keeps its visible colored LED markers but no longer creates the four corner `RectAreaLight` probes or the
+sixteen emergency `PointLight` objects. The central spotlight remains unshadowed and supplies the single real warehouse
+light. The former 64 hanging bulbs are now shared flat emissive rectangles on the floor in deterministic corner runs, and
+the twelve center-lane markers use the same flat floor-LED treatment in red. This keeps the LED appearance while reducing
+runtime light allocations; the visible meshes remain presentation-only and ignored by weapon raycasts.
+
+## 2026-08-08 — Warehouse emergency lighting and shadow-map removal
+
+Warehouse lighting no longer allocates a spotlight shadow map. The central spotlight still supplies the warm pool and its
+visible shaft, but it is explicitly unshadowed. Four red emergency wall fixtures and twelve red centre-lane markers are
+emissive meshes only; they use the deterministic `emergency-fixtures-v2-no-runtime-lights` and `floor-led-lanes-v2`
+layouts and add no point, area, or shadow-map work. Their soft wall tint is included in the baked wall lightmaps.
+
+## 2026-08-08 — Warehouse Christmas corner lighting
+
+Warehouse retains deterministic rectangular emissive LED meshes around the floor perimeter and in the two centre lanes.
+They replace the earlier corner bulbs, `RectAreaLight` probes, and emergency `PointLight` objects, so the map has one real
+unshadowed central spotlight and no runtime area or point lights.
+
+## 2026-08-08 — Warehouse tool roster
+
+The warehouse melee pickups now use a warehouse-specific tool and safety roster: crowbar, steel pipe, fire extinguisher,
+pipe wrench, hammer, screwdriver, fireman axe, and box cutter. The eight deterministic perimeter spawns keep their
+existing pickup, ragdoll, drop, and shared melee-hit behavior while removing the out-of-place baseball bat, shovel, and
+generic steel bar labels.
+
+Each pickup now uses a matching procedural silhouette instead of the old one-size rounded stick: the pipe is cylindrical,
+the extinguisher has a wider body and neck, the hammer and fireman axe have broad heads, the crowbar and pipe wrench have
+angled jaws, and the screwdriver and box cutter have compact handles with narrow blades. The same geometry is cloned into
+the held viewmodel, and physics half-extents are derived from its actual bounds.
+
+## 2026-08-08 — Three-dimensional Warehouse piles
+
+Warehouse crate generation now builds irregular but stable piles instead of upright single-file towers. Each seed-derived
+bay chooses a one- to three-crate footprint, jitters the whole pile origin, and lets upper layers use only occupied support
+cells below them. Three enclosed crate yards are generated as deterministic perimeter walls before the ordinary piles,
+creating blocked-off areas and alternate routes while the centre spawn lane stays open. Crates keep a fixed ground-parallel
+orientation with deterministic yaw-only rotation; horizontal and vertical centre pitches leave clear space between
+neighbouring crates, so no boxes intersect or float. The rendered instanced cube and its matching Rapier `PhysicsBox`
+share the same centre, half-extents, and rotation. The generation marker is `warehouse-boxes-v5`.
+
+## 2026-08-08 — Directional wall cover
+
+Cover is now a directional stance rather than a proximity-only assist. A wall is a valid cover source only when the
+horizontal camera direction falls inside its 90° facing cone (45° to either side of the wall-facing direction). The
+nearest wall query filters by that cone before choosing a source, so zooming while parallel to a wall or with the back
+to it leaves cover disabled. Turning an engaged stance outside the cone clears it before movement projection or snap;
+raw wall contact remains the independent physical collision and wall-braced aim signal, but does not by itself engage
+cover or its wall snap.
+
+## 2026-08-08 — Bullet stopping power and projectile-driven ragdolls
+
+The visual combat path resolves `stoppingPowerPerBullet` directly from projectile damage: `damage × 0.065 m/s`, capped
+at `8 m/s`. This is a per-projectile value, so every shotgun pellet submits its own force. A hit on the local simulant
+adds that velocity along the bullet's horizontal travel direction and pauses its charge for a short damage-scaled
+stagger. The marker exposes the live `simulantStoppingPower` and `simulantStaggerSeconds` values for diagnostics.
+
+The streamed exploration world's knockable props use the same value. The first bullet activates their existing ragdoll;
+subsequent bullets add linear and angular impulses through the active Rapier or fallback physics runtime. This keeps
+single bullets, automatic fire, and all shotgun pellets on one visible impact path rather than making props a melee-only
+exception. The armory chart and active loadout line display the per-bullet stopping-power value.
+
+## 2026-08-08 — Halo 3 / ODST-inspired HUD layout
+
+The first-person scene now uses a minimal top rail for the live tactical HUD. O₂/energy is the top bar, followed by
+shield and health; all three are full-width dark-grey tracks with no visible labels or percentage text. The
+loadout/ammunition rail remains wider and anchored to the lower-right edge. The UI is otherwise monochromatic, with flat
+HUD surfaces and no gradients; the vitals alone use a high-contrast Halo-style blue accent. The upper-left contains only the
+map and video-quality selectors; debug controls are offset below that area and no longer move player vitals.
+
 ## 2026-08-02 — Repository initialization
 
 - The repository was empty, so the existing `main` checkout is the canonical implementation lane.
@@ -138,9 +269,11 @@
   touch look/movement on mobile. Debug mode adds the orbit-controlled overhead lens and visual panel. The
   shipping loop keeps the composed initial camera while its gaze focus follows the visible center-ray surface;
   a tight five-ray neighborhood lets a nearby visible tile win when the reticule falls into a narrow gap,
-  without jumping through an opaque object. Accommodation eases toward near focus in roughly 0.4 seconds
-  and relaxes toward far focus in roughly 0.65 seconds, so the effect reads as eye focus rather than a
-  cinematic snap. Physics-resolved local acceleration drives the restrained pitch and roll response that suggests
+  without jumping through an opaque object. At the reference pupil, accommodation eases toward near focus in roughly
+  0.8 seconds and relaxes toward far focus in roughly 0.65 seconds. Dark adaptation modestly slows both responses to
+  about 1.1 and 0.8 seconds at the fully dilated pupil, approximating the loss of contrast and increased aberration
+  without changing the hyperfocal or Bokeh model. The effect reads as eye focus rather than a cinematic snap. Physics-resolved
+  local acceleration drives the restrained pitch and roll response that suggests
   shifting weight, while movement speed drives a small damped vertical viewport bob that settles when the player stops.
   The HUD reticule follows the same damped first-person acceleration and head-bob offsets as the camera, so the aim
   marker and held viewmodel stay on the one presentation path while the focus ray remains anchored to the configured
@@ -199,7 +332,8 @@
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.00 m eye height.
   Standing movement starts at the 1.5×-base trot (5.1 m/s, 18.36 km/h) and slowly regenerates O₂. Shift keeps the
   existing half-speed crouch movement and enables an internal walk-mode toggle; that toggle applies only after the
-  player is upright, where WASD/arrow input uses the 1×-base walk speed (3.4 m/s). Sprint clears the hidden toggle.
+  player is upright, where WASD/arrow input uses the 1×-base walk speed (3.4 m/s). Sprint and an accepted jump
+  (including the O₂-free mini hop) clear the hidden toggle, returning upright movement to the default run/trot mode.
   Space keeps the same quick airtime while doubling the jump apex. Double-tapping any WASD
   or arrow movement key
   engages the faster 3× sprint (10.2 m/s, 36.72 km/h) that remains active while any movement key is held, so W→A/D/S direction
@@ -215,7 +349,9 @@
   approximation with a 1 arcminute central acuity threshold: bright rooms settle near a 2.5 mm pupil,
   ordinary indoor light near 4 mm, and dark rooms expand toward 6.5 mm. That pupil drives the aperture and
   hyperfocal distance, so close tiles and near camera-child geometry can soften while the room and skyline stay
-  legible. The renderer currently keeps the stock normalized Bokeh depth response; the physical per-sample eye
+  legible. Warehouse uses its isolated pools and black background for eye adaptation even while display exposure
+  compensates for the scene, so its dark-room pupil makes close focus visibly harder. The renderer currently keeps the
+  stock normalized Bokeh depth response; the physical per-sample eye
   circle-of-confusion experiment is checkpointed but paused after visual review. Shader readiness
   uses a cancellable first-render task without forcing a synchronous compile that can block software WebGL;
   the composer ends with `OutputPass`, rendering pauses while the document is hidden, and setup shows a
@@ -233,7 +369,7 @@
 - Development mode accepts `?debug=1` and adds a visual panel for the table/room/skyline/asset camera
   presets, adaptive/high/medium/low quality mode, Bokeh/GTAO, physical/simple glass, motion feel, FOV,
   exposure, tone mapper, skyline visibility, lighting, DPR, and live renderer metrics. Fog is intentionally
-  absent from the panel and disabled in the renderer. The
+  absent from the panel; only Warehouse uses its fixed map-local haze. The
   quality selector applies its DPR, shadow, post-effect, glass, ambient-animation, and skyline-LOD defaults
   immediately; each individual control can then be overridden without remounting the app. In production, only the
   adaptive/high/medium/low quality selector remains visible for users; this value is persisted in local storage so
@@ -248,6 +384,9 @@
   authored root or its static colliders, so the area is unloaded rather than merely hidden. The selection is saved
   in visual-debug settings and restored on reload. Re-enable the checkbox to construct the area again; its camera
   quick action and preset remain disabled while it is unloaded.
+- The checkpoint server also accepts the explicit `?debug=1` query for local inspection. In that mode the production
+  bundle now reads and writes the same validated local visual-debug preferences, so `Loaded areas` selections persist
+  across a refresh on the checkpoint port without enabling debug storage for ordinary production visitors.
 - The development map is divided into three independent ground-level play areas: the penthouse at the origin, the
   looking focus room 60 m east, and the climbing gym 60 m west. Each area is marked as a 50 m x 50 m square with a
   10 m open gap to its neighbor. Generated city buildings, props, windows, bridges, and beacons are rejected from
@@ -309,6 +448,30 @@
   The array is authoritative: omitting an entity removes it. Runtime validation rejects bad bounds and
   duplicate IDs before rendering, so a coding agent can edit the level directly without naming Three.js
   objects.
+
+## Selectable maps
+
+The browser map catalog lives in `apps/web/src/scene/map-catalog.ts`. `Debugging 01` (`debugging-01`) remains the
+authored penthouse combat sandbox. `Warehouse` (`debugging-02`) is a separate industrial warehouse generated by
+`apps/web/src/scene/debugging-two-map.ts`: irregular seed-derived piles of exact 1 m cubic crates arranged through
+storage bays, enclosed crate yards, and open forklift aisles on the platform. Each supported pile plan is presented as a
+dark server rack with a 4-by-4 grid of tiny ice-blue pixels in one opaque instanced mesh. A few room-seeded pixels use a
+brighter ice-blue shade; there are no per-frame blinking groups. Rack meshes stay presentation-only and are ignored by weapon raycasts; their coarse supported physics remains in the pile
+colliders. Each rack keeps exact 1 m placement, stays parallel to the ground, uses deterministic yaw-only rotation, and
+follows a supported footprint with explicit horizontal and vertical clear pitches. It does not build the penthouse, focus room, climbing gym,
+parametric campus, target range, gateway, or streamed exploration city. The warehouse keeps the existing rectangular
+bounds and spawn points, and each rendered crate has a matching physics collider. Its isolated one-chunk melee
+world adds eight deterministic, named props in the clear warehouse aisles and reuses the existing equip, drop, ragdoll,
+melee-hit, and projectile-hit paths. Warehouse places one of each fixed weapon at equal intervals around an inset
+rectangular perimeter; Debugging 01 retains the dense obstacle-aware square sampler. The warehouse uses eight warm
+dark high-bay fixtures, one deterministic yellow rectangular LED line around the full perimeter, four red emergency wall
+fixtures, twelve red center-lane floor LEDs, and one low central unshadowed spotlight. It creates no warehouse `RectAreaLight` or emergency `PointLight`
+objects. The warehouse background is black so the explicit spotlight stays isolated. Its translucent shaft, floor pool,
+and ground-truth ambient occlusion provide visible beam and ray-style crate contact cues without volumetric ray tracing.
+
+Use the `Map` selector in the upper-left scene controls to switch maps. A change remounts the scene with the selected
+map and updates the HUD. The choice is stored under `hk-mahjong-coach:visual-map:v1`; `?map=debugging-01` or
+`?map=debugging-02` takes precedence on the first load. Invalid query values fall back to `Debugging 01`.
 
 ## Reticule-anchored zoom
 
@@ -458,9 +621,11 @@ leaves half of the rested baseline reticle, weapon, and stationary-breathing ins
 reserve-driven breathing destabilisation. Releasing the hold or reaching zero restores the normal reserve-driven
 response. The continuous response in
 `apps/web/src/scene/o2-stability.ts` maps the current reserve to the shared reticle/camera sway response
-without threshold states outside explicit hold-breath or wall-brace stabilisation. Camera breathing grows smoothly
-as the reserve falls while not holding breath, including while stationary.
-Zoom uses the same base sway amplitude as hip fire; only holding breath or wall bracing reduces that shared response.
+without threshold states outside explicit crouch, hold-breath, or wall-brace stabilisation. Camera breathing grows
+smoothly as the reserve falls while not holding breath, including while stationary. Crouching applies a free 50%
+stability factor to the shared breathing response, while wall bracing and holding breath apply independent 50% factors.
+Zoom uses the same base sway amplitude as hip fire; crouch, holding breath, and wall bracing are the states that reduce
+that shared response.
 The reserve-driven breathing destabilisation now uses one shared 2× fatigue emphasis for the reticle and camera-damper
 response; the held weapon consumes that same perspective output, while shot recoil recovery remains a separate central
 spring response.
@@ -473,9 +638,12 @@ Crouch button's pressed state aligned with the scene controller.
 When the first-person capsule is touching the side of any active physics box,
 zoom receives reticle, weapon, and stationary-breathing
 stabilisation, but leaves one half of the normal
-reserve-driven instability so the pose is not perfectly static. The wall brace
-does not change or drain the player's O₂ state. The contact probe uses the controller capsule gap, supports
-yaw-rotated boxes, ignores floors and sloped surfaces, and publishes the
+reserve-driven instability so the pose is not perfectly static. Cover has a 2 m area of effect measured from the
+capsule surface: toggling zoom while a valid wall is within that range engages cover and moves the capsule toward
+the wall at sprint speed until the normal controller gap is reached. The wall brace does not change or drain the
+player's O₂ state. Crouch and wall bracing stack multiplicatively, leaving one quarter of normal sway and the
+reserve-driven accuracy penalty before any held-breath factor. The contact probe uses the controller capsule gap,
+supports yaw-rotated boxes, ignores floors and sloped surfaces, selects the nearest valid wall, and publishes the
 data-player-wall-contact and data-player-wall-braced attributes for local diagnostics.
 Focused coverage is in
 `apps/web/src/scene/player-vitals.test.ts`, `apps/web/src/scene/o2-stability.test.ts`,
@@ -556,6 +724,22 @@ recharge status, and the scene renderer carries rounded `data-player-health` and
 values for local smoke inspection. This is a visual-table prototype surface, not yet authoritative
 match combat or persistence state.
 
+All scene damage now goes through `apps/web/src/scene/combat-damage.ts`. The router registers the local player
+as `player` and the simulant as `bot:simulant`, applies the shared shield-before-health reducer, and invokes the
+registered actor's damage and death callbacks. Weapon rays, melee rays, wall impacts, and landing O₂ shortfall
+damage use this same route. A future bot must register its actor ID and vitals callbacks before its render marker
+can receive damage; an unregistered target fails loudly rather than losing a hit silently.
+
+### Unshielded headshots
+
+The scene uses a strict per-bullet threshold of greater than 25 damage for headshot kills. A projectile must hit the
+simulant's marked head mesh while its shield is already at zero; the damage route then applies lethal damage to the
+remaining health pool. A 25-damage bullet is not eligible. Shielded head hits remain ordinary shield-before-health
+damage, and the shotgun is evaluated per pellet, so its 16-damage pellets do not qualify on their own. When the shield
+reserve is empty, its transparent flare stays visible as a presentation pulse but no longer blocks the weapon ray from
+reaching the head mesh. With the fixed roster, pistol (28), scoped carbine (36), and sniper (100) can qualify; machine
+gun (12), shotgun pellets (16), and submachine gun (9) cannot.
+
 ## Fixed six-weapon combat prototype
 
 The 8 August checkpoint keeps the visual-table combat presentation but removes generated weapon profiles and per-instance
@@ -565,19 +749,61 @@ changes a weapon's definition. The loadout always exposes six inventory slots, w
 weapon and `0` holstering. Walk-over pickup and `E` equip the nearest fixed weapon.
 
 The combat runtime keeps the visual-table weapon meshes, shared first-person camera/viewmodel/reticule path, recoil,
-tracers, impacts, bullet holes, reload poses, sniper scope, and spatial Web Audio. It uses the restrained visual-table
-gray muzzle plume with one-to-four damage-scaled puffs, world-space velocity inheritance, and pooled five-second
-diffusion, plus separate thermal wisps driven by Celsius barrel glow. Barrels use the visual-table temperature
-thresholds and exponential cooling curve. Shot audio includes muzzle, crack, tail, and listener-relative bullet pass-by
-layers.
+tracers, impacts, bullet holes, reload poses, and a short insertion impulse at each committed shell, bullet, or magazine,
+sniper scope, and spatial Web Audio. Each round emits exactly two gray
+gunshot-gas sprites. The previous round's gunshot gas is cleared when the next round fires; each new puff starts at
+zero scale, follows a logarithmic expansion and inverse logarithmic opacity curve, and is gone after one second.
+Separate thermal wisps remain driven by Celsius barrel glow and use their slower pooled diffusion. Barrels use the
+visual-table temperature thresholds and exponential cooling curve. Shot audio includes muzzle, crack, tail, and
+listener-relative bullet pass-by layers.
+
+### Parametric bullet impact audio
+
+Bullet impacts use a separate deterministic profile rather than reusing the muzzle sound. The profile takes the
+projectile's damage as bullet strength and the acute angle between its path and the struck surface normal. A 0-radian
+hit is head-on; π/2 is a grazing strike. Strong square hits produce a lower, louder, longer compressed noise body and
+resonance. As the angle becomes more shallow, the body becomes brighter and shorter while a brief high-frequency
+band-pass scrape grows in, so grazing strikes have a distinct material response.
+
+The runtime transforms the hit triangle normal through the struck object's world matrix, including an instanced-mesh
+matrix when present. It uses the same resolved normal for the bullet-hole decal and the angle calculation. Each hit
+schedules the three procedural layers at the impact point with the existing sound-speed delay, HRTF panner, bounded
+proximity gain, seeded noise buffer, and fail-soft Web Audio setup. The pure resolver and acute-angle conversion are
+covered in `apps/web/src/scene/weapons.test.ts`; listening in the connected browser is still a separate acceptance
+step.
+
+### Melee audio
+
+Picked-up ragdoll objects use the same procedural noise buffer, HRTF panner, proximity envelope, and sound-speed delay
+as guns. `resolveMeleeAudioProfile` maps the object's measured volume, longest-axis reach, swing speed, and impact
+damage into two layers:
+
+- A band-pass white-noise woosh plus a quiet sine tone spans the complete resolved swing duration. Both layers use a
+  symmetric exponential volume curve: they start quiet, peak at the swing apex (50%), and return to the same quiet
+  level at the end. Smaller, faster objects are brighter; long-reach objects carry a little more air.
+- A compressed, lightly saturated low-pass noise body plus a decaying triangle resonance starts at the resolved hit
+  point. Larger and higher-damage objects are lower, louder, and longer.
+
+The impact layer is emitted only when the swing ray resolves a world hit; a miss has no bang. The Web Audio path remains
+optional and fails soft when a browser blocks or lacks `AudioContext`. The pure profile is covered by
+`apps/web/src/scene/melee.test.ts`; actual listening in the connected browser is still a separate acceptance check.
+
+## Recoverable melee drops
+
+Dropping or holstering a held melee prop with `Q` returns it to the world as a dynamic ragdoll and keeps that same
+instance available for pickup. The pickup list follows the live instance transform, so re-equipping a prop after it
+moves preserves its current position and removes only its dynamic body. Every streamed prop is also a valid melee
+weapon after it is toppled by an ordinary melee hit or player collision: the live ragdoll remains in the nearby-pickup
+list and `E` can recover it while it is still settling.
 
 The scene adds a deterministic red simulant target. It spawns beyond the initial player position, charges until close,
-damages the player's shield/health at contact range, accepts weapon-ray damage, hides on defeat, and respawns after a
-short delay. This target is local presentation state for gun testing; it is not authoritative game, replay, or multiplayer
-state. The parametric-guns movement, traversal, acceleration, and wall/vault physics remain the active movement path.
+damages the player's shield/health at contact range, accepts weapon- and melee-ray damage through the central combat
+router, hides on defeat, and respawns after a short delay. This target is local presentation state for gun testing; it
+is not authoritative game, replay, or multiplayer state. The parametric-guns movement, traversal, acceleration, and
+wall/vault physics remain the active movement path.
 
-The world fog pass is disabled. Existing debug preference snapshots that contain a fog value are normalized to zero and
-cannot re-enable fog.
+The authored world fog pass is disabled. Warehouse uses its own fixed map-local haze; existing debug preference snapshots
+that contain a fog value are normalized to zero and cannot tune or disable that Warehouse effect.
 
 The fixed roster is covered by `apps/web/src/scene/weapons.test.ts`, including six-key mapping, reload formulas,
 spread, pickup placement, audio profiles, Celsius cooling, and smoke-pool clearing. Browser rendering and audio acceptance
@@ -621,6 +847,13 @@ snapshot; the outer circle remains visible and the dot returns when the reload f
 aim ray or camera motion.
 The browser shell also listens for the keyboard Caps Lock modifier: the centre dot is visible only while Caps Lock is
 on, while the outer circle remains visible regardless of the lock state. Sprint and reload still hide the same dot.
+The submachine gun uses that same state for its trigger: with Caps Lock off it fires continuously at its 0.045-second
+cadence while the trigger is held; with Caps Lock on, each trigger start fires a three-round burst at the same per-round
+cadence, followed by the configured burst pause. A burst keeps the mode sampled when it starts, so changing Caps Lock
+mid-burst does not cut the burst short. The pistol uses a Glock 19-like 0.045-second cadence: with Caps Lock off it is
+fully automatic and dumps its 12-round magazine in about 0.54 seconds; with Caps Lock on, the trigger latch permits
+exactly one round per press and requires release before the next shot. Reload, weapon switching, and death clear that
+latch so the next accepted trigger input starts cleanly.
 
 Focused coverage lives in `apps/web/src/scene/weapons.test.ts`, `apps/web/src/scene/reticle-aim.test.ts`, and
 `apps/web/src/scene/sniper-scope.test.ts`.
@@ -641,18 +874,27 @@ camera work. Browser pickup and firing interaction remains unverified; no new br
 
 ## HUD placement
 
-The visual-table overlay uses one compact top status rail for live preview state, round/seat, area, room identity, and
-the current movement/combat state. The rail is intentionally segmented so the high-value state is readable without
-turning the scene into a dashboard. Shield, health, and O₂ remain in a matching `Player systems` card below it; low
-O₂ and critical/down health use a stronger value accent, while the bars retain their existing semantic colours.
+The visual-table HUD is intentionally ultra-minimal. The previous live status rail is hidden during play, leaving the
+top bar stack and lower-right loadout as the persistent tactical readout. The intro and footer retain only concise
+control guidance when the scene is not active.
 
-The `Loadout` card keeps the active weapon and ammunition readout in the lower-right corner, including on narrow touch
-layouts. Its heading and slot treatment now match the vitals card, and reload state uses the same warm warning accent
-as the top status chip. The lower-left and centre remain available for movement controls and the scene.
+Shield, health, and O₂ now use the available horizontal space in one wide top strip, with three flat dark-grey bars
+stacked vertically in O₂, shield, then health order. The blue fill is left-anchored, so the missing portion drains from
+right to left. A bright Halo-style blue fill sits on a dark outlined track, making the missing portion clear at a glance.
+Visible labels, percentages, status prose, and the repeated `Player systems` heading are removed; the progressbar roles
+and numeric values remain available to assistive technology.
 
-When pointer lock is released, the instruction footer occupies the bottom stack above the weapon panel. The gun status
-therefore remains visible in the lower-right without covering the paused movement instructions; mobile layouts keep the
-panel above the touch controls instead.
+The lower-right `Loadout` readout keeps the active weapon/ammunition line and six number slots, but uses a wider panel so
+the inventory does not compress into a narrow column. Persistent control instructions and long melee telemetry remain
+available through the existing accessible markup but do not consume screen space during play. The lower-left and centre
+remain available for movement controls and the scene. On narrow touch layouts, the rail and wide vitals strip move
+closer to the top edge after pointer lock/control activation, while the wider loadout stays above the touch controls.
+
+The three persistent `Seat view`, `New room`, and `Overhead` buttons are removed. The intro and footer instructions are
+also reduced to short control strings so the scene starts with less tutorial copy.
+
+When pointer lock is released, the concise instruction footer occupies the bottom stack above the weapon panel; mobile
+layouts keep the panel above the touch controls instead.
 
 ## Weapon switch presentation
 
@@ -662,6 +904,10 @@ the incoming weapon at that same bottom-of-screen pose and rotates it up into th
 no weapon yet, the new weapon starts directly in the raise phase. The outgoing model remains visible until the lower
 phase finishes, and the incoming model remains visible until the raise phase settles. Fire and reload inputs are ignored
 while this short presentation transition is active; the authoritative weapon state and reticle ray do not change.
+
+If the selected weapon has an empty magazine and reserve ammunition, the runtime starts its reload as part of the equip
+operation. Switching back to a gun that was put away empty therefore raises it with a reload already in progress instead
+of leaving the player holding `0` loaded rounds. A same-weapon pickup that adds reserve ammunition applies the same rule.
 
 The number-row `0` key explicitly holsters the current weapon. It clears the active weapon and HUD ammunition while
 leaving collected weapons in the inventory, and uses the same lower transition as a weapon switch without raising a
@@ -774,7 +1020,7 @@ a hard colour band. It reaches 1.0 strength at zero reserve in scene-linear spac
 `data-o2-vision-contrast`, and `data-o2-vision-pass` on the scene container for diagnostics. The mapping lives in
 `apps/web/src/scene/o2-stability.ts`; the pass is in `apps/web/src/scene/o2-blur.ts`.
 
-## Held-breath and wall-brace stability
+## Held-breath, crouch, and wall-brace stability
 
 Holding breath keeps the O₂ reserve drain and zero-reserve release rules, but it does not let the falling reserve feed
 back into breathing sway. While the hold is active above zero O₂, reticle and weapon sway use only their baseline
@@ -782,7 +1028,9 @@ breathing response, and the camera uses the rested breathing amplitude and frequ
 factor. This prevents holding breath from causing the heavy breathing and shaking it is intended to control.
 
 Wall bracing still applies its independent 50% factor to the existing reserve-driven response. If the player leans on a
-wall while holding breath, the factors compose to 25% for reticle, weapon, and stationary camera breathing motion.
+wall while crouched, the factors compose to 25% for reticle, weapon, and stationary camera breathing motion. Holding
+breath adds another independent 50% factor, so crouch plus wall brace plus held breath leaves 12.5% of the normal
+reserve-driven instability.
 
 ## Damage-driven barrel heat
 
@@ -799,16 +1047,15 @@ and world pickup copies use the same weapon heat state.
 ## Pooled barrel smoke
 
 Each held weapon now owns a fixed pool of 192 billboard smoke sprites and one shared 64×64 procedural alpha mask.
-Every trigger pull emits a dense gray muzzle puff even when the shot misses. Puff size and count use the round's
-total damage (`damage × pellets`), so the shotgun and sniper produce much larger clouds than the machine gun. Each
-puff starts at zero opacity, follows a normalized sigmoid fade-in, then rapidly expands with an ease-out logarithmic curve
-over the first 45% of its five-second life and lingers at maximum size for the remainder. Thermal steam uses the same
-five-second lifetime. Opacity follows that expansion:
-source-sized smoke is bright, while the max-size linger is transparent. The plume inherits the nozzle's current world
-velocity, diffuses outward, then slows while rising before it is returned to the pool. Thermal wisps use the pale white
-steam color, scale with a restrained longest-barrel ramp (1× on the handgun to 1.6× on the sniper), and emit at an
-inverse rate (about 6.4 wisps/second on the handgun to 4 on the sniper). They use the same logarithmic expansion and
-inverse-opacity lifecycle as muzzle smoke, with a square-root damage response to avoid oversized shotgun/sniper steam.
+Every trigger pull emits exactly two dense gray gunshot puffs even when the shot misses. Firing another round clears
+the previous gunshot puffs immediately, so no more than two gunshot sprites are visible at once. These puffs start at
+zero scale, use a one-second lifetime, and follow a logarithmic expansion from zero to full scale while their opacity
+follows the inverse curve from `1` to `0`. Thermal steam remains a separate five-second effect: it uses the pale white
+steam color, scales with a restrained longest-barrel ramp (1× on the handgun to 1.6× on the sniper), and emits at an
+inverse rate (about 6.4 wisps/second on the handgun to 4 on the sniper). Thermal wisps use the existing logarithmic
+expansion and inverse-opacity lifecycle, with a square-root damage response to avoid oversized shotgun/sniper steam.
+Both plume types inherit the nozzle's current world velocity, diffuse outward, then slow while rising before returning
+to the pool.
 The heat ratio still eases in from 35%; wisps rise with a small deterministic curl, expand, and fade without collision or
 shadow work. The pool is attached to the scene world effects root, so smoke remains in place when the player turns,
 walks, holsters, or switches weapons.
@@ -817,6 +1064,13 @@ Smoke is a rendered world effect. The held muzzle samples the centralized camera
 particle continues in world space with depth testing and normal Bokeh participation. Smoke variation uses the
 room-seeded RNG stream `<room>|weapons|smoke|v1`, separate from shot spread. Pickup copies show barrel heat but do not
 emit smoke.
+
+## Muzzle-flash point light
+
+Each held weapon model has one local point light at its muzzle. A shot enables the light for the same 55 ms window as
+the visible muzzle flash, then eases its intensity to zero from the remaining flash timer. The light uses the weapon's
+flash colour, a 32-unit peak intensity, 7.5 m range, and inverse-square decay; it does not cast shadows. Pickup models
+do not create a muzzle-flash light.
 
 ## Agent test note layout
 
@@ -834,6 +1088,10 @@ When the reload operation and its final round-reload recenter phase finish, the 
 player who releases zoom during the reload stays unzoomed, and a player who was not zoomed before reload does not gain
 zoom automatically. The weapon snapshot stays `reloading` through the final recenter phase so the HUD and movement cap
 use the same readiness boundary.
+
+Cover follows the requested zoom input rather than the temporary unzoomed reload presentation. Reloading therefore keeps
+an engaged wall stance while the weapon cycles, and cover is cleared only when the player turns zoom off or accepts a
+jump. The next zoom-on edge is still required after that explicit exit.
 
 ## Held-weapon perspective alignment
 
@@ -926,3 +1184,138 @@ points use a saturated red layer. The initial opacity is the exact delta multipl
 (one point equals one percent opacity). Each layer fades over `0.5` seconds. Multiple rapid strikes therefore remain
 separate compositor layers and build opacity through normal sequential alpha blending. A strike that crosses the
 shield boundary creates both its blue shield layer and red health layer from their separate deltas.
+
+When a melee prop replaces an active gun, the scene remembers that held gun ID while the gun is holstered. Dropping the
+melee prop with `Q` reselects the remembered gun through the shared weapon switch transition after the drop succeeds. If
+melee was drawn while unarmed, `Q` instead cycles to the first owned gun, when one exists. Explicit `0` holstering and
+failed drops do not re-arm a gun.
+
+When melee is drawn, walking over a gun fills the inventory without drawing or switching the gun viewmodel. `E` and
+numeric gun selection remain deliberate handoff actions: the melee viewmodel is stashed first, the gun action must
+succeed, and a failed action restores melee. The pure `shouldEquipWalkOverGun` and `shouldStashMeleeForGun` guards are
+covered in the scene regression suite.
+
+## Calm melee idle reset
+
+The held melee prop has a right-ready default and alternates to the opposite ready side after each completed swing.
+When the prop is left on the left side, the runtime waits five seconds without another swing or viewmodel transition.
+Walking or running does not clear this melee-activity timer. It then uses a `0.9`-second smoothstep blend to return the
+item to the right, so locomotion can continue while the reset plays.
+The pose blend is applied to the camera-child model alongside the centralized camera-damper viewmodel offset; it does
+not create a separate camera or reticle path.
+
+## Fallen melee pickup orientation
+
+When a dropped melee prop is picked up, the first-person model preserves its source scale but ignores the transient
+ragdoll rotation from the ground. The model is rebuilt from its canonical longest-axis grip, so props that landed on
+their side return upright while the shared camera-damper swing path controls their subsequent movement.
+
+## Momentum-scaled melee damage
+
+Melee hits against player-like combat actors use the pure `resolveMeleeDamageWithMomentum` resolver before entering the
+shared shield-before-health router. The resolver projects relative velocity onto the attack ray. Player movement toward
+the target increases the closing speed, and a target moving toward the player increases it again; a target moving away in
+the same direction contributes no positive closing load. Falling attacks add a separate bonus from downward velocity only
+while airborne. The multiplier uses full sprint and full jump speeds as references, stays deterministic, and is capped at
+`2.5×`.
+
+The local simulant supplies its frame velocity to the resolver. A melee swing still spends O₂ from the base object damage,
+and the resolved stopping-power value now drives both player-like knockback and non-actor ragdoll launch force. The HUD's
+existing last-hit damage value records the momentum-scaled amount after a player-like target is struck.
+
+## Gun melee attack
+
+Every fixed gun can strike at close range with `F` while it is equipped. The attack uses the same shared melee resolver as
+the warehouse props: its base damage comes from the gun's physical occupied volume, its reach comes from the longest gun
+axis, and its swing speed is inversely related to volume. Larger guns therefore reach farther and hit harder but take longer
+to swing. The six definitions carry explicit size proxies so this remains deterministic and reproducible for every room seed.
+
+The strike is resolved on the live aim ray at the size-derived reach. It does not consume ammunition. A successful actor hit
+then applies the existing shield-before-health route, including the bounded sprint/closing/falling momentum multiplier,
+stopping power, shield spark, and unshielded blood response. World props use the same melee ragdoll impulse seam as a picked-up
+object. `F` also swings a picked-up melee object; primary-click firing remains the gun trigger. Starting either melee path
+clears persistent zoom through the shared aiming state. If a melee-only prop is drawn and the player is zoomed, primary click
+throws the prop instead of swinging it. Its launch speed is volume-weighted as an inverse square-root mass proxy, bounded
+between `12 m/s` and `34 m/s`, and includes the player's current velocity. The thrown prop remains a recoverable ragdoll;
+damage from a fast thrown prop is intentionally deferred to a later pass.
+
+## Melee stopping power
+
+Every melee pickup derives a bounded stopping-power value from its resolved damage: `0.12 m/s` per damage point, capped
+at `18 m/s`. The value is presented with the pickup and active melee HUD rows. A successful simulant hit applies this
+impulse through the same stagger and knockback path used by projectile stopping power, using momentum-scaled damage so
+sprinting, opposing motion, and falling strikes carry more force. World ragdolls receive the pickup's stopping-power
+impulse as their minimum horizontal launch velocity, while callers without the stat retain the legacy swing-speed
+fallback.
+
+## Melee hit telemetry
+
+With the explicit `?debug=1` panel enabled, `Melee telemetry` shows `Previous hit`, `Swings / hits`, and `Current base`,
+plus the selected gun's volume/reach and size-derived damage, swing speed, and stopping power.
+`Previous hit` is the last resolved damage value after the shield-before-health combat route; player-like actor hits also
+include the momentum multiplier. It stays visible while the next swing is charging or misses. `Current base` is the
+selected prop's unscaled damage, which lets a tester compare the two values while tuning sprint, opposing-target, and
+falling-hit behaviour. The telemetry is local debug state only and does not change the authoritative game engine or
+expose hidden information.
+
+## Warehouse weapon layout
+
+Warehouse is a rectangular industrial platform. Its weapon pickups use a deterministic perimeter layout rather than the
+normal map-wide sampler: one pistol, shotgun, machine gun, sniper, carbine, and submachine gun are placed at equal
+intervals around the inset platform edge, with seed-derived pickup rotations. The pistol remains the starter pickup.
+Debugging 01 continues to use the existing dense, obstacle-aware procedural pickup generation.
+
+## Simulant blood impacts
+
+Projectile and melee impacts on the local simulant use a separate presentation path from world-surface impacts. The hit
+callbacks classify the simulant and pass its current frame velocity to the weapon runtime, so the moving actor never
+receives a persistent world bullet-hole decal. Instead, the runtime emits a short-lived, depth-tested blood cloud whose
+scale is derived from the resolved hit damage (light rounds or small melee props stay compact; heavier hits expand the
+burst). Each projectile or melee contact emits exactly one dark-red sphere with low opacity. A hit that is absorbed by
+the simulant's shield emits a short cyan-white shield spark at the impact point. Blood is gated by the post-hit vitals:
+shielded hits emit no blood and no actor bullet-hole, while a hit that deals damage with the victim's shield at zero
+emits the sphere. A shield-breaking overflow hit can show both the shield spark and the blood response.
+
+The simulant also receives a transparent shader shell for the shield flare. Its pulse is brightest at the start of the
+shield-hit window, shifts toward warm white-orange at peak intensity, and uses a vertical `smoothstep` mask that reaches
+zero opacity at the bottom edge of the shield volume.
+
+Each actor hit, including a melee swing, also searches for a nearby static surface from the hit point. It prefers the
+target's movement direction, then projectile or melee travel and vertical directions, and projects a seeded blood stain
+onto the first floor or wall it finds.
+The stain is one low-opacity dark-red splat texture and becomes an elongated smear along the target's velocity once the
+running-speed threshold is crossed. Stains are bounded and fade after their presentation lifetime. Ordinary wall, floor,
+and prop hits continue to use bullet-hole decals. Blood cloud and stain objects remain visible in the clean sniper-scope
+world feed.
+
+## Hip-fire O₂ cost
+
+Weapon shots use the current first-person zoom state when applying the discrete projectile fatigue charge. Shooting from
+the hip costs zero O₂, while shooting while zoomed keeps the existing charge of one quarter of total projectile damage.
+The shot still fires when O₂ is empty, and movement, breath holding, and other exertion costs are unchanged.
+
+## Warehouse lighting and bullet raycasts
+
+The Warehouse industrial lighting is presentation-only. Its scene group is marked `weaponRaycastIgnore`, and the
+hitscan weapon path uses `isWeaponRaycastSurface` to skip that group and all of its descendants. This keeps the central
+spotlight shaft and floor pool, high-bay fixtures, and corner Christmas-light decorations from stopping bullets while
+leaving structural warehouse walls and crates available as projectile surfaces.
+
+## Death ragdolls
+
+Death animation is a visual layer over the existing combat state. `apps/web/src/scene/ragdoll.ts` owns the deterministic
+launch, gravity, drag, bounce, tumble, and joint-pose calculations. The scene applies that state to the robot's named
+body parts and to a temporary player death body. A lethal hit's direction and stopping power seed the robot launch; a
+player death uses the current facing and movement direction. No hidden game state or rules are added.
+
+The robot remains visible while it ragdolls and is ignored by hitscan rays until its normal respawn. The player body is
+shown briefly in front of the camera while the shared camera damper performs the first-person fall/tumble; the existing
+black fade then respawns the player and clears the body. This is a prototype presentation effect, not a networked or
+authoritative physics body.
+
+## Gun melee during reload
+
+Pressing `F` for gun melee interrupts an active reload and starts the normal shared melee swing immediately. This works
+for both clip and round reloads. Any rounds already inserted by a round reload remain loaded; the unfinished reload timer,
+return pose, and reload HUD state are discarded. The melee strike still uses the selected gun's size-derived reach,
+damage, stopping power, and O₂ cost, and it does not consume ammunition.

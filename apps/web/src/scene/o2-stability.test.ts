@@ -6,6 +6,7 @@ import {
   O2_SCREEN_CONTRAST_MAX_MULTIPLIER,
   O2_SCREEN_VIGNETTE_MAX_STRENGTH,
   O2_BRACED_STABILITY_FACTOR,
+  O2_CROUCH_STABILITY_FACTOR,
   O2_WALL_BRACE_STABILITY_FACTOR,
   resolveO2Stability,
 } from "./o2-stability.js";
@@ -141,5 +142,46 @@ describe("continuous O₂ stability response", () => {
     );
     expect(braced.accuracyMultiplier).toBeLessThan(normal.accuracyMultiplier);
     expect(braced.accuracyMultiplier).toBeGreaterThanOrEqual(1);
+  });
+
+  it("leaves one half of aim instability while crouched", () => {
+    const crouched = resolveO2Stability({
+      oxygenRatio: 0,
+      aimingDownSights: true,
+      crouching: true,
+    });
+    const normal = resolveO2Stability({ oxygenRatio: 0, aimingDownSights: true });
+
+    expect(crouched.reticleSwayRadians / normal.reticleSwayRadians).toBeCloseTo(
+      O2_CROUCH_STABILITY_FACTOR,
+      8,
+    );
+    expect(crouched.weaponSwayRadians / normal.weaponSwayRadians).toBeCloseTo(
+      O2_CROUCH_STABILITY_FACTOR,
+      8,
+    );
+    expect(crouched.accuracyMultiplier - 1).toBeCloseTo(
+      (normal.accuracyMultiplier - 1) * O2_CROUCH_STABILITY_FACTOR,
+      8,
+    );
+    expect(crouched.accuracyMultiplier).toBeLessThan(normal.accuracyMultiplier);
+  });
+
+  it("stacks crouch and wall bracing into quarter instability", () => {
+    const combined = resolveO2Stability({
+      oxygenRatio: 0,
+      aimingDownSights: true,
+      crouching: true,
+      stabilizedByWall: true,
+    });
+    const normal = resolveO2Stability({ oxygenRatio: 0, aimingDownSights: true });
+    const quarterFactor = O2_CROUCH_STABILITY_FACTOR * O2_WALL_BRACE_STABILITY_FACTOR;
+
+    expect(combined.reticleSwayRadians / normal.reticleSwayRadians).toBeCloseTo(quarterFactor, 8);
+    expect(combined.weaponSwayRadians / normal.weaponSwayRadians).toBeCloseTo(quarterFactor, 8);
+    expect(combined.accuracyMultiplier - 1).toBeCloseTo(
+      (normal.accuracyMultiplier - 1) * quarterFactor,
+      8,
+    );
   });
 });

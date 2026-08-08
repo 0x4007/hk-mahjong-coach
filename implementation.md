@@ -1,5 +1,212 @@
 # Implementation status
 
+## 2026-08-08 — Zoomed melee throws
+
+- Starting a gun or held-prop melee action now clears both persistent zoom inputs through the shared aiming path, so the
+  camera, reticule, and viewmodel leave zoom together.
+- A primary click while a melee-only prop is drawn and zoom is active throws it instead of swinging. Launch speed uses the
+  same volume-as-weight proxy as melee damage: smaller props reach up to `34 m/s`, larger props remain useful at a bounded
+  `12 m/s` minimum, and the current player velocity is preserved.
+- The throw currently launches the recoverable ragdoll only; damage from a high-speed thrown prop is intentionally deferred.
+- Validation: strict typecheck, focused melee/weapon lint, web production build, and HMR request pass. The next server-owned
+  test-bus snapshot is still required for this latest dirty fingerprint.
+
+## 2026-08-08 — Size-based melee attack for every gun
+
+- Added an `F` key melee action for every fixed gun. The attack reuses the shared melee swing pose, audio, O₂ cost, raycast,
+  shield/blood response, momentum damage, and ragdoll stopping-power paths used by picked-up melee objects.
+- Added physical volume and longest-axis reach values to each gun definition. The shared resolver therefore makes a larger
+  gun swing more slowly, reach farther, and deal more base damage; sprinting, opposing motion, and falling still apply the
+  existing bounded momentum multiplier.
+- Updated the loadout HUD with the `F melee` control and the active gun's size-derived reach, volume, damage, swing speed,
+  and O₂ cost. Focused weapon coverage locks the size-to-damage/speed relationship.
+- Validation: strict typecheck passes. The repository test bus, production build, lint, HMR, and rendered browser acceptance
+  remain to be checked on this dirty checkpoint state.
+
+## 2026-08-08 — Opaque-blinking Warehouse rack indicators
+
+- Replaced the tiny single-face pixel planes with eight boxed status bars around all four vertical faces of each rack.
+- Split the bars into one steady and three room-seeded blink groups. Each group has an opaque base plus one shared additive
+  alpha glow overlay; all eight bar meshes are fog-exempt so the black Warehouse haze cannot erase them.
+- The map regression locks the four-sided bar layout, three opaque blink meshes, four glow overlays, fog exemption, and
+  deterministic grouping.
+
+## 2026-08-08 — Warehouse aisle fog
+
+- Added a warehouse-only linear fog pass using a dark blue-grey haze (`near = 10 m`, `far = 92 m`) so long aisles fade
+  into the black data-center background while nearby crates, LEDs, and the central spotlight stay readable.
+- The legacy debug fog preference remains normalized to zero; scene initialization now reapplies the fixed warehouse haze
+  after that compatibility path, and the authored penthouse remains fog-free.
+- Added map-catalog coverage for the warehouse fog type and parameters. Rendered browser acceptance still requires a
+  connected Vite browser; none is available in this worktree.
+
+## 2026-08-08 — Baked central Warehouse floor pool
+
+- Added `warehouse-floor-area-bake-v1-center`, a deterministic floor lightmap containing only a subdued warm pool around
+  the map centre. The static platform now uses a lightmapped `MeshBasicMaterial`, world-aligned second UV channels, and
+  no dynamic shadow participation.
+- Set the platform diffuse base to exact black (`floorColor: "black"`); the lightmap remains available for the baked-floor
+  contract but cannot lift the black base. The separate yellow/red emissive markers and spotlight pool remain visible.
+- The central spotlight remains for crates and other dynamic geometry; the floor no longer evaluates that light per
+  fragment. The map resource disposes the new floor texture alongside the four wall textures.
+- Updated the Warehouse regression for the fifth lightmap and baked platform metadata. Server-owned bus run
+  `1786190887339-42883-e07a2107` passes all 553 assertions; the smoke check reports a centre red value of 10, a zero
+  corner value, and one runtime spotlight. HMR was requested, but no connected checkpoint browser is available for
+  rendered acceptance.
+
+## 2026-08-08 — Dim lower-band Warehouse wall bake
+
+- Retuned `warehouse-wall-area-bake-v2-dim-bottom` so the wall lightmaps fade from a dim floor glow and emergency halo to
+  exact black at 4.25 m. The wall tops and top faces therefore disappear into the black warehouse background.
+- Reduced the warm centre and yellow spill contributions; emergency fixtures remain visible as emissive meshes with only a
+  soft baked red tint on the nearby lower wall.
+- Updated the Warehouse regression for the new bake generation. Server-owned bus run
+  `1786190287312-42883-205f2208` passes all 553 assertions; the smoke check reports an all-black upper half and one
+  central spotlight. HMR was requested, but no connected checkpoint browser is available for rendered acceptance.
+
+## 2026-08-08 — Warehouse rack pixel LEDs
+
+- Replaced each Warehouse rack's five front status bars with an 8-by-7 grid of 0.04 m square emissive pixels. The grid
+  keeps deterministic spacing, steady/blinking groups, and the presentation-only raycast contract, so rack faces read as
+  dense server indicators instead of flat light rows.
+- Randomized each pixel's steady/blinking membership and phase-group assignment from a room-seed-derived RNG. Reopening
+  the same seed reproduces the same pattern, while different seeds no longer produce a fixed checkerboard.
+- Added a map-catalog regression for the pixel-grid metadata, full per-rack pixel count, and LED geometry dimensions. The server-owned bus and
+  visible browser/HMR checks remain separate acceptance steps.
+
+## 2026-08-08 — Dark-room accommodation pacing
+
+- Focus accommodation now receives the live pupil diameter. The reference 4 mm pupil keeps the existing near/far damping,
+  while the fully dilated 6.5 mm Warehouse pupil reduces both damping values by 20%, extending focus acquisition to about
+  1.1 seconds near and 0.8 seconds far. This is documented as a modest low-contrast/aberration approximation; it does not
+  alter the hyperfocal-distance or Bokeh formulas.
+- Added a pure regression for the dark-adapted slowdown. Browser/HMR acceptance remains separate from the unit-bus result.
+
+## 2026-08-08 — Baked Warehouse wall area lighting
+
+- Added a deterministic `warehouse-wall-area-bake-v1` lightmap for each of the four perimeter walls. The generated
+  `DataTexture` stores warm centre illumination, yellow perimeter spill, and a soft red emergency tint without creating
+  any extra runtime light.
+- Each wall now has a dedicated second UV set (`uv1`, with an explicit `uv2` alias), a `MeshBasicMaterial` lightmap, and
+  `dynamicLightingDisabled` metadata. Walls do not cast or receive dynamic shadows, so the baked contribution replaces
+  their per-fragment material lighting and shadow-receiver work while crates retain the real central spotlight.
+- The four textures are returned through the map resource texture list for disposal. Map-catalog coverage checks the
+  deterministic texture names/dimensions, UV channels, baked material metadata, and unchanged zero
+  `RectAreaLight`/`PointLight` counts. The server-owned bus run `1786189687522-42883-55d5eee4` passes all 553 assertions;
+  strict typecheck, focused ESLint, Prettier, the web production build, and diff checks pass. HMR was requested with no
+  connected checkpoint browser available, so rendered visual acceptance remains pending.
+
+## 2026-08-08 — Yellow perimeter LED line
+
+- Replaced the multicolour corner-only floor LEDs with one deterministic yellow rectangular LED line around the full
+  warehouse perimeter. The line uses one shared `InstancedMesh`, stays at floor height, and adds no runtime light.
+- The perimeter path is inset from the four walls, includes all four corners, and spans the complete north, east, south,
+  and west edges with yellow-only `0xffd42e` emissive material.
+- Updated the map-catalog regression for the yellow material, deterministic edge extents, and greater-than-100 LED roster.
+- The server-owned bus run `1786188187633-42883-ec845df9` passes all five map-catalog assertions; its two unrelated
+  failures are the core-engine property timeout and dirty-lane ragdoll test. Focused ESLint, Prettier, and diff checks pass.
+  The web build and strict typecheck remain blocked by unrelated duplicate ragdoll declarations in `mahjong-table.ts`.
+  HMR was requested; no browser session was opened.
+
+## 2026-08-08 — Warehouse dark-room eye adaptation
+
+- Kept the warehouse's display-exposure estimate separate from the eye-adaptation estimate. Its isolated pools and black
+  background now drive the virtual pupil to the dark-room ceiling (6.5 mm) even when auto exposure is compensating for
+  the scene, so close focus uses the larger aperture and stronger depth-of-field blur expected in low light.
+- Added a pure regression for the warehouse adaptation split. No browser session was opened; HMR remains the next visible
+  check while a connected development server is available.
+
+## 2026-08-08 — Warehouse floor LEDs without runtime area lights
+
+- Removed the four warehouse `RectAreaLight` corner probes and all sixteen emergency `PointLight` objects. The central
+  unshadowed spotlight remains the single real warehouse light, so the visible lighting effect no longer allocates the
+  removed runtime light resources.
+- Replaced the 64 hanging Christmas spheres with shared flat rectangular emissive LEDs at floor height in the same four
+  corner runs. The twelve center-lane emergency markers are also flat red floor rectangles, preserving their deterministic
+  lane positions and visible guide role without point lights.
+- Updated the map-catalog regression to require zero warehouse point or area lights and to lock the floor-level rectangular
+  LED geometry. The server-owned bus run `1786187587467-42883-3149cff4` passes all five Warehouse map assertions;
+  its aggregate result is 547/548 because the unrelated core-engine property test failed. Strict typecheck, focused ESLint,
+  Prettier, `git diff --check`, and the production web build pass. HMR was requested; no browser session was opened.
+
+## 2026-08-08 — Strong melee stopping power
+
+- Added a deterministic melee stopping-power stat derived from resolved prop damage (`0.12 m/s` per damage point,
+  capped at `18 m/s`). The stat travels with every melee pickup and is shown beside the melee damage in the HUD/debug
+  telemetry.
+- Player-like simulant contacts now apply that stronger impulse through the existing stagger/knockback seam, including
+  momentum-scaled hits. Environmental ragdolls use the same value when available while preserving the old swing-speed
+  fallback for direct world tests and callers.
+- Added pure stopping-power coverage and a Warehouse ragdoll regression that checks the resolved horizontal impulse.
+- Validation: the server-owned bus run `1786187587467-42883-3149cff4` passes all melee and Warehouse assertions and
+  547/548 assertions overall; the one failure is the unrelated `packages/test-fixtures` core-engine property test.
+  Strict typecheck, targeted ESLint, Prettier, `git diff --check`, and the production build pass. The Vite HMR request
+  was accepted with a stopping-power verification note; no connected browser is available for rendered acceptance.
+
+## 2026-08-08 — Warehouse center-lane emergency markers
+
+- Added twelve deterministic, low-level red point-light markers along the two main center lanes (`x = -12` and `x = 12`),
+  with six lights per lane at regular `z` intervals. Each marker uses a tiny emissive lens, short falloff, and
+  `castShadow = false`, so the lane reads as an emergency guide without adding shadow-map work.
+- Added map-catalog regressions for the `lane-emergency-lights-v1` group, exact marker positions, color, count, and
+  no-shadow contract. The server-owned bus run `1786186687595-42883-e9d4b3b6` passed all five map-catalog tests;
+  its aggregate snapshot was 546/547 because the unrelated core-engine property assertion failed. The web production
+  build, focused ESLint, Prettier, diff checks, and strict typecheck pass. HMR was requested for the combined Warehouse
+  emergency-light and unshadowed-spotlight change; no connected-browser visual acceptance is claimed.
+
+## 2026-08-08 — Route unshielded melee hits through blood effects
+
+- Melee combat now sends the resolved impact point, direction, damage, and post-hit shield result
+  through the existing weapon presentation runtime. Hits on the local simulant with no shield emit the
+  same dark-red cloud and nearby-surface stain as projectile hits; shielded or non-damaging contacts do
+  not emit blood, while shield absorption still emits the cyan shield spark.
+- Added the melee impact point to `MeleeHitContext` so the visual effect is anchored to the actual swing
+  contact rather than a guessed camera position. The shared shield-before-health reducer remains the
+  authority for the blood gate.
+- Validation: strict typecheck, web production build, targeted ESLint for `melee.ts`, Prettier, and
+  `git diff --check` pass. The latest server-owned bus confirms the melee, weapon, and table scene
+  suites pass; its remaining failures are unrelated dirty-lane core-engine and Warehouse map-catalog
+  assertions. HMR was requested, but no connected browser was available for rendered acceptance.
+
+## 2026-08-08 — Warehouse unshadowed lighting and emergency fixtures
+
+- Removed the Warehouse central spotlight shadow-map configuration. The spotlight, visible cone, and floor pool remain,
+  but every Warehouse light now has `castShadow = false`, so the map no longer renders a raster shadow pass.
+- Added four low-intensity red wall-mounted emergency fixtures at the north, east, south, and west walls. Each fixture
+  has an emissive red lens and one short-range unshadowed point light; the generation marker is `emergency-lights-v1`.
+- Updated the map-catalog regression to lock the no-shadow lighting contract and the four emergency-light roster.
+- Validation: server-owned bus run `1786186687595-42883-e9d4b3b6` passes the full Warehouse map suite, including the
+  no-shadow spotlight and emergency-light assertions. The snapshot passes 546/547 assertions; its only failure is the
+  unrelated dirty-lane `packages/test-fixtures` core-engine property test. Strict typecheck, focused ESLint, Prettier,
+  `git diff --check`, and the production web build pass. No browser or HMR acceptance is claimed.
+
+## 2026-08-08 — Warehouse Christmas corner lighting
+
+- Added deterministic Christmas-light garlands to all four warehouse ceiling corners. Each corner has two sagging
+  cable runs along the adjacent walls, with 64 colored bulbs using shared geometry/material resources.
+- Added four unshadowed `RectAreaLight` probes and subtle glow panels aimed into the corners. They provide a broad fake
+  warm fill without adding shadow-map renders; all Warehouse lights remain unshadowed.
+- Added map-catalog regressions for the four corner probes, `christmas-corners-v1` generation marker, eight cable runs,
+  and the complete 64-bulb roster. The server-owned bus run `1786185788706-42883-0d22db80` passed all five map-catalog
+  tests, including the corner-light assertions; its aggregate snapshot was 535/541 because six unrelated analysis,
+  core-engine, and simulation assertions failed. Strict typecheck, focused ESLint, Prettier, diff check, and the web
+  production build pass. HMR was requested with a Christmas-light verification note; no connected-browser visual
+  acceptance is claimed.
+
+## 2026-08-08 — Warehouse melee tool roster
+
+- Replaced the warehouse's generic bat, shovel, and steel-bar pickups with a steel pipe, fire extinguisher, pipe wrench,
+  screwdriver, fireman axe, and box cutter alongside the existing crowbar and hammer.
+- Replaced the shared rounded stick mesh with eight deterministic procedural silhouettes. Tool geometry is selected by the
+  spawn kind, reused for the held viewmodel, and measured for the matching physics half-extents.
+- Kept the eight deterministic perimeter spawn positions and the shared melee pickup, ragdoll, drop, and hit runtime;
+  only the warehouse prop identities, scales, and colors changed.
+- Added a regression that locks the warehouse display roster to these eight context-appropriate tools.
+- Validation: the server-owned bus run `1786189387410-42883-9e721863` passes 553/553 assertions, including the new
+  roster and warehouse map tests. Strict typecheck, the production web build, targeted ESLint, Prettier, `git diff
+--check`, and the explicit Vite HMR request pass. Full repository lint remains red on the pre-existing dirty
+  checkpoint lane; no connected browser was available for rendered acceptance.
+
 ## Canonical state
 
 - Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
@@ -8,6 +215,73 @@
 - Reconciliation base: `9e52fd01e76ead42dae3ddea102a307a2e4b121e`.
 - Implementation lane: one writer in this checkpoint worktree. The pre-existing `main`, `parametric-guns`,
   `visual-table`, and other worktrees remain preserved and are not reset or cleaned.
+
+## 2026-08-08 — Directional wall cover
+
+- Cover eligibility now uses a horizontal 90° cone centered on the selected wall face. The player's view must point
+  toward the wall within 45°; a parallel view or a back-to-wall view cannot arm cover.
+- Facing-cone filtering happens before nearest-wall selection, so an invalid nearer wall cannot hide a valid cover wall
+  ahead. An active stance clears before movement projection when the player turns outside its cone, removing the snap and
+  wall-tangent stick on that frame.
+- Physical wall contact remains available for collision, diagnostics, and the existing independent wall-braced aim;
+  side or rear contact alone cannot select a cover source or apply cover sticking.
+- Added pure wall-contact regressions for front-facing, boundary, parallel, and rear-facing directions.
+- Validation: the server-owned bus run `1786183087284-42883-7cc9abb1` passed both wall-contact and scene suites
+  (536/537 assertions overall; the one failure is an unrelated core-engine property timeout). Strict typecheck,
+  web production build, targeted wall-contact ESLint, Prettier, and `git diff --check` pass. The dirty scene file still
+  has unrelated repository lint diagnostics. No worktree-local Vite server or connected browser was available for HMR
+  or rendered acceptance.
+
+## 2026-08-08 — Warehouse industrial scene
+
+- Replaced the compact authored `debugging-02.json` layout with the independent
+  `apps/web/src/scene/debugging-two-map.ts` generator. It now creates a seed-derived warehouse of exact 1 m cubic
+  crates: a sparse field of roughly 700–1,200 rendered boxes in varied towers, with a clear centre aisle and cross
+  aisles. Adjacent cubes use a 0.01 m visual seam while their geometry remains exactly 1 m on every axis. The
+  generator uses one coarse static collider per stack, plus the shared platform floor, so the visible towers and
+  movement physics agree without creating one collider per rendered cube.
+- `Debugging 01` remains the penthouse document and construction path. Selecting `Warehouse` removes the legacy
+  architecture root before construction and skips the focus room, climbing gym, parametric campus, target range,
+  gateway, and streamed exploration world. The shared movement, physics, weapon, oxygen, and simulant combat runtime
+  remains active against the warehouse platform bounds.
+- Map catalog entries now identify authored versus procedural generation. The selector and `?map=debugging-02` route
+  still remount the real scene and persist the choice; no compatibility path reads the deleted compact-room asset.
+- Warehouse weapon pickups use a dedicated deterministic rectangular perimeter layout: exactly one of each fixed
+  weapon is placed at equal intervals around the inset platform edge, with seed-derived pickup rotations. Debugging 01
+  keeps the shared dense square sampler and its obstacle-aware filtering.
+- The map now has steel perimeter walls, roof trusses, columns, forklift safety lines, dark high-bay fixtures, a deterministic
+  yellow rectangular LED line around the full perimeter, four red emergency fixture meshes on the perimeter walls, and
+  twelve red floor LEDs along the two main center lanes. The black background is lit by one central unshadowed spotlight;
+  no warehouse point or area lights are allocated. The translucent shaft, floor pool, and existing ground-truth ambient-occlusion pass provide
+  the remaining beam and ray-style
+  contact cues without a shadow-map render.
+- Debugging 02 now attaches a one-chunk warehouse-only melee world. Eight deterministic aisle props (crowbar, steel pipe,
+  fire extinguisher, pipe wrench, hammer, screwdriver, fireman axe, and box cutter) use the existing pickup, equip, drop,
+  ragdoll, projectile, and melee-hit interfaces. No city ground, buildings, paths, bridges, signs, or streamed exploration
+  chunks are created.
+- Validation for this pass: server-owned bus run `1786185487263-42883-e77bb5af` passes all Warehouse map, blackout
+  lighting, spotlight shaft, no-shadow, pile, and isolated-melee regressions (540/541 aggregate); the sole failure is
+  the unrelated core-engine property assertion. Focused map/lighting ESLint, Prettier, and the production web build
+  pass. No connected-browser visual acceptance or worktree-local HMR is claimed.
+
+## 2026-08-08 — Halo 3 / ODST HUD corner layout
+
+- Reworked the live scene HUD into explicit tactical zones: the O₂/energy, shield, and health display is now three
+  full-width dark-grey stacked tracks across the top edge, in that order, with each fill left-anchored so its missing
+  portion drains from right to left. The weapon/ammunition inventory stays wider and anchored lower-right.
+- Removed visible stat labels and percentages so the bars themselves provide the glanceable detail. The session text
+  rail is hidden in the minimal mode. The surrounding UI stays flat and low-chrome, while the vitals use a deliberate
+  Halo-style blue accent, a darker outlined track, and no gradients so the missing portion remains obvious.
+- Removed the debug/mobile cascade that moved vitals to the bottom or narrowed them into a corner card. The remaining
+  tracks keep sharp square edges for a restrained Halo 3 / ODST-inspired visor treatment.
+- The map and video-quality selectors remain the only normal-mode controls in the upper-left; the development panel is
+  offset below them when `?debug=1` so it cannot displace the player HUD.
+- Validation: targeted Prettier, `git diff --check`, strict typecheck, and the production web build pass. Full repository
+  ESLint remains red with dirty-lane diagnostics outside this focused HUD cleanup. The
+  server-owned test-bus snapshot `1786176488517-42883-d452e4ef` records 499/515 passing assertions; its 16 failures
+  are unrelated analysis, bot, core, persistence, simulation, and physics assertions, and the run started before this
+  CSS edit. No second Vitest run was started. Repository lint was not rerun to completion after the final visual-only
+  edits. No worktree-local Vite server or browser session was available, so HMR/rendered acceptance is not claimed.
 
 ## 2026-08-08 — 8 August combat checkpoint
 
@@ -26,8 +300,8 @@
   close-range damage, and respawns after defeat. This is a local presentation target, not authoritative game state.
 - Player death starts the visual-table camera tumble, black death fade, seeded respawn, and input/fire reset. The
   `?debug=1` panel includes a `Suicide` control for testing this loop.
-- Scene fog is disabled in the renderer and the legacy persisted fog preference is forced to zero, so saved debug
-  settings cannot restore the effect.
+- The authored scene remains fog-free while Warehouse applies its fixed dark-room haze. The legacy persisted fog
+  preference is forced to zero, so saved debug settings cannot tune or disable the Warehouse effect.
 - The latest server-owned test-bus run `1786166626340-3683-ed9e9389` recorded 491/495 passing assertions. The four
   failures are the pre-existing `packages/test-fixtures` core-engine and seeded-simulation property cases; all weapon
   and scene suites passed, including the death-tumble regression. The restrained visual-table-style gray gunshot smoke
@@ -36,9 +310,151 @@
   extension timed out while creating a test tab, so rendered weapon, smoke, and audio acceptance still needs a live
   browser tab.
 
+## 2026-08-08 — Glock-style pistol trigger cadence
+
+- The fixed pistol now uses a 45 ms fire interval. Holding the trigger with Caps Lock off is fully automatic and empties
+  its 12-round magazine in about 0.54 seconds.
+- Caps Lock on changes only the pistol trigger profile: it still has a one-round burst, but the runtime latches that
+  profile until `setFireHeld(false)`. The latch also clears on reload, weapon switch, and death. The submachine gun's
+  existing automatic/triple-shot behavior remains unchanged.
+- Added resolver coverage for both pistol modes and extended the shared trigger-profile assertions with the explicit
+  `requiresTriggerRelease` field. Browser firing interaction remains unverified in this worktree because no second
+  browser session is allowed.
+
+## 2026-08-08 — Reload insertion impulse restored
+
+- Reload presentation now restarts its short upward load impulse at the exact
+  ammo-commit boundary. The lead-in still begins just before the interval ends,
+  while the committed shell, bullet, or magazine gets a guaranteed visible kick
+  even when one frame crosses the timer boundary.
+- Round reloads preserve the pulse for the final recenter phase; interrupted
+  reloads cancel only an armed, not-yet-committed insertion. The existing pure
+  pose regressions continue to cover clip and round insertion feedback.
+
+## 2026-08-08 — Damage-derived bullet stopping power and projectile ragdolls
+
+- Added `resolveWeaponStoppingPower(damage)` to the fixed weapon profile. It maps each projectile's damage linearly
+  to an impact velocity (`0.065 m/s` per damage point, capped at `8 m/s`). The value is stored as
+  `stoppingPowerPerBullet`, shown on the armory chart/HUD, and recorded on hit metadata.
+- The weapon hit callback now carries the pellet direction, impact point, and instanced-mesh index. Each shotgun pellet
+  independently submits its stopping-power impulse, so a full eight-pellet hit accumulates instead of being reduced to
+  one trigger-level force.
+- The local simulant receives that per-bullet impulse, is briefly staggered, and resumes its charge after the
+  damage-derived knockback decays. Its marker exposes `simulantStoppingPower` and `simulantStaggerSeconds` for live
+  diagnostics.
+- Streamed knockable props now resolve from bullet hits as well as melee hits. A first bullet starts the existing
+  ragdoll; later bullets, including the remaining shotgun pellets, add linear and angular impulse through the active
+  Rapier/fallback physics seam.
+- Added pure stopping-power regressions and an exploration-world regression proving that two projectile impulses start a
+  ragdoll and accumulate velocity. Browser/HMR acceptance still needs the existing connected scene; no second browser
+  session is opened for this lane.
+
+## 2026-08-08 — Short-lived two-puff gunshot smoke
+
+- Gunshot gas now emits exactly two muzzle sprites per round. Firing the next round immediately recycles only the
+  previous gunshot sprites, so thermal barrel wisps can continue independently without allowing shot smoke to stack.
+- Each gunshot puff starts at zero scale and full opacity, expands with a normalized logarithmic curve, fades with its
+  inverse curve, and returns to the pool after one second. The existing five-second pooled lifecycle remains for
+  heat-driven thermal wisps.
+- Added pure curve and budget regressions in `apps/web/src/scene/weapons.test.ts`. Runtime/rendered acceptance remains
+  pending because this worktree does not open another browser session.
+
+## 2026-08-08 — Procedural melee swing and impact audio
+
+- Added `resolveMeleeAudioProfile` in `apps/web/src/scene/melee.ts`. It maps each held object's volume, reach, swing
+  speed, and damage to finite, deterministic controls for a bright band-pass woosh and a heavier low-pass bang.
+- Reused the weapon runtime's seeded noise buffer, listener-relative HRTF/proximity path, propagation delay, and
+  fail-soft Web Audio setup. A swing schedules a looping woosh for the complete resolved swing duration; both woosh
+  layers follow a symmetric exponential envelope that peaks at 50% progress. A resolved ray hit schedules the bang at
+  the hit point. Misses do not emit an impact sound.
+- Added pure monotonic, envelope-symmetry, and non-finite-input regressions in `apps/web/src/scene/melee.test.ts`.
+  Browser listening remains a separate acceptance step and is not claimed by the code or test evidence alone.
+
+## 2026-08-08 — Parametric bullet impact audio
+
+- Added `resolveBulletImpactAudioProfile` in `apps/web/src/scene/weapons.ts`. It maps projectile damage (bullet
+  strength, bounded from the 9-damage submachine-gun round through the 100-damage sniper round) and a clamped acute
+  impact angle into a compressed impact body, a decaying resonance, and a short high-frequency glancing scrape. A
+  direct hit is 0 radians; a grazing hit is π/2 radians.
+- The weapon hit path now transforms the struck triangle normal through the same world and instanced-mesh matrices used
+  by bullet-hole decals, then derives the angle from the normalized projectile/normal dot product. Each resolved hit
+  schedules the impact at the hit point through the existing propagation-delay, HRTF, proximity, seeded-noise, and
+  fail-soft Web Audio path.
+- Added strength, angle, clamping, and non-finite-input regressions in `apps/web/src/scene/weapons.test.ts`.
+  Browser listening remains a separate acceptance step; no new browser session was opened in this lane.
+
+## 2026-08-08 — Unshielded headshot threshold
+
+- Added the explicit `HEADSHOT_DAMAGE_THRESHOLD = 25` rule to the central combat damage seam. A weapon projectile
+  must deal strictly more than 25 damage, hit the marked simulant head mesh, and find the target shield at zero;
+  that hit resolves as lethal damage to the remaining health pool. A 25-damage projectile is not eligible.
+- Shielded head hits continue through the ordinary shield-before-health reducer. Shotgun damage remains per pellet,
+  so its 16-damage pellets do not qualify even if several pellets are fired in one shell.
+- Under the fixed roster, pistol (28), scoped carbine (36), and sniper (100) meet the threshold; machine gun (12),
+  shotgun pellets (16), and submachine gun (9) do not.
+- Marked the simulant head as a combat hit zone and make the empty shield flare ignore weapon rays, allowing the
+  ray to reach the actual head mesh after the shield has been depleted. Added focused threshold, shield, body-hit,
+  shotgun-pellet, and lifecycle-hook regressions in `apps/web/src/scene/combat-damage.test.ts`.
+
+## 2026-08-08 — Central combat damage routing
+
+- Added `apps/web/src/scene/combat-damage.ts` as the single scene damage seam. It registers actor IDs,
+  applies the shared shield-before-health reducer, invokes damage/death lifecycle hooks, and throws when a
+  damageable actor has not been registered instead of silently dropping the event.
+- Registered the local player as `player` and the red simulant as `bot:simulant`. The marker carries the same
+  actor ID, so any ray hit can resolve through the router without a simulant-specific damage branch. Future bots
+  must register their actor ID and vitals callbacks before their render marker can receive damage.
+- Routed weapon hits, melee hits, wall-collision impact, and landing O₂ shortfall damage through the same seam.
+  Melee now damages the simulant and still retains the separate exploration-prop ragdoll path.
+- Added central-router regressions for player/bot parity, lethal lifecycle hooks, and unregistered-target failure.
+- Targeted Prettier checks for the damage files, `mahjong-table.ts`, and both implementation logs, plus `pnpm lint`,
+  `pnpm typecheck`, and `pnpm build` pass. The root format check still reports one pre-existing layout in the dirty
+  `apps/web/src/main.tsx` lane. The server-owned test-bus snapshot `1786174387190-42883-a162a078` records 505/507
+  passing assertions, including all three central-router tests; the two failed property tests are pre-existing
+  `packages/test-fixtures` timeouts.
+
 ## Current milestone
 
 Milestone 5 — Persistence and replay repairs and acceptance.
+
+## 2026-08-08 — Caps Lock submachine trigger modes
+
+- The fixed submachine gun now fires full auto at its normal 0.045-second cadence while Caps Lock is off.
+- When the browser reticle is enabled by Caps Lock, a new trigger start uses a three-round burst with the existing
+  per-round cadence and burst pause. The runtime samples the mode at burst start, so an in-progress burst completes
+  even if Caps Lock changes.
+- Added `resolveWeaponTriggerProfile` coverage for automatic, triple-shot, and unchanged non-submachine profiles.
+- Browser firing acceptance remains separate; no additional browser session was opened in this lane.
+
+## 2026-08-08 — Crouch aim stabilization stacks with wall cover
+
+- Added crouch as a free 0.5 stability factor in the shared O₂ presentation path. It now reduces stationary camera
+  breathing, reticle sway, held-weapon sway, and the reserve-driven accuracy penalty while crouched.
+- Wall bracing remains an independent 0.5 factor. Crouch plus wall cover therefore composes to 0.25 of normal
+  reserve-driven instability; holding breath can add its existing independent factor on top.
+- Added focused O₂ and camera-damper regressions for crouch and crouch-plus-wall stacking. The server-owned bus run
+  `1786176187171-42883-6656869b` passed both focused suites; its full snapshot passed 510/515 assertions, with five
+  unrelated bot/core-fixture/simulation failures. The web production build passed. Repository-wide typecheck and lint
+  remain blocked by pre-existing dirty errors in `debugging-two-map.ts`, `main.tsx`, `mahjong-physics.ts`, `mahjong-table.ts`,
+  and `movement-simulate.ts`. No Vite/browser HMR acceptance was available in this lane.
+
+## 2026-08-08 — Half-speed near focus accommodation
+
+- Near depth-of-field accommodation now uses damping `3.5`, half of its previous `7` response, so focusing on a
+  closer object takes roughly twice as long. Far-focus relaxation remains at damping `4.5`.
+- Updated the human-eye focus regression and visual documentation. Browser interaction was not opened in this lane.
+
+## 2026-08-08 — Selectable maps
+
+- Added a validated `VISUAL_MAP_CATALOG` for browser-selectable maps. The existing penthouse document is now presented
+  as `Debugging 01`; `Warehouse` (`debugging-02`) is the separate industrial warehouse generator with no authored-room
+  document.
+- Added a map selector to the live scene controls. A selection remounts the real Three.js scene with that map,
+  exposes `data-map-id` on the scene container, and shows the active map in the HUD.
+- Map selection accepts the `?map=` query on first load and persists the chosen ID in local storage for the next visit.
+  Unknown IDs safely fall back to `Debugging 01`.
+- Added catalog regressions for the authored/procedural split. The server-owned test bus remains the required source for
+  unit-test results; no browser session was opened in this lane.
 
 ## 2026-08-08 — O₂ sprint failure returns to recoverable trot
 
@@ -55,6 +471,14 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   `reloading` state clear immediately.
 - Interrupted operations record their elapsed reload interval in the existing weapon telemetry. A sprint request rejected
   while standing from crouch leaves the reload active because no sprint was accepted.
+
+## 2026-08-08 — Empty weapon switch auto-reload
+
+- Equipping a stored weapon with an empty magazine now starts its reload immediately when reserve ammunition is available,
+  including switching back to a previously emptied gun. The timer runs through the shared lower/raise presentation so the
+  incoming hand is not left with `0` loaded rounds while backup rounds exist.
+- A same-weapon walk-over pickup also starts the reload when it supplies reserve ammunition to the currently held empty gun.
+  The manual reload and sprint-interruption rules remain unchanged.
 
 ## 2026-08-08 — Landing exertion spends O₂ before impact damage
 
@@ -73,6 +497,7 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Crouching now synchronizes an internal, non-UI walking toggle across keyboard, touch, and traversal speed paths.
   Crouched movement remains on its dedicated slower posture speed; after the player is upright, the toggle selects
   the 1×-base walk speed (3.4 m/s). Accepted sprint transitions clear it before applying the 3× (10.2 m/s) sprint.
+  Accepted jumps, including the O₂-free mini hop, also clear it so upright movement resumes the default run/trot mode.
   The toggle is intentionally absent from visual snapshots and HUD state.
 
 ## 2026-08-07 — One-and-a-half-times-base trot
@@ -133,6 +558,34 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The selected area map is included in both the persisted visual debug snapshot and local visual-debug settings, so
   a reload reconstructs the same disabled areas. Existing settings/snapshots without the new optional field continue
   to load with every area enabled.
+
+## 2026-08-08 — Production debug-area preference persistence
+
+- Fixed the checkpoint server's explicit `?debug=1` path so visual debug preferences use browser `localStorage` in
+  the production bundle as well as in Vite development. Area toggles now survive a refresh on port 4174 while normal
+  production visitors still receive no debug storage or panel.
+
+## 2026-08-08 — Two-metre cover snap assist
+
+- Cover activation now searches the nearest valid wall within a 2 m capsule-surface range when zoom is toggled on.
+- A cover entry moves toward the wall at the configured sprint speed and stops at the normal controller clearance;
+  the same wall-braced presentation signal applies during the approach and contact, while O₂ remains unchanged.
+- Added pure wall-range, snap-target, and speed-bound regressions. Rendered browser acceptance remains tied to the
+  existing single connected session; no additional browser was opened.
+
+## 2026-08-08 — Ultra-minimal HUD
+
+- Compressed the visual-table status rail into a single transparent line with no card border or shadow, keeping only
+  the live preview, round/seat, area, room, and movement/combat state.
+- Replaced the tall player-systems panel with one wide top strip: shield, health, and O₂ are now horizontal bars
+  stacked vertically. The tracks are right-anchored, so each bar grows from right to left as its value rises. Accessible
+  labels and progressbar values remain unchanged; repeated heading and normal-state helper text no longer occupy the scene.
+- Widened the loadout panel to use the available horizontal space while keeping its active weapon/ammunition line,
+  six number slots, and transient pickup or reload feedback. Persistent controls and melee telemetry remain in the DOM
+  for accessibility but are visually hidden during play. Responsive offsets keep the wider HUD clear of touch controls
+  and the debug panel.
+- Removed the persistent Seat view, New room, and Overhead buttons and shortened the intro/footer tutorial copy to
+  concise control strings.
 
 ## Completed
 
@@ -250,7 +703,8 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Mobile browsers keep the landscape guidance in shipping and expose motion look, touch swipe, joystick,
   crouch, and jump against the same composed initial camera.
 - Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper,
-  skyline visibility, and renderer metrics. Fog is intentionally absent from the panel and disabled in the renderer.
+  skyline visibility, and renderer metrics. Fog is intentionally absent from the panel; only Warehouse uses its fixed
+  map-local haze.
   Skyline windows are batched with `InstancedMesh`, and the
   three hero landmarks have distance-based `LOD` silhouettes. The documented screenshot checkpoint uses
   the existing Playwright CLI at a fixed 1440×900 desktop viewport.
@@ -1360,3 +1814,249 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   latest server-owned bus snapshot (`1786149860791-25084-75af1ee4`) passed 471/472 assertions, including all three
   damage-vignette tests; the one failure is the unrelated `packages/test-fixtures` core-engine property test.
   Browser interaction is not opened in this lane.
+
+## 2026-08-08 — Re-arm the previous gun after a melee drop
+
+- When a melee prop is equipped while a gun is active, the scene records only that active gun ID before holstering
+  its viewmodel. A successful `Q` melee drop now reselects that same owned gun through the normal weapon switch path,
+  so the shared lower-and-raise presentation remains intact. If melee was drawn while unarmed, the same drop cycles to
+  the first owned gun instead of leaving the player unarmed.
+- Failed drops and explicit `0` holstering do not re-arm a gun. Added focused handoff regressions for the successful,
+  failed, empty-previous-weapon, and explicit-holster cases.
+- Validation: the server-owned snapshot `1786176187171-42883-6656869b` passed the handoff regression and every scene
+  melee/weapon assertion; strict typecheck and targeted Prettier passed, and the explicit Vite HMR request succeeded.
+  The aggregate snapshot remains red on five unrelated bot/core/simulation assertions from concurrent dirty work.
+  Browser interaction was not opened in this lane.
+
+## 2026-08-08 — Preserve melee during walk-over gun pickup
+
+- Walking over a gun while melee is drawn now stores the gun without drawing or switching the viewmodel. Explicit `E`
+  and numeric gun selection still run the reversible melee-to-gun handoff, restoring melee if the gun action fails.
+- Added pure handoff guards and regression coverage for successful gun actions and walk-over pickup state.
+- Validation: the latest completed server-owned bus snapshot includes both handoff tests as passing; its 13 failures are
+  unrelated dirty-lane core, analysis, bot, persistence, and simulation assertions. Targeted typecheck, Prettier,
+  `git diff --check`, and the Vite HMR request passed before later concurrent validation contention.
+
+## 2026-08-08 — Recoverable melee drops
+
+- A prop dropped with `Q` remains a recoverable melee pickup while its dynamic ragdoll settles. Re-equipping captures
+  the prop's current instance transform before removing only that prop's dynamic body, so a moved drop does not snap
+  back to its seeded spawn.
+- Every streamed prop is also a recoverable melee pickup after a melee hit or player collision topples it. Re-equipping
+  captures the live ragdoll transform and removes its dynamic body, so the exact fallen instance can always be used as a
+  weapon.
+- Added world-level regressions covering moved drops, melee-hit and collision knockdowns, dynamic bodies, sibling
+  preservation, re-pickup, and body removal.
+- Validation: server-owned bus run `1786178887677-42883-61af9791` passed all 242 scene assertions, including the new
+  melee-hit and collision-toppled recovery regression; its three failures are unrelated core-engine/simulation cases.
+  The focused test file passes ESLint, Prettier, `git diff --check`, strict typecheck, and the production web build.
+  Full `mahjong-table.ts` lint still reports 30 pre-existing dirty-checkpoint errors outside this patch. No Vite dev
+  server or connected browser was available for HMR/browser acceptance.
+
+## 2026-08-08 — Calm melee idle reset
+
+- The melee prop still alternates its right-to-left and left-to-right swing poses, but a completed swing that leaves it
+  on the left now starts an activity-aware idle timer. After five seconds without another swing, or a
+  viewmodel transition, the prop eases back to the default right-ready pose over `0.9` seconds.
+- The reset uses pure melee pose resolvers and remains composed with the shared camera-damper viewmodel offset. Walking,
+  swinging, stashing, or changing viewmodel state no longer fights the timer; the next swing is reseeded from the right
+  side after the reset completes.
+- Added regressions for the five-second delay, eased progress, and exact left/right ready-pose endpoints. The fresh
+  server-owned bus snapshot `1786177988200-42883-ea222052` passed all 11 melee assertions; the aggregate was 509/522
+  because 13 unrelated bots, analysis, persistence, core, and simulation assertions remain red in the dirty lane.
+  The melee-only ESLint check, focused web production build, Prettier check, and `git diff --check` passed. The latest
+  strict typecheck is blocked by unrelated unused `roomVariant` and `explorationArea` declarations in `main.tsx`.
+  Browser interaction and HMR were not run because no Vite server or connected browser belongs to this worktree.
+
+## 2026-08-08 — Let melee idle reset continue while walking
+
+- The five-second melee reset now measures only melee activity. Walking or running with the prop drawn no longer clears
+  the timer, so the left-ready pose still returns calmly to the right while locomotion continues.
+- Added a pure eligibility regression that documents movement as intentionally outside the reset gate. Swing input,
+  stashing, inactive controls, and non-idle viewmodel transitions remain reset blockers.
+
+## 2026-08-08 — Re-arm any owned gun after an unarmed melee drop
+
+- A successful melee drop now cycles to an owned gun even when no gun was active before melee was drawn. The existing
+  remembered-gun path still takes priority, and an empty inventory remains unarmed.
+- Pressing `0` is an explicit holster choice and suppresses this fallback until another gun is selected. Added a pure
+  handoff regression for the fallback, failed-drop, and explicit-holster cases.
+
+## 2026-08-08 — Reorient fallen melee pickups
+
+- A melee viewmodel now discards the dropped prop's transient ragdoll quaternion when it is picked up. It preserves the
+  source scale and rebuilds the canonical upright grip, so an object that fell on its side is held upright immediately.
+- This keeps the shared camera-child swing pose responsible for the held presentation instead of carrying world ragdoll
+  orientation into the first-person model.
+
+## 2026-08-08 — Preserve cover through weapon reload
+
+- Cover resolution now follows the requested zoom input, so the reload-time temporary unzoom does not clear an engaged
+  wall stance or its cover wall. Turning zoom off still clears it immediately.
+- An accepted full jump or mini-hop explicitly clears cover and its pending wall snap, so the player must activate zoom
+  again to re-enter cover after leaving the wall stance.
+- Added pure regressions for reload-time cover retention, the requested-zoom edge, and jump exit. The server-owned bus
+  snapshot `1786178887677-42883-61af9791` passed all three cover assertions and 519/522 assertions overall; the three
+  failures are unrelated dirty-lane core-engine and simulation assertions. The focused web production build, Prettier,
+  and `git diff --check` pass. Strict typecheck remains blocked by unrelated unused `roomVariant` and `explorationArea`
+  declarations in `main.tsx`; targeted ESLint still reports pre-existing dirty-lane errors in `mahjong-table.ts`.
+  Browser interaction and HMR were not run because no Vite server or connected browser belongs to this worktree.
+
+## 2026-08-08 — Momentum-scaled melee hits
+
+- Melee combat now resolves a pure, bounded momentum multiplier at the central combat-damage seam. It projects the
+  relative attacker/target velocity onto the attack ray, so a full sprint and an opponent moving toward the strike add
+  together while a target fleeing in the same direction returns the hit to its base damage.
+- Downward velocity adds a separate airborne falling-impact term. Full sprint speed is the closing-speed reference, full
+  jump speed is the falling reference, and the combined multiplier is capped at `2.5×`; standing still remains `1×`.
+- The local simulant now publishes its deterministic frame velocity to melee resolution. Swing O₂ cost and ragdoll prop
+  knockback remain based on the original swing/object values; player-like targets receive the momentum-scaled damage
+  through the existing shield-before-health router.
+- Added pure regressions for stationary, opposing-motion, falling, invalid-input, and multiplier-cap cases. The
+  server-owned bus snapshot `1786180387154-42883-05fed5a9` passed all 16 melee assertions; its single failure is the
+  unrelated dirty-lane core-engine property test. Strict typecheck and targeted ESLint passed. Browser acceptance and
+  HMR are still pending for this worktree.
+
+## 2026-08-08 — Edge-only Warehouse weapon layout
+
+- Warehouse now creates exactly one deterministic pickup for each of the six weapon IDs. The six positions are
+  evenly spaced along an inset rectangle perimeter, leaving the existing dense procedural pickup population on
+  Debugging 01 unchanged.
+- Added a pure perimeter-placement regression covering one-per-weapon identity, the pistol starter marker, and equal
+  wrapped spacing around the Warehouse bounds.
+- Validation: the latest server-owned bus snapshot `1786180987514-42883-be240878` includes both the warehouse and
+  perimeter regressions; all five map-catalog tests pass. The full snapshot is 528/529 because of one unrelated dirty
+  core-engine property failure. Strict typecheck, targeted weapon/map ESLint, Prettier, and the web production build
+  pass; repository-wide ESLint remains red on unrelated dirty-checkpoint diagnostics. No Vite server or connected
+  browser is available in this worktree for HMR/browser acceptance.
+
+## 2026-08-08 — Expose previous melee hit damage in the debug panel
+
+- The explicit debug panel now shows the previous resolved melee hit, the current weapon's base damage, and a compact
+  swings/hits count. For player-like actors, the previous value includes the momentum-scaled damage that reached the
+  combat router, so a tester can compare stationary, sprinting, opposing-motion, and falling strikes while tuning the
+  resolver.
+- Starting another swing no longer replaces the previous-hit value with the weapon's base damage; it changes only the
+  swing state and counters. A miss leaves the last resolved hit visible for comparison.
+- Validation: the current server-owned bus snapshot has 529 passing assertions and one unrelated dirty-lane
+  `packages/test-fixtures` core-engine property failure. Strict typecheck, Prettier, and the web production build pass;
+  the targeted ESLint command remains red on pre-existing dirty-checkpoint diagnostics in `main.tsx`. No Vite server or
+  connected browser is available in this worktree for HMR/browser acceptance.
+
+## 2026-08-08 — Simple shield-gated simulant blood impacts
+
+- Projectile hits on the local simulant no longer create a world-level bullet-hole decal at the actor's moving body.
+  The weapon hit callback now classifies the actor and supplies its current frame velocity to the presentation runtime.
+- Simulant hits create an independent, depth-tested blood cloud only after the post-hit shield reaches zero and the hit
+  deals damage. Each bullet emits exactly one low-opacity dark-red sphere, scaled by projectile damage; shielded hits
+  emit neither blood nor an actor bullet hole. Shield damage gets its own short cyan-white spark; a shield-breaking
+  overflow hit can show both the spark and the blood response.
+- A transparent `ShaderMaterial` shell covers the simulant during the shield flare. Its pulse is brightest at the start,
+  warms toward white-orange at peak intensity, and applies a vertical `smoothstep` mask so opacity is zero at the bottom
+  edge of the shield volume.
+- The runtime searches from the hit point toward target motion, projectile travel, and nearby vertical surfaces for a
+  static floor or wall. When one is found it projects a persistent stain there using one low-opacity dark-red splat
+  texture. The stain elongates along the simulant's velocity once the movement crosses the running threshold, so a
+  moving target leaves a directional smear.
+  Surface hits that are not the simulant keep the existing bullet-hole path.
+- Blood effects are capped, disposable, included in the clean scope feed, and the cloud/decal fade uses low-opacity
+  multipliers. Added pure regressions for damage-to-cloud scale, speed-to-smear ratio, shield gating, and scope metadata.
+- Validation: the final server-owned bus snapshot `1786184887442-42883-e884aace` passed 536/538 assertions, including
+  the weapon blood and shield-spark regressions. Its two failures are unrelated dirty-lane core-engine and warehouse
+  map-catalog assertions. Strict typecheck, `git diff --check`, targeted weapon ESLint, and the production web build
+  pass. Full `mahjong-table.ts` ESLint still reports pre-existing dirty-checkpoint diagnostics. The Vite HMR request was
+  accepted with a shield-spark verification note; no connected browser was available for rendered acceptance.
+
+## 2026-08-08 — Free hip-fire O₂ charge
+
+- Weapon projectile O₂ charging now receives the live zoom state. Hip-fire leaves the player's O₂ reserve unchanged;
+  zoomed shots retain the existing one-quarter-of-projectile-damage charge and melee swings keep their existing cost.
+- Added a player-vitals regression covering both firing modes. Browser interaction and HMR remain pending because this
+  worktree has no connected Vite client.
+- The server-owned bus snapshot `1786185187219-42883-ee0a8b3f` passed the new regression and 537/538 assertions overall;
+  the single failure is the unrelated dirty-lane three-dimensional Warehouse catalog expectation.
+  Strict typecheck, the web production build, targeted vitals formatting, and `git diff --check` pass.
+
+## 2026-08-08 — Three-dimensional Warehouse piles
+
+- Reworked Warehouse crate generation into deterministic supported piles. Each bay chooses a one- to three-crate
+  footprint, jitters the whole pile origin, and lets upper layers use only occupied support cells below them. Three
+  enclosed crate yards are generated first as perimeter walls, creating blocked-off areas and alternate routes while
+  the centre spawn lane stays open. The layer and cell pitches leave clear space, so adjacent crates do not intersect
+  and every upper crate has a matching lower support.
+- Every crate keeps exact one-metre geometry, stays parallel to the ground, and receives yaw-only rotation. Rendered
+  instances and `PhysicsBox` entries share centre, half-extents, and rotation. The Warehouse generation marker is now
+  `warehouse-boxes-v5`.
+- Added deterministic map-catalog coverage for level orientation, support continuity, render/physics alignment, and a
+  pairwise no-intersection invariant. The final server-owned bus snapshot `1786187587467-42883-3149cff4` passes the
+  Warehouse assertions and 547/548 assertions overall; its one failure is the unrelated dirty-lane
+  `packages/test-fixtures` core-engine property. Strict typecheck, targeted Warehouse ESLint, Prettier, `git diff
+--check`, and the production web build pass. No Vite server or connected browser is available in this worktree, so
+  HMR and rendered browser acceptance remain pending.
+
+## 2026-08-08 — Keep Warehouse lighting out of bullet raycasts
+
+- The industrial lighting group now carries an explicit `weaponRaycastIgnore` marker. Hitscan weapon resolution filters
+  presentation-only lighting through the shared `isWeaponRaycastSurface` predicate, so the central spotlight shaft, pool,
+  fixtures, and corner decorations no longer catch bullets. Structural warehouse walls remain valid projectile surfaces.
+- Added a regression that checks the central spotlight shaft is ignored while `WarehouseWallNorth` remains hittable.
+- Validation: formatting, the server-owned test-bus snapshot, typecheck, lint, and the production web build are pending
+  for this change. No Vite server or connected browser is available in this worktree for HMR/browser acceptance.
+
+## 2026-08-08 — Held muzzle-flash point lights
+
+- Added one non-shadow-casting `THREE.PointLight` at the muzzle of every held weapon model. Its range, decay, and peak
+  intensity are centralized in `weapons.ts`; pickup copies create no light.
+- The light follows the existing muzzle-flash timer, with a squared remaining-time fade and an explicit disabled state
+  after the 55 ms flash window. A duplicate shield-shell declaration in the dirty scene integration was also reduced
+  to the existing assignment so the web bundle can parse.
+- Increased the point light to a 32-unit peak and 7.5 m range so its direct contribution is visible against the
+  Warehouse high-bay lighting and nearby crate surfaces.
+- The server-owned test-bus snapshot `1786187587467-42883-3149cff4` passes the muzzle-light regression and 547/548
+  assertions overall; its one failure is the unrelated dirty-lane `packages/test-fixtures` core-engine property.
+  Targeted weapon ESLint, targeted weapon/documentation Prettier, `git diff --check`, the web production build, and HMR
+  request pass. The latest repository typecheck is blocked by the unrelated dirty `map-catalog.test.ts` geometry type
+  error. The large dirty scene file retains unrelated formatting drift outside this patch.
+  No connected browser is available in this worktree for rendered acceptance.
+
+## 2026-08-08 — Robot and player death ragdolls
+
+- Added a deterministic presentation-only ragdoll state machine in `apps/web/src/scene/ragdoll.ts`. It applies an
+  impact-directed launch, gravity, drag, floor bounce, angular tumble, and loose joint motion without changing the
+  authoritative combat/vitals reducer.
+- The simulant keeps its body visible for the existing respawn delay after a lethal weapon or melee hit. Its marker is
+  removed from weapon raycasts while the body tumbles, then the normal body, ring, shield, and vitals reset on respawn.
+- Player death now spawns a short-lived cyan death body ahead of the camera. The existing centralized camera damper still
+  supplies the first-person fall/tumble, while the body uses the same deterministic ragdoll pose before the fade/respawn.
+- Added pure regressions for launch direction, floor settling/reproducibility, and changing finite joint poses.
+- Latest checks: `pnpm typecheck` and the production web build pass. Targeted ESLint and Prettier checks for the new ragdoll
+  module and test pass, and `git diff --check` is clean. Full `pnpm lint` remains red on 86 pre-existing dirty-lane findings
+  across `main.tsx`, the large scene file, movement tooling, and unrelated tests; no finding points at the new ragdoll module.
+  The completed server-owned bus run `1786190287312-42883-205f2208` passes all 553 assertions, including all three ragdoll
+  tests and the combined Warehouse scene checks. No Vite client is connected in this worktree, so HMR and rendered browser
+  acceptance remain pending.
+
+## 2026-08-08 — Ice-blue data-center rack experiment
+
+- Kept the supported, non-intersecting Warehouse pile physics and replaced its cube presentation with dark data-center
+  rack cabinets. Each plan now renders a rack body plus five repeated front status rows, with one tiny square pixel per
+  row.
+- Most pixels use steady ice-blue emissive material. The remaining pixels are split across three phase-offset blinking
+  instanced meshes, producing asynchronous server activity without adding one runtime light per LED. Presentation meshes
+  remain outside weapon raycasts. The map variant is `Ice-blue data center` and the presentation marker is
+  `warehouse-data-center-v1`.
+- Added map-catalog coverage for rack counts, body dimensions, ice-blue metadata, pixel layout dimensions, steady LED rows,
+  and three blinking groups. The existing Warehouse scene integration expectation now uses the new `Ice-blue data center`
+  variant. The completed server-owned bus run `1786189687522-42883-55d5eee4` passes all 553 assertions, including the
+  five map-catalog checks and the Warehouse scene integration check. Strict typecheck, the production web build, targeted
+  ESLint, Prettier, and `git diff --check` pass. Browser/HMR acceptance remains separate because this worktree has no
+  connected Vite client.
+
+## 2026-08-08 — Gun melee interrupts reload
+
+- `F` gun melee now cancels an active clip or round reload before starting its swing. A round-based reload keeps any
+  shells already committed, while the remaining timer, return pose, and reload HUD state are cleared immediately.
+- Added a scene regression for the gun-melee interruption guard. The server-owned bus run
+  `1786194787697-42883-f8e06ff0` passed all 556 assertions, including the new regression. Strict typecheck, the web
+  production build, targeted Prettier, and `git diff --check` pass. The required Vite HMR request was accepted; no
+  additional browser session was opened. Repository-wide lint remains red on 85 pre-existing dirty-checkpoint errors.

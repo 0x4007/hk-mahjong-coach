@@ -1,4 +1,8 @@
-import { O2_BRACED_STABILITY_FACTOR, resolveO2Stability } from "./o2-stability.js";
+import {
+  O2_BRACED_STABILITY_FACTOR,
+  O2_CROUCH_STABILITY_FACTOR,
+  resolveO2Stability,
+} from "./o2-stability.js";
 import { PLAYER_MOVE_SPEED_METERS_PER_SECOND, PLAYER_WALK_SPEED_RATIO } from "./world-scale.js";
 
 /**
@@ -1040,6 +1044,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     const effectiveBreathlessness = holdingBreath ? 0 : breathlessness;
     const bracedBreathingFactor =
       (holdingBreath ? O2_BRACED_STABILITY_FACTOR : 1) *
+      (input.crouching ? O2_CROUCH_STABILITY_FACTOR : 1) *
       (input.stabilizedByWall === true ? O2_BRACED_STABILITY_FACTOR : 1);
     const breathingAmplitude = input.bobEnabled
       ? (CAMERA_BREATHING_BASE_AMPLITUDE +
@@ -1058,6 +1063,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       oxygenRatio,
       aimingDownSights: input.aimingDownSights === true,
       holdingBreath: input.holdingBreath === true,
+      crouching: input.crouching,
       stabilizedByWall: input.stabilizedByWall === true,
     });
     aimSwayPhase += deltaSeconds * CAMERA_AIM_SWAY_FREQUENCY;

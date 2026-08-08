@@ -9,11 +9,15 @@ import {
   resolveWeaponReloadMode,
   resolveWeaponBurstCooldownSeconds,
   resolveWeaponBurstSize,
+  resolveWeaponTriggerProfile,
   resolveWeaponReloadPose,
   resolveWeaponReloadInsertionImpulse,
   resolveWeaponRoundReloadPose,
   resolveWeaponReloadSeconds,
   resolveWeaponRecoilAmount,
+  resolveWeaponStoppingPower,
+  WEAPON_STOPPING_POWER_MAX_METERS_PER_SECOND,
+  WEAPON_STOPPING_POWER_METERS_PER_SECOND_PER_DAMAGE,
   resolveWeaponHotkey,
   WEAPON_DEFINITIONS,
   WEAPON_CHART_ENTRIES,
@@ -21,6 +25,23 @@ import {
   WEAPON_BULLET_HOLE_FADE_SECONDS,
   WEAPON_BULLET_HOLE_LIFETIME_SECONDS,
   WEAPON_BULLET_HOLE_MAX_COUNT,
+  WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS,
+  WEAPON_BLOOD_CLOUD_MIN_SCALE,
+  WEAPON_BLOOD_CLOUD_MAX_SCALE,
+  WEAPON_BLOOD_DECAL_LIFETIME_SECONDS,
+  WEAPON_BLOOD_DECAL_FADE_SECONDS,
+  resolveWeaponBloodCloudScale,
+  resolveWeaponBloodSmearRatio,
+  resolveWeaponBloodEligibility,
+  resolveWeaponShieldHit,
+  WEAPON_BLOOD_CLOUD_PARTICLE_COUNT,
+  WEAPON_BLOOD_CLOUD_OPACITY,
+  WEAPON_BLOOD_CLOUD_COLOR,
+  WEAPON_BLOOD_SPLAT_OPACITY,
+  WEAPON_BLOOD_SPLAT_COLOR,
+  WEAPON_SHIELD_SPARK_LIFETIME_SECONDS,
+  WEAPON_SHIELD_SPARK_COLOR,
+  WEAPON_SHIELD_SPARK_OPACITY,
   WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
   WEAPON_BARREL_GLOW_TEMPERATURE_C,
   WEAPON_BARREL_RED_HOT_TEMPERATURE_C,
@@ -28,6 +49,15 @@ import {
   WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND,
   WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO,
   WEAPON_BARREL_SMOKE_START_HEAT_RATIO,
+  WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS,
+  WEAPON_MUZZLE_SMOKE_PARTICLE_COUNT,
+  WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS,
+  WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY,
+  WEAPON_MUZZLE_FLASH_LIGHT_DISTANCE,
+  WEAPON_MUZZLE_FLASH_LIGHT_DECAY,
+  resolveWeaponMuzzleFlashLightRatio,
+  resolveWeaponMuzzleSmokeLogProgress,
+  resolveWeaponMuzzleSmokeOpacity,
   WEAPON_SMOKE_CLEAR_OPACITY_THRESHOLD,
   WEAPON_PICKUP_RANGE_METERS,
   WEAPON_RELOAD_SKY_PITCH_RADIANS,
@@ -40,16 +70,22 @@ import {
   resolveWeaponBarrelSmokeRatio,
   shouldClearWeaponSmoke,
   resolveGunAudioProfile,
+  resolveBulletImpactAudioProfile,
+  resolveBulletImpactAngleRadians,
   resolveWeaponAudioProximity,
   GUN_AUDIO_MIN_DAMAGE,
   GUN_AUDIO_MAX_DAMAGE,
   GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
   GUN_AUDIO_MAX_BARREL_LENGTH_METERS,
+  BULLET_IMPACT_AUDIO_MIN_DAMAGE,
+  BULLET_IMPACT_AUDIO_MAX_DAMAGE,
+  BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS,
   WEAPON_AUDIO_MAX_DISTANCE_METERS,
   WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
   WEAPON_AUDIO_ROLLOFF_FACTOR,
   type WeaponSpawnRect,
 } from "./weapons.js";
+import { resolveMeleeSwing } from "./melee.js";
 
 describe("weapon definitions", () => {
   it("maps number-row weapon keys and reserves zero for an empty hand", () => {
@@ -77,10 +113,23 @@ describe("weapon definitions", () => {
       expect(definition.reserveAmmo).toBeGreaterThan(definition.magazineSize);
       expect(definition.pellets).toBeGreaterThan(0);
       expect(definition.fireIntervalSeconds).toBeGreaterThan(0);
+      expect(definition.stoppingPowerPerBullet).toBe(resolveWeaponStoppingPower(definition.damage));
       expect(definition.burstSize).toBeGreaterThan(0);
       expect(definition.burstCooldownSeconds).toBeGreaterThanOrEqual(0);
+      expect(definition.meleeVolumeM3).toBeGreaterThan(0);
+      expect(definition.meleeLengthMeters).toBeGreaterThan(0);
       expect("range" in definition).toBe(false);
     }
+  });
+
+  it("derives gun melee damage and swing speed from the gun's physical size", () => {
+    const pistol = resolveMeleeSwing(WEAPON_DEFINITIONS.pistol.meleeVolumeM3);
+    const carbine = resolveMeleeSwing(WEAPON_DEFINITIONS.carbine.meleeVolumeM3);
+    expect(WEAPON_DEFINITIONS.carbine.meleeLengthMeters).toBeGreaterThan(
+      WEAPON_DEFINITIONS.pistol.meleeLengthMeters,
+    );
+    expect(carbine.damage).toBeGreaterThan(pistol.damage);
+    expect(carbine.swingSpeedRadiansPerSecond).toBeLessThan(pistol.swingSpeedRadiansPerSecond);
   });
 
   it("derives a slow scoped carbine and an ultra-fast low-damage burst profile", () => {
@@ -92,13 +141,56 @@ describe("weapon definitions", () => {
     );
     expect(carbine.damage).toBeGreaterThan(submachineGun.damage);
     expect(submachineGun.fireMode).toBe("burst");
-    expect(submachineGun.burstSize).toBe(4);
+    expect(submachineGun.burstSize).toBe(3);
     expect(submachineGun.fireIntervalSeconds).toBeLessThan(
       WEAPON_DEFINITIONS.machineGun.fireIntervalSeconds,
     );
     expect(submachineGun.damage).toBeLessThan(WEAPON_DEFINITIONS.machineGun.damage);
-    expect(resolveWeaponBurstSize(submachineGun)).toBe(4);
+    expect(resolveWeaponBurstSize(submachineGun)).toBe(3);
     expect(resolveWeaponBurstCooldownSeconds(submachineGun)).toBeCloseTo(0.24, 8);
+  });
+
+  it("keeps the submachine gun automatic normally and triple-shot with the reticle enabled", () => {
+    const submachineGun = WEAPON_DEFINITIONS.submachineGun;
+    const automatic = resolveWeaponTriggerProfile(submachineGun, false);
+    const tripleShot = resolveWeaponTriggerProfile(submachineGun, true);
+
+    expect(automatic).toEqual({
+      burstSize: 1,
+      burstCooldownSeconds: submachineGun.fireIntervalSeconds,
+      fireMode: "automatic",
+      requiresTriggerRelease: false,
+    });
+    expect(tripleShot).toEqual({
+      burstSize: 3,
+      burstCooldownSeconds: submachineGun.burstCooldownSeconds,
+      fireMode: "burst",
+      requiresTriggerRelease: false,
+    });
+    expect(resolveWeaponTriggerProfile(WEAPON_DEFINITIONS.machineGun, false)).toEqual({
+      burstSize: 1,
+      burstCooldownSeconds: WEAPON_DEFINITIONS.machineGun.fireIntervalSeconds,
+      fireMode: "automatic",
+      requiresTriggerRelease: false,
+    });
+  });
+
+  it("makes the pistol a fast automatic normally and one shot per Caps Lock press", () => {
+    const pistol = WEAPON_DEFINITIONS.pistol;
+    expect(pistol.fireIntervalSeconds).toBeCloseTo(0.045, 8);
+    expect(resolveWeaponTriggerProfile(pistol, false)).toEqual({
+      burstSize: 1,
+      burstCooldownSeconds: pistol.fireIntervalSeconds,
+      fireMode: "automatic",
+      requiresTriggerRelease: false,
+    });
+    expect(resolveWeaponTriggerProfile(pistol, true)).toEqual({
+      burstSize: 1,
+      burstCooldownSeconds: pistol.fireIntervalSeconds,
+      fireMode: "automatic",
+      requiresTriggerRelease: true,
+    });
+    expect(pistol.magazineSize / pistol.fireIntervalSeconds).toBeGreaterThan(20);
   });
 
   it("keeps the armory chart rows aligned with loaded and reserve ammunition", () => {
@@ -107,6 +199,7 @@ describe("weapon definitions", () => {
       const definition = WEAPON_DEFINITIONS[entry.id];
       expect(entry.damagePerBullet).toBe(definition.damage);
       expect(entry.pelletsPerShot).toBe(definition.pellets);
+      expect(entry.stoppingPowerPerBullet).toBe(definition.stoppingPowerPerBullet);
       expect(entry.magazineSize).toBe(definition.magazineSize);
       expect(entry.reserveAmmo).toBe(definition.reserveAmmo);
       expect(entry.totalAmmo).toBe(definition.magazineSize + definition.reserveAmmo);
@@ -117,6 +210,21 @@ describe("weapon definitions", () => {
       expect(entry.fireMode).toBe(definition.fireMode);
       expect(entry.scopeMagnification).toBe(definition.scope?.magnification ?? null);
     }
+  });
+
+  it("derives bounded stopping power from each projectile's damage", () => {
+    expect(resolveWeaponStoppingPower(0)).toBe(0);
+    expect(resolveWeaponStoppingPower(16)).toBe(
+      16 * WEAPON_STOPPING_POWER_METERS_PER_SECOND_PER_DAMAGE,
+    );
+    expect(resolveWeaponStoppingPower(100)).toBeCloseTo(6.5, 8);
+    expect(resolveWeaponStoppingPower(1_000)).toBe(WEAPON_STOPPING_POWER_MAX_METERS_PER_SECOND);
+    expect(resolveWeaponStoppingPower(Number.NaN)).toBe(0);
+    expect(resolveWeaponStoppingPower(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(resolveWeaponStoppingPower(-12)).toBe(0);
+    expect(WEAPON_DEFINITIONS.shotgun.stoppingPowerPerBullet).toBe(
+      resolveWeaponStoppingPower(WEAPON_DEFINITIONS.shotgun.damage),
+    );
   });
 
   it("derives clip versus round reloads from total damage per trigger pull", () => {
@@ -375,6 +483,9 @@ describe("round reload view-model pose", () => {
   it("adds a brief upward impulse when a round or clip insertion completes", () => {
     const idle = resolveWeaponReloadPose(1, 1);
     const inserted = resolveWeaponReloadPose(1, 1, { insertionImpulseElapsedSeconds: 0 });
+    const expiredLeadIn = resolveWeaponReloadPose(1, 1, {
+      insertionImpulseElapsedSeconds: WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS + 0.01,
+    });
     const roundInserted = resolveWeaponRoundReloadPose(0.4, 1, null, 0);
 
     expect(resolveWeaponReloadInsertionImpulse(0)).toBe(1);
@@ -383,6 +494,7 @@ describe("round reload view-model pose", () => {
     );
     expect(inserted.verticalOffset).toBeGreaterThan(idle.verticalOffset);
     expect(inserted.pitchRadians).toBeGreaterThan(idle.pitchRadians);
+    expect(expiredLeadIn).toEqual(idle);
     expect(roundInserted.verticalOffset).toBeGreaterThan(
       resolveWeaponRoundReloadPose(0.4, 1).verticalOffset,
     );
@@ -396,12 +508,71 @@ describe("shot effect lifetimes", () => {
     expect(WEAPON_BULLET_HOLE_FADE_SECONDS).toBeLessThan(WEAPON_BULLET_HOLE_LIFETIME_SECONDS);
     expect(resolveWeaponEffectOpacity("tracer", WEAPON_TRACER_LIFETIME_SECONDS)).toBe(1);
     expect(resolveWeaponEffectOpacity("tracer", 0)).toBe(0);
+    expect(resolveWeaponEffectOpacity("shieldSpark", WEAPON_SHIELD_SPARK_LIFETIME_SECONDS)).toBe(1);
+    expect(resolveWeaponEffectOpacity("shieldSpark", 0)).toBe(0);
     expect(resolveWeaponEffectOpacity("bulletHole", WEAPON_BULLET_HOLE_LIFETIME_SECONDS)).toBe(1);
     expect(
       resolveWeaponEffectOpacity("bulletHole", WEAPON_BULLET_HOLE_FADE_SECONDS / 2),
     ).toBeCloseTo(0.5, 8);
     expect(resolveWeaponEffectOpacity("bulletHole", 0)).toBe(0);
     expect(WEAPON_BULLET_HOLE_MAX_COUNT).toBeGreaterThan(0);
+  });
+
+  it("scales simulant blood by projectile damage and smears it with target speed", () => {
+    expect(WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS).toBeGreaterThan(0.5);
+    expect(WEAPON_BLOOD_DECAL_LIFETIME_SECONDS).toBeGreaterThan(WEAPON_BLOOD_DECAL_FADE_SECONDS);
+    expect(resolveWeaponBloodCloudScale(9)).toBe(WEAPON_BLOOD_CLOUD_MIN_SCALE);
+    expect(resolveWeaponBloodCloudScale(100)).toBe(WEAPON_BLOOD_CLOUD_MAX_SCALE);
+    expect(resolveWeaponBloodCloudScale(100)).toBeGreaterThan(resolveWeaponBloodCloudScale(12));
+    expect(resolveWeaponBloodCloudScale(Number.NaN)).toBe(WEAPON_BLOOD_CLOUD_MIN_SCALE);
+    expect(resolveWeaponBloodSmearRatio(0)).toBe(0);
+    expect(resolveWeaponBloodSmearRatio(3.2)).toBe(1);
+    expect(resolveWeaponBloodSmearRatio(8)).toBe(1);
+    expect(WEAPON_BLOOD_CLOUD_PARTICLE_COUNT).toBe(1);
+    expect(WEAPON_BLOOD_CLOUD_OPACITY).toBeLessThan(0.5);
+    expect(WEAPON_BLOOD_SPLAT_OPACITY).toBeLessThan(0.5);
+    expect(WEAPON_BLOOD_CLOUD_COLOR).toBeLessThan(0x800000);
+    expect(WEAPON_BLOOD_SPLAT_COLOR).toBeLessThan(0x800000);
+    expect(resolveWeaponBloodEligibility(100, 12)).toBe(false);
+    expect(resolveWeaponBloodEligibility(0, 12)).toBe(true);
+    expect(resolveWeaponBloodEligibility(-1, 12)).toBe(true);
+    expect(resolveWeaponBloodEligibility(0, 0)).toBe(false);
+    expect(resolveWeaponShieldHit(12)).toBe(true);
+    expect(resolveWeaponShieldHit(0)).toBe(false);
+    expect(resolveWeaponShieldHit(Number.NaN)).toBe(false);
+    expect(WEAPON_SHIELD_SPARK_LIFETIME_SECONDS).toBeGreaterThan(0);
+    expect(WEAPON_SHIELD_SPARK_OPACITY).toBeLessThanOrEqual(1);
+    expect(WEAPON_SHIELD_SPARK_COLOR).toBeGreaterThan(0x80ffff);
+  });
+});
+
+describe("gunshot smoke lifecycle", () => {
+  it("keeps two short-lived puffs and uses inverse logarithmic dispersion", () => {
+    expect(WEAPON_MUZZLE_SMOKE_PARTICLE_COUNT).toBe(2);
+    expect(WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS).toBe(1);
+    expect(resolveWeaponMuzzleSmokeLogProgress(0)).toBe(0);
+    expect(resolveWeaponMuzzleSmokeLogProgress(0.1)).toBeGreaterThan(0.1);
+    expect(resolveWeaponMuzzleSmokeLogProgress(1)).toBe(1);
+    expect(resolveWeaponMuzzleSmokeLogProgress(2)).toBe(1);
+    expect(resolveWeaponMuzzleSmokeOpacity(0)).toBe(1);
+    expect(resolveWeaponMuzzleSmokeOpacity(0.5)).toBeLessThan(0.5);
+    expect(resolveWeaponMuzzleSmokeOpacity(1)).toBe(0);
+    expect(resolveWeaponMuzzleSmokeOpacity(Number.NaN)).toBe(1);
+  });
+});
+
+describe("muzzle flash point light", () => {
+  it("fades the held-muzzle light from full energy to disabled", () => {
+    expect(WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS).toBeGreaterThan(0);
+    expect(WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY).toBe(32);
+    expect(WEAPON_MUZZLE_FLASH_LIGHT_DISTANCE).toBe(7.5);
+    expect(WEAPON_MUZZLE_FLASH_LIGHT_DECAY).toBeGreaterThanOrEqual(2);
+    expect(resolveWeaponMuzzleFlashLightRatio(WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS)).toBe(1);
+    expect(resolveWeaponMuzzleFlashLightRatio(WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS / 2)).toBe(0.25);
+    expect(resolveWeaponMuzzleFlashLightRatio(0)).toBe(0);
+    expect(resolveWeaponMuzzleFlashLightRatio(-1)).toBe(0);
+    expect(resolveWeaponMuzzleFlashLightRatio(Number.NaN)).toBe(0);
+    expect(resolveWeaponMuzzleFlashLightRatio(WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS * 2)).toBe(1);
   });
 });
 
@@ -456,6 +627,63 @@ describe("proximity weapon audio", () => {
     expect(resolveWeaponAudioProximity(2)).toBeLessThan(resolveWeaponAudioProximity(1));
     expect(resolveWeaponAudioProximity(WEAPON_AUDIO_MAX_DISTANCE_METERS)).toBe(0);
     expect(resolveWeaponAudioProximity(Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
+describe("parametric bullet impact audio", () => {
+  it("maps projectile strength and incidence angle to distinct impact layers", () => {
+    const lightDirect = resolveBulletImpactAudioProfile({
+      damage: BULLET_IMPACT_AUDIO_MIN_DAMAGE,
+      impactAngleRadians: 0,
+    });
+    const heavyDirect = resolveBulletImpactAudioProfile({
+      damage: BULLET_IMPACT_AUDIO_MAX_DAMAGE,
+      impactAngleRadians: 0,
+    });
+    const heavyGrazing = resolveBulletImpactAudioProfile({
+      damage: BULLET_IMPACT_AUDIO_MAX_DAMAGE,
+      impactAngleRadians: BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS,
+    });
+
+    expect(heavyDirect.impactNoiseGain).toBeGreaterThan(lightDirect.impactNoiseGain);
+    expect(heavyDirect.impactDurationSeconds).toBeGreaterThan(lightDirect.impactDurationSeconds);
+    expect(heavyDirect.impactNoiseCutoffFrequencyHz).toBeLessThan(
+      lightDirect.impactNoiseCutoffFrequencyHz,
+    );
+    expect(heavyGrazing.glancingNoiseGain).toBeGreaterThan(heavyDirect.glancingNoiseGain);
+    expect(heavyGrazing.impactNoisePlaybackRate).toBeGreaterThan(
+      heavyDirect.impactNoisePlaybackRate,
+    );
+    expect(heavyGrazing.impactToneFrequencyHz).toBeGreaterThan(heavyDirect.impactToneFrequencyHz);
+    expect(heavyGrazing.glancingNoiseCenterFrequencyHz).toBeGreaterThan(
+      heavyDirect.glancingNoiseCenterFrequencyHz,
+    );
+  });
+
+  it("normalizes acute angles and non-finite profile inputs deterministically", () => {
+    expect(resolveBulletImpactAngleRadians(-1)).toBeCloseTo(0, 10);
+    expect(resolveBulletImpactAngleRadians(0)).toBeCloseTo(Math.PI / 2, 10);
+    expect(resolveBulletImpactAngleRadians(1)).toBeCloseTo(0, 10);
+    expect(resolveBulletImpactAngleRadians(Number.NaN)).toBe(0);
+    expect(
+      resolveBulletImpactAudioProfile({
+        damage: BULLET_IMPACT_AUDIO_MAX_DAMAGE,
+        impactAngleRadians: 99,
+      }),
+    ).toEqual(
+      resolveBulletImpactAudioProfile({
+        damage: BULLET_IMPACT_AUDIO_MAX_DAMAGE,
+        impactAngleRadians: BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS,
+      }),
+    );
+    expect(
+      resolveBulletImpactAudioProfile({ damage: Number.NaN, impactAngleRadians: Number.NaN }),
+    ).toEqual(
+      resolveBulletImpactAudioProfile({
+        damage: BULLET_IMPACT_AUDIO_MIN_DAMAGE,
+        impactAngleRadians: 0,
+      }),
+    );
   });
 });
 

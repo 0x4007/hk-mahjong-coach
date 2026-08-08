@@ -38,11 +38,14 @@ import {
   resolveFocusAccommodationDamping,
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
+  resolveHumanEyeAdaptationLuminance,
   resolveHumanEyePupilDiameter,
   resolveCrouchedStateAfterJump,
+  resolveWalkingModeAfterJump,
   resolveCrouchedStateAfterSprint,
   resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
+  shouldInterruptReloadForMelee,
   resolveJumpLaunchSpeed,
   resolveReticleZoomViewOffset,
   resolveWeaponShotReticleOffset,
@@ -50,9 +53,17 @@ import {
   resolveDesktopAimInput,
   resolveCoverLeanInput,
   resolveCoverModeFromAimTransition,
+  resolveCoverModeAfterJump,
+  resolveZoomActivationEdge,
+  resolveMeleeDropRearmWeapon,
+  shouldAutoRearmOwnedGunAfterMeleeDrop,
+  shouldAutoReloadOnWeaponEquip,
+  shouldEquipWalkOverGun,
+  shouldStashMeleeForGun,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
   resolveSimulantShotDamage,
+  isWeaponRaycastSurface,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
   isLeftCommandKeyEvent,
@@ -63,6 +74,7 @@ import {
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
+import { createDebuggingTwoMap } from "./debugging-two-map.js";
 import { O2_LANDING_BASE_COST } from "./player-vitals.js";
 import {
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
@@ -74,6 +86,42 @@ import {
   PLAYER_TROT_SPEED_METERS_PER_SECOND,
   PLAYER_WALK_MULTIPLIER,
 } from "./world-scale.js";
+
+describe("melee and gun handoff", () => {
+  it("stashes drawn melee only after a gun action succeeds", () => {
+    expect(shouldStashMeleeForGun(true, true)).toBe(true);
+    expect(shouldStashMeleeForGun(true, false)).toBe(false);
+    expect(shouldStashMeleeForGun(false, true)).toBe(false);
+  });
+
+  it("never auto-equips a walked-over gun over drawn melee", () => {
+    expect(shouldEquipWalkOverGun(true, false)).toBe(false);
+    expect(shouldEquipWalkOverGun(true, true)).toBe(false);
+    expect(shouldEquipWalkOverGun(false, false)).toBe(true);
+    expect(shouldEquipWalkOverGun(false, true)).toBe(false);
+  });
+
+  it("auto-reloads an equipped empty gun only when reserve ammo exists", () => {
+    expect(shouldAutoReloadOnWeaponEquip(0, 12)).toBe(true);
+    expect(shouldAutoReloadOnWeaponEquip(-1, 12)).toBe(true);
+    expect(shouldAutoReloadOnWeaponEquip(1, 12)).toBe(false);
+    expect(shouldAutoReloadOnWeaponEquip(0, 0)).toBe(false);
+  });
+
+  it("restores the gun held before melee only after a successful drop", () => {
+    expect(resolveMeleeDropRearmWeapon("pistol", true)).toBe("pistol");
+    expect(resolveMeleeDropRearmWeapon("sniper", true)).toBe("sniper");
+    expect(resolveMeleeDropRearmWeapon("pistol", false)).toBeNull();
+    expect(resolveMeleeDropRearmWeapon(null, true)).toBeNull();
+  });
+
+  it("can cycle to an owned gun after an unarmed melee drop unless holstering was explicit", () => {
+    expect(shouldAutoRearmOwnedGunAfterMeleeDrop(null, true, false)).toBe(true);
+    expect(shouldAutoRearmOwnedGunAfterMeleeDrop(null, false, false)).toBe(false);
+    expect(shouldAutoRearmOwnedGunAfterMeleeDrop(null, true, true)).toBe(false);
+    expect(shouldAutoRearmOwnedGunAfterMeleeDrop("pistol", true, false)).toBe(false);
+  });
+});
 
 class MemoryStorage implements Storage {
   readonly #values = new Map<string, string>();
@@ -309,10 +357,24 @@ describe("human-eye bokeh model", () => {
     expect(dark).toBeCloseTo(6.5, 5);
   });
 
-  it("accommodates to a near gaze faster than relaxing to a far gaze", () => {
-    expect(resolveFocusAccommodationDamping(8, 2.5)).toBeGreaterThan(
-      resolveFocusAccommodationDamping(2.5, 8),
-    );
+  it("keeps Warehouse eye adaptation dark without changing display exposure", () => {
+    const warehouseLuminance = resolveHumanEyeAdaptationLuminance(1.25, true);
+    const penthouseLuminance = resolveHumanEyeAdaptationLuminance(1.25, false);
+
+    expect(warehouseLuminance).toBeCloseTo(0.35, 5);
+    expect(resolveHumanEyePupilDiameter(warehouseLuminance)).toBeCloseTo(6.5, 5);
+    expect(penthouseLuminance).toBeCloseTo(1.25, 5);
+  });
+
+  it("uses half-speed near accommodation while preserving far relaxation", () => {
+    expect(resolveFocusAccommodationDamping(8, 2.5)).toBe(3.5);
+    expect(resolveFocusAccommodationDamping(2.5, 8)).toBe(4.5);
+  });
+
+  it("slows accommodation modestly as the dark-adapted pupil dilates", () => {
+    expect(resolveFocusAccommodationDamping(8, 2.5, 6.5)).toBeCloseTo(2.8, 5);
+    expect(resolveFocusAccommodationDamping(2.5, 8, 6.5)).toBeCloseTo(3.6, 5);
+    expect(resolveFocusAccommodationDamping(8, 2.5, 2.5)).toBe(3.5);
   });
 
   it("keeps the room restrained while opening for close, low-light focus", () => {
@@ -373,6 +435,9 @@ describe("left Command keyboard binding", () => {
     expect(resolveReloadAimingDownSights(true, true)).toBe(false);
     expect(resolveReloadAimingDownSights(true, false)).toBe(true);
     expect(resolveReloadAimingDownSights(false, true)).toBe(false);
+    expect(resolveZoomActivationEdge(false, true)).toBe(true);
+    expect(resolveZoomActivationEdge(true, true)).toBe(false);
+    expect(resolveZoomActivationEdge(true, false)).toBe(false);
   });
 });
 
@@ -384,6 +449,12 @@ describe("cover mode", () => {
     expect(resolveCoverModeFromAimTransition(true, false, true, false)).toBe(false);
     expect(resolveCoverModeFromAimTransition(true, false, true, true)).toBe(true);
     expect(resolveCoverModeFromAimTransition(true, true, false, true)).toBe(false);
+  });
+
+  it("keeps cover through a temporary reload unzoom but clears it on jump", () => {
+    expect(resolveCoverModeFromAimTransition(true, false, true, true)).toBe(true);
+    expect(resolveCoverModeAfterJump(true, true)).toBe(false);
+    expect(resolveCoverModeAfterJump(true, false)).toBe(true);
   });
 
   it("uses only A/D strafe input for cover lean", () => {
@@ -436,6 +507,12 @@ describe("jump posture", () => {
     expect(resolveCrouchedStateAfterJump(false, true)).toBe(false);
   });
 
+  it("returns the hidden upright toggle to run mode after an accepted jump", () => {
+    expect(resolveWalkingModeAfterJump(true, true)).toBe(false);
+    expect(resolveWalkingModeAfterJump(false, true)).toBe(false);
+    expect(resolveWalkingModeAfterJump(true, false)).toBe(true);
+  });
+
   it("uses a reduced free launch when the full O₂ jump charge is unavailable", () => {
     const fullJump = resolveJumpLaunchSpeed(true);
     const miniHop = resolveJumpLaunchSpeed(false);
@@ -457,6 +534,13 @@ describe("sprint posture", () => {
     expect(shouldInterruptReloadForSprint(true, true)).toBe(true);
     expect(shouldInterruptReloadForSprint(true, false)).toBe(false);
     expect(shouldInterruptReloadForSprint(false, true)).toBe(false);
+  });
+});
+
+describe("gun melee reload interruption", () => {
+  it("allows gun melee to cancel an active reload", () => {
+    expect(shouldInterruptReloadForMelee(true)).toBe(true);
+    expect(shouldInterruptReloadForMelee(false)).toBe(false);
   });
 });
 
@@ -685,15 +769,22 @@ describe("exploration chunk footprint", () => {
     world.dispose();
   });
 
-  it("recomputes moved prop bounds and drops held props into a ragdoll body", () => {
+  it("keeps a moved dropped prop recoverable without moving its siblings", () => {
     const scene = new THREE.Scene();
     const world = createExplorationWorld(scene, "ragdoll-drop-bounds-test");
-    const pickup = world.getMeleePickups()[0];
+    const pickupsBefore = world.getMeleePickups();
+    const pickup = pickupsBefore[0];
     if (pickup === undefined) {
       throw new Error("Expected at least one exploration melee pickup");
     }
+    const sibling = pickupsBefore.find((candidate) => candidate.objectId !== pickup.objectId);
+    if (sibling === undefined) {
+      throw new Error("Expected a second exploration melee pickup");
+    }
     const sourceMatrix = new THREE.Matrix4();
     pickup.mesh.getMatrixAt(pickup.index, sourceMatrix);
+    const siblingMatrixBefore = new THREE.Matrix4();
+    sibling.mesh.getMatrixAt(sibling.index, siblingMatrixBefore);
     const sourcePosition = new THREE.Vector3().setFromMatrixPosition(sourceMatrix);
     const dropPosition = new THREE.Vector3(
       sourcePosition.x < 0 ? EXPLORATION_WORLD_HALF_SIZE - 1 : -EXPLORATION_WORLD_HALF_SIZE + 1,
@@ -712,6 +803,7 @@ describe("exploration chunk footprint", () => {
 
       const droppedBody = world.getPhysicsBoxes().find((box) => box.dynamicId === pickup.objectId);
       expect(droppedBody?.dynamic).toBe(true);
+      expect(droppedBody?.rotationY).toBe(0);
       expect(droppedBody?.linearVelocity?.y).toBeGreaterThan(0);
       expect(
         Math.hypot(
@@ -720,6 +812,163 @@ describe("exploration chunk footprint", () => {
           droppedBody?.angularVelocity?.z ?? 0,
         ),
       ).toBeGreaterThan(0);
+
+      const droppedPickup = world
+        .getMeleePickups()
+        .find((candidate) => candidate.objectId === pickup.objectId);
+      expect(droppedPickup).toBeDefined();
+      const siblingMatrixAfterDrop = new THREE.Matrix4();
+      sibling.mesh.getMatrixAt(sibling.index, siblingMatrixAfterDrop);
+      expect(siblingMatrixAfterDrop.equals(siblingMatrixBefore)).toBe(true);
+
+      expect(world.equipMeleeObject(pickup.objectId)).not.toBeNull();
+      expect(
+        world.getMeleePickups().some((candidate) => candidate.objectId === pickup.objectId),
+      ).toBe(false);
+      expect(world.getPhysicsBoxes().some((box) => box.dynamicId === pickup.objectId)).toBe(false);
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("keeps melee- and collision-toppled props available as weapons", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "toppled-prop-weapon-test");
+    const initialPickup = world.getMeleePickups()[0];
+    if (initialPickup === undefined) {
+      throw new Error("Expected at least one exploration melee pickup");
+    }
+
+    try {
+      expect(
+        world.applyMeleeHit(
+          initialPickup.objectId,
+          { x: 0, y: 0, z: -1 },
+          initialPickup.snapshot.swingSpeedRadiansPerSecond,
+        ),
+      ).toBe(true);
+      expect(
+        world.getMeleePickups().some((candidate) => candidate.objectId === initialPickup.objectId),
+      ).toBe(true);
+      expect(world.equipMeleeObject(initialPickup.objectId)).not.toBeNull();
+
+      const collisionPickup = world
+        .getMeleePickups()
+        .find(
+          (candidate) =>
+            candidate.objectId !== initialPickup.objectId && candidate.halfExtents.y <= 0.9,
+        );
+      if (collisionPickup === undefined) {
+        throw new Error("Expected a collision-topplable exploration melee pickup");
+      }
+      const collisionMatrix = new THREE.Matrix4();
+      collisionPickup.mesh.getMatrixAt(collisionPickup.index, collisionMatrix);
+      const collisionPosition = new THREE.Vector3().setFromMatrixPosition(collisionMatrix);
+      world.updateKnockables(
+        1 / 60,
+        new THREE.Vector3(collisionPosition.x - 0.45, collisionPosition.y, collisionPosition.z),
+        { x: 0.45, y: 0, z: 0 },
+        1,
+        true,
+      );
+      expect(
+        world
+          .getMeleePickups()
+          .some((candidate) => candidate.objectId === collisionPickup.objectId),
+      ).toBe(true);
+      expect(world.equipMeleeObject(collisionPickup.objectId)).not.toBeNull();
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("loads only deterministic warehouse melee props on Debugging 02", () => {
+    const scene = new THREE.Scene();
+    const map = createDebuggingTwoMap(scene, "warehouse-melee-test");
+    const world = createExplorationWorld(scene, "warehouse-melee-test", undefined, undefined, map);
+    try {
+      expect(world.getLoadedChunkCount()).toBe(1);
+      expect(world.getArea()).toBe("Ice-blue data center");
+      const pickups = world.getMeleePickups();
+      expect(pickups).toHaveLength(map.meleeObjects.length);
+      expect(map.meleeObjects.map((spawn) => [spawn.kind, spawn.displayName])).toEqual([
+        ["crowbar", "Warehouse Crowbar"],
+        ["steel-pipe", "Warehouse Steel Pipe"],
+        ["fire-extinguisher", "Warehouse Fire Extinguisher"],
+        ["pipe-wrench", "Warehouse Pipe Wrench"],
+        ["hammer", "Warehouse Hammer"],
+        ["screwdriver", "Warehouse Screwdriver"],
+        ["fireman-axe", "Warehouse Fireman Axe"],
+        ["box-cutter", "Warehouse Box Cutter"],
+      ]);
+      const geometryKinds = pickups.map((pickup) => {
+        const kind = pickup.mesh.geometry.userData.warehouseMeleeKind as unknown;
+        return typeof kind === "string" ? kind : null;
+      });
+      expect(geometryKinds).toEqual(map.meleeObjects.map((spawn) => spawn.kind));
+      expect(pickups.map((pickup) => pickup.snapshot.displayName)).toEqual(
+        map.meleeObjects.map((spawn) => spawn.displayName),
+      );
+      expect(world.getPhysicsBoxes()).toHaveLength(map.meleeObjects.length);
+      const cityObjectNames: string[] = [];
+      scene.traverse((object) => {
+        if (
+          object.name.startsWith("City") ||
+          object.name.startsWith("Skybridge") ||
+          object.name.startsWith("ExplorationProp")
+        ) {
+          cityObjectNames.push(object.name);
+        }
+      });
+      expect(cityObjectNames).toEqual([]);
+
+      const firstPickup = pickups[0];
+      if (firstPickup === undefined) {
+        throw new Error("Expected a warehouse melee pickup");
+      }
+      expect(
+        world.applyMeleeHit(
+          firstPickup.objectId,
+          { x: 0, y: 0, z: -1 },
+          firstPickup.snapshot.swingSpeedRadiansPerSecond,
+          firstPickup.snapshot.stoppingPower,
+        ),
+      ).toBe(true);
+      const firstBody = world
+        .getPhysicsBoxes()
+        .find((box) => box.dynamicId === firstPickup.objectId);
+      expect(firstBody?.dynamic).toBe(true);
+      expect(Math.hypot(firstBody?.linearVelocity?.x ?? 0, firstBody?.linearVelocity?.z ?? 0)).toBe(
+        firstPickup.snapshot.stoppingPower,
+      );
+    } finally {
+      world.dispose();
+    }
+  });
+
+  it("starts a ragdoll and accumulates one stopping-power impulse per bullet", () => {
+    const scene = new THREE.Scene();
+    const world = createExplorationWorld(scene, "projectile-ragdoll-stopping-power-test");
+    const pickup = world.getMeleePickups()[0];
+    if (pickup === undefined) {
+      throw new Error("Expected an exploration melee pickup");
+    }
+
+    try {
+      const objectId = world.getRagdollObjectIdForHit(pickup.mesh, pickup.index);
+      expect(objectId).toBe(pickup.objectId);
+      if (objectId === null) {
+        throw new Error("Expected the pickup to resolve as a ragdoll object");
+      }
+      const perBulletPower = 16 * 0.065;
+      expect(world.applyProjectileHit(objectId, { x: 1, y: 0, z: 0 }, perBulletPower)).toBe(true);
+      expect(world.applyProjectileHit(objectId, { x: 1, y: 0, z: 0 }, perBulletPower)).toBe(true);
+
+      const dynamicBody = world.getPhysicsBoxes().find((box) => box.dynamicId === pickup.objectId);
+      expect(dynamicBody?.dynamic).toBe(true);
+      expect(dynamicBody?.linearVelocity?.x).toBeCloseTo(perBulletPower * 2, 8);
+      expect(dynamicBody?.linearVelocity?.y).toBeGreaterThan(0);
+      expect(dynamicBody?.angularVelocity?.z).toBeLessThan(0);
     } finally {
       world.dispose();
     }
@@ -1205,5 +1454,21 @@ describe("coarse scene collision extraction", () => {
     expect(box?.halfExtents.x).toBeCloseTo(1);
     expect(box?.halfExtents.y).toBeCloseTo(1.5);
     expect(box?.halfExtents.z).toBeCloseTo(0.2);
+  });
+});
+
+describe("weapon raycast surface filtering", () => {
+  it("lets bullets pass through the warehouse lighting group but keeps structure hittable", () => {
+    const scene = new THREE.Scene();
+    createDebuggingTwoMap(scene, "warehouse-light-raycast-test");
+
+    const spotlightShaft = scene.getObjectByName("WarehouseCentralSpotlightShaft");
+    const warehouseWall = scene.getObjectByName("WarehouseWallNorth");
+    if (spotlightShaft === undefined || warehouseWall === undefined) {
+      throw new Error("Expected Warehouse lighting and structure meshes");
+    }
+
+    expect(isWeaponRaycastSurface(spotlightShaft)).toBe(false);
+    expect(isWeaponRaycastSurface(warehouseWall)).toBe(true);
   });
 });

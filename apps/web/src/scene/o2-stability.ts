@@ -13,6 +13,8 @@ export interface O2StabilityInput {
   readonly aimingDownSights?: boolean;
   /** Whether the player is currently holding breath. */
   readonly holdingBreath?: boolean;
+  /** Whether the crouched posture is providing free aim support. */
+  readonly crouching?: boolean;
   /** Whether a wall is providing free aim and breathing support. */
   readonly stabilizedByWall?: boolean;
 }
@@ -51,12 +53,13 @@ export const O2_RETICLE_SWAY_MAX_RADIANS = 0.012;
 export const O2_WEAPON_SWAY_BASE_RADIANS = 0.0012;
 export const O2_WEAPON_SWAY_MAX_RADIANS = 0.034;
 export const O2_ACCURACY_PENALTY_MAX = 1.35;
-/** Zoom keeps the same base sway as hip fire; only breath or wall support reduces it. */
+/** Zoom keeps the same base sway as hip fire; crouch, breath, or wall support reduces it. */
 export const O2_AIM_SWAY_FACTOR = 1;
-/** Each paid breath-control and free wall-bracing input leaves half of normal instability. */
+/** Each free crouch/wall-brace or paid breath-control input leaves half of normal instability. */
 export const O2_BRACED_STABILITY_FACTOR = 0.5;
 export const O2_HOLD_BREATH_STABILITY_FACTOR = O2_BRACED_STABILITY_FACTOR;
 export const O2_HOLD_BREATH_ACCURACY_FACTOR = O2_BRACED_STABILITY_FACTOR;
+export const O2_CROUCH_STABILITY_FACTOR = O2_BRACED_STABILITY_FACTOR;
 /** Wall bracing uses the same reduced instability as holding breath; the factors stack. */
 export const O2_WALL_BRACE_STABILITY_FACTOR = O2_BRACED_STABILITY_FACTOR;
 
@@ -77,14 +80,18 @@ export const resolveO2Stability = (input: O2StabilityInput): O2StabilityResponse
   // reticle by passing a stale hold flag after O₂ reaches zero. Wall support
   // is separate and remains free even when the reserve is empty.
   const holdingBreath = input.holdingBreath === true && oxygenRatio > 0;
+  const crouching = input.crouching === true;
   const stabilizedByWall = input.stabilizedByWall === true;
   const postureFactor = aimingDownSights ? O2_AIM_SWAY_FACTOR : 1;
   const holdBreathStabilityFactor = holdingBreath ? O2_HOLD_BREATH_STABILITY_FACTOR : 1;
+  const crouchStabilityFactor = crouching ? O2_CROUCH_STABILITY_FACTOR : 1;
   const wallBraceStabilityFactor = stabilizedByWall ? O2_WALL_BRACE_STABILITY_FACTOR : 1;
-  const breathControlFactor = holdBreathStabilityFactor * wallBraceStabilityFactor;
+  const breathControlFactor =
+    holdBreathStabilityFactor * crouchStabilityFactor * wallBraceStabilityFactor;
   const accuracyFatigue =
     fatigue *
     (holdingBreath ? O2_HOLD_BREATH_ACCURACY_FACTOR : 1) *
+    (crouching ? O2_CROUCH_STABILITY_FACTOR : 1) *
     (stabilizedByWall ? O2_WALL_BRACE_STABILITY_FACTOR : 1);
   // Holding breath deliberately removes the reserve-driven breathing sway. O₂
   // still drains and the hold still releases at zero; only this presentation

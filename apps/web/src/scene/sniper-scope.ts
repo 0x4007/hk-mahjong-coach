@@ -86,7 +86,13 @@ export const shouldRenderSniperScopeObject = (
   if (isSprite) {
     return false;
   }
-  if (userData.bulletHoleRoot === true || userData.bulletHole === true) {
+  if (
+    userData.bulletHoleRoot === true ||
+    userData.bulletHole === true ||
+    userData.bloodRoot === true ||
+    userData.bloodCloud === true ||
+    userData.bloodDecal === true
+  ) {
     return true;
   }
   return userData.weaponVisual !== true;

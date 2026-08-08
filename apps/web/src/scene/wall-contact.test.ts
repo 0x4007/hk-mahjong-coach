@@ -3,8 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   clampPlayerPositionToWallTangent,
   isPlayerTouchingWall,
+  isPlayerFacingWall,
+  PLAYER_WALL_COVER_RANGE_METERS,
   projectPlayerMovementToWallTangent,
   resolvePlayerWallContact,
+  resolvePlayerWallContactInFacingCone,
+  resolvePlayerWallSnapDelta,
+  resolvePlayerWallSnapTarget,
 } from "./wall-contact.js";
 import type { PhysicsBox } from "./mahjong-physics.js";
 
@@ -49,6 +54,74 @@ describe("player wall contact", () => {
 
   it("returns false for a nearby but non-contacting wall", () => {
     expect(isPlayerTouchingWall({ x: 0, y: 0.86, z: -2.7 }, [wall], CAPSULE)).toBe(false);
+  });
+
+  it("finds a cover wall within the two-metre area of effect", () => {
+    const near = resolvePlayerWallContact(
+      { x: 0, y: 0.86, z: -4.37 },
+      [wall],
+      CAPSULE,
+      PLAYER_WALL_COVER_RANGE_METERS,
+    );
+    const far = resolvePlayerWallContact(
+      { x: 0, y: 0.86, z: -4.39 },
+      [wall],
+      CAPSULE,
+      PLAYER_WALL_COVER_RANGE_METERS,
+    );
+
+    expect(near?.distance).toBeCloseTo(1.99, 8);
+    expect(far).toBeNull();
+  });
+
+  it("accepts only the 90-degree wall-facing cone", () => {
+    const contact = resolvePlayerWallContact({ x: 0, y: 0.86, z: -2.39 }, [wall], CAPSULE);
+    expect(contact).not.toBeNull();
+    if (contact === null) {
+      return;
+    }
+
+    expect(isPlayerFacingWall({ x: 0, y: 0, z: 1 }, contact)).toBe(true);
+    expect(isPlayerFacingWall({ x: 1, y: 0, z: 0 }, contact)).toBe(false);
+    expect(isPlayerFacingWall({ x: 0, y: 0, z: -1 }, contact)).toBe(false);
+    expect(isPlayerFacingWall({ x: 0, y: 0, z: 0 }, contact)).toBe(false);
+    expect(isPlayerFacingWall({ x: Math.SQRT1_2, y: 0, z: Math.SQRT1_2 }, contact)).toBe(true);
+    expect(isPlayerFacingWall({ x: Math.sqrt(3) / 2, y: 0, z: 0.5 }, contact)).toBe(false);
+  });
+
+  it("does not select a parallel or rear wall as the cover source", () => {
+    const position = { x: 0, y: 0.86, z: -2.39 };
+    expect(
+      resolvePlayerWallContactInFacingCone(position, { x: 1, y: 0, z: 0 }, [wall], CAPSULE),
+    ).toBeNull();
+    expect(
+      resolvePlayerWallContactInFacingCone(position, { x: 0, y: 0, z: -1 }, [wall], CAPSULE),
+    ).toBeNull();
+    expect(
+      resolvePlayerWallContactInFacingCone(position, { x: 0, y: 0, z: 1 }, [wall], CAPSULE),
+    ).not.toBeNull();
+  });
+
+  it("snaps the capsule to the wall face and moves no faster than sprint speed", () => {
+    const position = { x: 0, y: 0.86, z: -3 };
+    const contact = resolvePlayerWallContact(
+      position,
+      [wall],
+      CAPSULE,
+      PLAYER_WALL_COVER_RANGE_METERS,
+    );
+    expect(contact).not.toBeNull();
+    if (contact === null) {
+      return;
+    }
+
+    const target = resolvePlayerWallSnapTarget(position, contact, CAPSULE);
+    expect(target.x).toBeCloseTo(0, 8);
+    expect(target.z).toBeCloseTo(-2.39, 8);
+
+    const step = resolvePlayerWallSnapDelta(position, target, 10, 0.05);
+    expect(Math.hypot(step.x, step.z)).toBeCloseTo(0.5, 8);
+    expect(step.z).toBeGreaterThan(0);
   });
 
   it("limits cover strafe to the wall face while preserving the normal position", () => {

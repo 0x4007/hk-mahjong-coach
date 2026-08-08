@@ -48,7 +48,7 @@ import {
   resolveCameraTraversalLoweringProgress,
   resolveCameraVerticalWeightImpulse,
 } from "./camera-motion.js";
-import { O2_WALL_BRACE_STABILITY_FACTOR } from "./o2-stability.js";
+import { O2_CROUCH_STABILITY_FACTOR, O2_WALL_BRACE_STABILITY_FACTOR } from "./o2-stability.js";
 
 const idleInput = {
   deltaSeconds: 1 / 60,
@@ -253,6 +253,39 @@ describe("camera motion damper", () => {
     expect(aimSwayPeak / normalAimSwayPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
   });
 
+  it("leaves one half of breathing and aim sway while crouched", () => {
+    const normalDamper = createCameraMotionDamper();
+    const crouchedDamper = createCameraMotionDamper();
+    let headBobPeak = 0;
+    let aimSwayPeak = 0;
+    let normalHeadBobPeak = 0;
+    let normalAimSwayPeak = 0;
+
+    for (let index = 0; index < 180; index += 1) {
+      const normalFrame = normalDamper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        oxygenRatio: 0,
+      });
+      normalHeadBobPeak = Math.max(normalHeadBobPeak, Math.abs(normalFrame.headBob));
+      normalAimSwayPeak = Math.max(
+        normalAimSwayPeak,
+        Math.hypot(normalFrame.aimSwayX, normalFrame.aimSwayY),
+      );
+      const frame = crouchedDamper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        oxygenRatio: 0,
+        crouching: true,
+      });
+      headBobPeak = Math.max(headBobPeak, Math.abs(frame.headBob));
+      aimSwayPeak = Math.max(aimSwayPeak, Math.hypot(frame.aimSwayX, frame.aimSwayY));
+    }
+
+    expect(headBobPeak / normalHeadBobPeak).toBeCloseTo(O2_CROUCH_STABILITY_FACTOR, 2);
+    expect(aimSwayPeak / normalAimSwayPeak).toBeCloseTo(O2_CROUCH_STABILITY_FACTOR, 2);
+  });
+
   it("composes a damped lateral lean and roll only for active cover", () => {
     const damper = createCameraMotionDamper();
     const left = damper.update({
@@ -309,6 +342,44 @@ describe("camera motion damper", () => {
     const quarterFactor = O2_WALL_BRACE_STABILITY_FACTOR ** 2;
     expect(combinedHeadBobPeak / restedHeadBobPeak).toBeCloseTo(quarterFactor, 2);
     expect(combinedAimSwayPeak / restedAimSwayPeak).toBeCloseTo(quarterFactor, 2);
+  });
+
+  it("stacks crouch and wall bracing into quarter camera motion", () => {
+    const normalDamper = createCameraMotionDamper();
+    const combinedDamper = createCameraMotionDamper();
+    let normalHeadBobPeak = 0;
+    let combinedHeadBobPeak = 0;
+    let normalAimSwayPeak = 0;
+    let combinedAimSwayPeak = 0;
+
+    for (let index = 0; index < 180; index += 1) {
+      const normalFrame = normalDamper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        oxygenRatio: 0,
+      });
+      const combinedFrame = combinedDamper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        oxygenRatio: 0,
+        crouching: true,
+        stabilizedByWall: true,
+      });
+      normalHeadBobPeak = Math.max(normalHeadBobPeak, Math.abs(normalFrame.headBob));
+      combinedHeadBobPeak = Math.max(combinedHeadBobPeak, Math.abs(combinedFrame.headBob));
+      normalAimSwayPeak = Math.max(
+        normalAimSwayPeak,
+        Math.hypot(normalFrame.aimSwayX, normalFrame.aimSwayY),
+      );
+      combinedAimSwayPeak = Math.max(
+        combinedAimSwayPeak,
+        Math.hypot(combinedFrame.aimSwayX, combinedFrame.aimSwayY),
+      );
+    }
+
+    const quarterFactor = O2_CROUCH_STABILITY_FACTOR * O2_WALL_BRACE_STABILITY_FACTOR;
+    expect(combinedHeadBobPeak / normalHeadBobPeak).toBeCloseTo(quarterFactor, 2);
+    expect(combinedAimSwayPeak / normalAimSwayPeak).toBeCloseTo(quarterFactor, 2);
   });
 
   it("can disable breathing and gait bob together", () => {

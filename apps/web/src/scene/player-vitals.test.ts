@@ -233,6 +233,14 @@ describe("player vitals model", () => {
     expect(applyPlayerProjectileO2Cost(partialReserve, 100).o2).toBe(0);
   });
 
+  it("keeps hip-fire free while zoomed shots retain their projectile charge", () => {
+    const hipFire = applyPlayerProjectileO2Cost(createPlayerVitals(), 100, 1, false);
+    const zoomed = applyPlayerProjectileO2Cost(createPlayerVitals(), 100, 1, true);
+
+    expect(hipFire.o2).toBe(PLAYER_MAX_O2);
+    expect(zoomed.o2).toBe(PLAYER_MAX_O2 - 25);
+  });
+
   it("requires enough reserve to pay each discrete action cost", () => {
     const exact = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2 - O2_JUMP_COST);
     const insufficient = applyPlayerO2Cost(

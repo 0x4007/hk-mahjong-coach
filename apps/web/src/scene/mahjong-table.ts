@@ -10,15 +10,31 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
 
-import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
+import {
+  DEFAULT_VISUAL_MAP_ID,
+  getVisualMapDefinition,
+  normalizeVisualMapId,
+  type VisualMapId,
+} from "./map-catalog.js";
 import {
   generateWeaponPickups,
+  generateWeaponPickupsOnEdges,
   canInterruptWeaponReload,
   resolveWeaponEffectOpacity,
   WEAPON_DEFINITIONS,
   WEAPON_CHART_ENTRIES,
+  WEAPON_SHIELD_SPARK_LIFETIME_SECONDS,
+  WEAPON_SHIELD_SPARK_COLOR,
+  WEAPON_SHIELD_SPARK_OPACITY,
   WEAPON_BULLET_HOLE_LIFETIME_SECONDS,
   WEAPON_BULLET_HOLE_MAX_COUNT,
+  WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS,
+  WEAPON_BLOOD_CLOUD_OPACITY,
+  WEAPON_BLOOD_CLOUD_COLOR,
+  WEAPON_BLOOD_DECAL_LIFETIME_SECONDS,
+  WEAPON_BLOOD_DECAL_MAX_COUNT,
+  WEAPON_BLOOD_SPLAT_OPACITY,
+  WEAPON_BLOOD_SPLAT_COLOR,
   WEAPON_IMPACT_LIFETIME_SECONDS,
   WEAPON_PICKUP_RANGE_METERS,
   WEAPON_TRACER_LIFETIME_SECONDS,
@@ -27,6 +43,16 @@ import {
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
   WEAPON_BARREL_SMOKE_MAX_RATE,
   WEAPON_BARREL_SMOKE_POOL_SIZE,
+  WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS,
+  WEAPON_MUZZLE_SMOKE_PARTICLE_COUNT,
+  WEAPON_MUZZLE_SMOKE_LOG_STRENGTH,
+  WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS,
+  WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY,
+  WEAPON_MUZZLE_FLASH_LIGHT_DISTANCE,
+  WEAPON_MUZZLE_FLASH_LIGHT_DECAY,
+  resolveWeaponMuzzleFlashLightRatio,
+  resolveWeaponMuzzleSmokeLogProgress,
+  resolveWeaponMuzzleSmokeOpacity,
   shouldClearWeaponSmoke,
   WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
   resolveWeaponBarrelSmokeRatio,
@@ -39,9 +65,13 @@ import {
   resolveWeaponReloadPose,
   resolveWeaponRoundReloadPose,
   resolveWeaponRecoilAmount,
+  resolveWeaponStoppingPower,
   resolveWeaponSpreadRadians,
+  resolveWeaponTriggerProfile,
   resolveWeaponHotkey,
   resolveGunAudioProfile,
+  resolveBulletImpactAudioProfile,
+  resolveBulletImpactAngleRadians,
   GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
   resolveWeaponAudioProximity,
   WEAPON_AUDIO_MAX_DISTANCE_METERS,
@@ -49,22 +79,53 @@ import {
   WEAPON_AUDIO_ROLLOFF_FACTOR,
   resolveWeaponBarrelTemperatureC,
   resolveWeaponBarrelGlowRatio,
+  resolveWeaponBloodCloudScale,
+  resolveWeaponBloodSmearRatio,
+  resolveWeaponBloodEligibility,
+  resolveWeaponShieldHit,
   type WeaponSpawnRect,
   type WeaponStateSnapshot,
 } from "./weapons.js";
 import {
+  MELEE_SWING_ARC_RADIANS,
+  MELEE_SWING_RECOVERY_SECONDS,
   resolveMeleeLongestSizeMeters,
   resolveMeleeO2Cost,
   resolveMeleeRangeMeters,
   resolveMeleeSwing,
+  resolveMeleeThrowSpeed,
+  resolveMeleeDamageWithMomentum,
+  resolveMeleeStoppingPower,
+  resolveMeleeSwingEnvelopeGain,
+  resolveMeleeIdleResetPose,
+  resolveMeleeIdleResetProgress,
   resolveMeleeSwingPose,
+  resolveMeleeAudioProfile,
+  shouldAdvanceMeleeIdleReset,
+  createEmptyMeleeStateSnapshot,
   type MeleeObjectSnapshot,
+  type MeleeHitContext,
   type MeleeStateSnapshot,
   type MeleeSwingDirection,
 } from "./melee.js";
+import {
+  createCombatDamageRouter,
+  type CombatActorId,
+  type CombatDamageApplicationResult,
+  type CombatDamageSource,
+  type CombatHitZone,
+} from "./combat-damage.js";
+import {
+  createDebuggingTwoMap,
+  createWarehouseFog,
+  DEBUGGING_TWO_WORLD_BOUNDS,
+  type DebuggingTwoMeleeKind,
+  type DebuggingTwoMapResources,
+} from "./debugging-two-map.js";
 
 export type { WeaponId, WeaponInventorySnapshot, WeaponStateSnapshot } from "./weapons.js";
 export type { MeleeObjectSnapshot, MeleeStateSnapshot } from "./melee.js";
+export type { VisualMapId } from "./map-catalog.js";
 
 import {
   createFallbackMahjongPhysics,
@@ -85,7 +146,6 @@ import {
   PLAYER_MAX_O2,
   PLAYER_MAX_SHIELD,
   SHIELD_RECHARGE_DELAY_SECONDS,
-  applyPlayerDamage,
   applyPlayerO2Cost,
   applyPlayerO2ImpactCost,
   applyPlayerProjectileO2Cost,
@@ -148,8 +208,13 @@ import {
 } from "./o2-blur.js";
 import {
   clampPlayerPositionToWallTangent,
+  isPlayerFacingWall,
+  PLAYER_WALL_COVER_RANGE_METERS,
   projectPlayerMovementToWallTangent,
   resolvePlayerWallContact,
+  resolvePlayerWallContactInFacingCone,
+  resolvePlayerWallSnapDelta,
+  resolvePlayerWallSnapTarget,
   type PlayerWallContact,
 } from "./wall-contact.js";
 import {
@@ -161,6 +226,19 @@ import {
   shouldRenderSniperScopeObject,
   shouldEnableSniperScope,
 } from "./sniper-scope.js";
+import {
+  createShieldFlareMaterial,
+  SIMULANT_SHIELD_FLARE_LIFETIME_SECONDS,
+  updateShieldFlareMaterial,
+} from "./shield-flare.js";
+import {
+  RAGDOLL_DURATION_SECONDS,
+  resolveRagdollJointPose,
+  startRagdoll,
+  stepRagdoll,
+  type RagdollImpulse,
+  type RagdollState,
+} from "./ragdoll.js";
 
 export type { PlayerVitalsDamageResult, PlayerVitalsState } from "./player-vitals.js";
 
@@ -226,17 +304,62 @@ export const resolveReloadAimingDownSights = (
   reloading: boolean,
 ): boolean => aimingDownSightsRequested && !reloading;
 
+/** Only a new requested zoom input may arm a fresh cover transition. */
+export const resolveZoomActivationEdge = (
+  previousRequestedAiming: boolean,
+  requestedAiming: boolean,
+): boolean => !previousRequestedAiming && requestedAiming;
+
+/** A successful gun interaction or selection takes input focus from drawn melee. */
+export const shouldStashMeleeForGun = (
+  meleeActive: boolean,
+  gunActionSucceeded: boolean,
+): boolean => meleeActive && gunActionSucceeded;
+
+/** Walking over a gun may fill an inventory slot, but must not draw it over melee. */
+export const shouldEquipWalkOverGun = (meleeActive: boolean, gunAlreadyActive: boolean): boolean =>
+  !meleeActive && !gunAlreadyActive;
+
+/** An equipped empty magazine must immediately consume available reserve ammo. */
+export const shouldAutoReloadOnWeaponEquip = (
+  ammoInMagazine: number,
+  reserveAmmo: number,
+): boolean =>
+  Number.isFinite(ammoInMagazine) &&
+  Number.isFinite(reserveAmmo) &&
+  ammoInMagazine <= 0 &&
+  reserveAmmo > 0;
+
+/** Restore the gun that was in hand only after the melee object really drops. */
+export const resolveMeleeDropRearmWeapon = (
+  previouslyHeldWeapon: WeaponId | null,
+  dropSucceeded: boolean,
+): WeaponId | null => (dropSucceeded ? previouslyHeldWeapon : null);
+
+/** Select an owned gun after a successful melee drop when no gun was active. */
+export const shouldAutoRearmOwnedGunAfterMeleeDrop = (
+  previouslyHeldWeapon: WeaponId | null,
+  dropSucceeded: boolean,
+  rearmSuppressed: boolean,
+): boolean => dropSucceeded && previouslyHeldWeapon === null && !rearmSuppressed;
+
 /**
  * Cover is an explicit zoom transition, not a side effect of walking into a
  * wall while already zoomed. The caller supplies the pending zoom-on edge
- * after the physics contact probe has run for the current frame.
+ * after the physics wall-range probe has run for the current frame. The aim
+ * value is the requested input state, so a weapon reload can temporarily
+ * unzoom the presentation without dropping an already-engaged cover stance.
  */
 export const resolveCoverModeFromAimTransition = (
   coverMode: boolean,
   zoomActivated: boolean,
-  aimingDownSights: boolean,
-  touchingWall: boolean,
-): boolean => aimingDownSights && touchingWall && (coverMode || zoomActivated);
+  aimingDownSightsRequested: boolean,
+  wallInRange: boolean,
+): boolean => aimingDownSightsRequested && wallInRange && (coverMode || zoomActivated);
+
+/** An accepted jump always breaks the explicit cover stance. */
+export const resolveCoverModeAfterJump = (coverMode: boolean, jumpAccepted: boolean): boolean =>
+  jumpAccepted ? false : coverMode;
 
 /** Resolve the A/D strafe input used by cover presentation. */
 export const resolveCoverLeanInput = (coverMode: boolean, strafeInput: number): number => {
@@ -283,6 +406,12 @@ export const resolveCrouchedStateAfterJump = (
   jumpAccepted: boolean,
 ): boolean => (jumpAccepted ? false : isCrouched);
 
+/** An accepted jump leaves the hidden upright locomotion toggle in run/trot mode. */
+export const resolveWalkingModeAfterJump = (
+  isWalkingMode: boolean,
+  jumpAccepted: boolean,
+): boolean => (jumpAccepted ? false : isWalkingMode);
+
 /** A sprint request leaves crouch only when the required stand transition succeeds. */
 export const resolveCrouchedStateAfterSprint = (
   isCrouched: boolean,
@@ -300,6 +429,9 @@ export const shouldInterruptReloadForSprint = (
   isReloading: boolean,
   sprintAccepted: boolean,
 ): boolean => isReloading && sprintAccepted;
+
+/** A gun melee input is an accepted action even while a reload is in progress. */
+export const shouldInterruptReloadForMelee = (isReloading: boolean): boolean => isReloading;
 
 export const VISUAL_SCENE_STATE_VERSION = 1 as const;
 
@@ -393,7 +525,13 @@ const WORLD_SPAWN_DROP_DISTANCE = WORLD_SPAWN_DROP_HEIGHT * 2;
 const PLAYER_DEATH_RESPAWN_DELAY_MS = 3_000;
 const PLAYER_DEATH_FADE_DURATION_MS = 650;
 const PLAYER_RESPAWN_FADE_IN_DURATION_MS = 260;
+const LOCAL_PLAYER_COMBAT_ACTOR_ID = "player";
+const SIMULANT_COMBAT_ACTOR_ID = "bot:simulant";
 const SIMULANT_STOP_DISTANCE_METERS = 2.4;
+/** Stopping power briefly interrupts the charge before the simulant resumes. */
+const SIMULANT_MAX_STAGGER_SECONDS = 0.65;
+const SIMULANT_STAGGER_SECONDS_PER_STOPPING_POWER = 0.09;
+const SIMULANT_KNOCKBACK_DAMPING_PER_SECOND = 5.2;
 // Keep the 250 m FPS world bounded to 125 m from the origin in each direction.
 // Coarse chunks preserve long traversal sightlines while keeping the resident
 // grid compact enough for the runner prototype.
@@ -415,7 +553,14 @@ const EXPLORATION_BUILDING_FEATURE_LIFT = 0.75;
 export const EXPLORATION_WORLD_HALF_SIZE = EXPLORATION_WORLD_SIZE_METERS / 2;
 export const EXPLORATION_WORLD_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
 const SIMULANT_SPAWN_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
-const WORLD_BOUNDS = {
+interface WorldBounds {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+const WORLD_BOUNDS: WorldBounds = {
   minX: -EXPLORATION_WORLD_HALF_SIZE,
   maxX: EXPLORATION_WORLD_HALF_SIZE,
   minZ: -EXPLORATION_WORLD_HALF_SIZE,
@@ -769,16 +914,22 @@ export const serializeVisualMapDocument = (
   return JSON.stringify(normalizeVisualMapDocument(document), null, 2);
 };
 
-const getAuthoredVisualMapDocument = (): VisualMapDocument => {
-  const document = parseVisualMapDocument(JSON.stringify(authoredVisualMapInput));
+const getAuthoredVisualMapDocument = (mapId: VisualMapId): VisualMapDocument => {
+  const map = getVisualMapDefinition(mapId);
+  if (map.document === undefined) {
+    throw new Error(`The ${map.label} map is procedural and has no authored document`);
+  }
+  const document = parseVisualMapDocument(JSON.stringify(map.document));
   if (document === null) {
-    throw new Error("The authored penthouse map is invalid");
+    throw new Error(`The authored ${map.label} map is invalid`);
   }
   return document;
 };
 
-const getVisualDebugPreferencesStorage = (): Storage | null => {
-  if (!import.meta.env.DEV || typeof window === "undefined") {
+const getVisualDebugPreferencesStorage = (debugEnabled: boolean): Storage | null => {
+  // The checkpoint server serves a production bundle, but an explicit
+  // `?debug=1` query still enables the local debug panel and its preferences.
+  if ((!import.meta.env.DEV && !debugEnabled) || typeof window === "undefined") {
     return null;
   }
   try {
@@ -880,6 +1031,7 @@ export const writeVisualDebugPreferences = (
 
 export interface MahjongTableSceneOptions {
   readonly debug?: boolean;
+  readonly mapId?: VisualMapId;
   readonly onExplorationAreaChange?: (area: string) => void;
   readonly onVisualAreaChange?: (area: VisualSceneAreaId, enabled: boolean) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
@@ -962,6 +1114,8 @@ export interface MahjongTableMount {
   readonly toggleCrouch: () => boolean;
   readonly jump: () => boolean;
   readonly fire: () => void;
+  readonly melee: () => void;
+  readonly setReticleEnabled: (enabled: boolean) => void;
   readonly reload: () => void;
   readonly interact: () => void;
   readonly cycleWeapon: (direction?: 1 | -1) => void;
@@ -1574,6 +1728,10 @@ const HUMAN_EYE_BRIGHT_PUPIL_MM = 2.5;
 const HUMAN_EYE_DARK_PUPIL_MM = 6.5;
 const HUMAN_EYE_BRIGHT_LUMINANCE = 1.45;
 const HUMAN_EYE_DARK_LUMINANCE = 0.35;
+// Low contrast and larger-pupil aberration make dark-room focus acquisition
+// less certain. This is a modest perceptual slowdown, not a claim that the
+// ciliary muscles themselves respond 20% more slowly in darkness.
+const HUMAN_EYE_DARK_ACCOMMODATION_SCALE = 0.8;
 const HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE =
   (HUMAN_EYE_FOCAL_LENGTH_MM * HUMAN_EYE_FOCAL_LENGTH_MM) /
     ((HUMAN_EYE_FOCAL_LENGTH_MM / HUMAN_EYE_REFERENCE_PUPIL_MM) *
@@ -1603,10 +1761,10 @@ export const resolveDofIntensityForPosture = (_isCrouched: boolean, isZoomed = f
 // of the close-focus blur. Other pupil sizes scale this cutoff with dilation.
 const BOKEH_PRACTICAL_HYPERFOCAL_DISTANCE = 6;
 const BOKEH_DISTANCE_FALLOFF_POWER = 2.94;
-// 95% convergence is approximately 0.4 s near and 0.65 s far. The slower
-// far-to-near transition avoids a distracting camera snap when gaze leaves a
-// tile, while the reverse transition follows the eye's slower relaxation.
-const BOKEH_NEAR_ACCOMMODATION_DAMPING = 7;
+// At the reference 4 mm pupil, 95% convergence is approximately 0.8 s near
+// and 0.65 s far. Near focus is intentionally half-speed so shifting gaze onto
+// a close object feels calm; dark adaptation adds a modest pupil-linked delay.
+const BOKEH_NEAR_ACCOMMODATION_DAMPING = 3.5;
 const BOKEH_FAR_ACCOMMODATION_DAMPING = 4.5;
 const BOKEH_PUPIL_ADAPTATION_DAMPING = 2.4;
 const BOKEH_TILE_SAMPLE_OFFSET = 0.028;
@@ -3291,7 +3449,11 @@ export const collectScenePhysicsBoxes = (
   return boxes;
 };
 
-const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => {
+const createStaticPhysicsBoxes = (
+  scene: THREE.Scene,
+  worldBounds: WorldBounds = WORLD_BOUNDS,
+  extraBoxes: readonly PhysicsBox[] = [],
+): readonly PhysicsBox[] => {
   const focusRamp = scene.getObjectByName("FocusCalibrationRamp") ?? null;
   const wallRoot = scene.getObjectByName("WallRoot") ?? null;
   const climbingGymRoot = scene.getObjectByName("ClimbingGym") ?? null;
@@ -3317,8 +3479,16 @@ const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => 
       : [];
   const boxes: PhysicsBox[] = [
     {
-      center: { x: 0, y: -0.1, z: 0 },
-      halfExtents: { x: WORLD_BOUNDS.maxX, y: 0.1, z: WORLD_BOUNDS.maxZ },
+      center: {
+        x: (worldBounds.minX + worldBounds.maxX) / 2,
+        y: -0.1,
+        z: (worldBounds.minZ + worldBounds.maxZ) / 2,
+      },
+      halfExtents: {
+        x: (worldBounds.maxX - worldBounds.minX) / 2,
+        y: 0.1,
+        z: (worldBounds.maxZ - worldBounds.minZ) / 2,
+      },
     },
   ];
   const tableRoot = scene.getObjectByName("TableRoot") ?? null;
@@ -3338,6 +3508,7 @@ const createStaticPhysicsBoxes = (scene: THREE.Scene): readonly PhysicsBox[] => 
     boxes.push(...climbingGymPhysicsBoxes);
   }
   boxes.push(...collectScenePhysicsBoxes(scene));
+  boxes.push(...extraBoxes);
   return boxes;
 };
 
@@ -3360,14 +3531,39 @@ export const resolveHumanEyePupilDiameter = (luminance: number): number => {
   return THREE.MathUtils.lerp(HUMAN_EYE_BRIGHT_PUPIL_MM, HUMAN_EYE_DARK_PUPIL_MM, easedLowLightMix);
 };
 
-/** Use different accommodation timing for near and far gaze changes. */
+/**
+ * Keep display exposure and eye adaptation separate. The warehouse is lit by
+ * isolated pools against a black background, so its global render estimate is
+ * not a useful proxy for the player's dark adaptation.
+ */
+export const resolveHumanEyeAdaptationLuminance = (
+  sceneLuminance: number,
+  isWarehouse: boolean,
+): number => {
+  const safeLuminance = Number.isFinite(sceneLuminance) ? sceneLuminance : 1;
+  return isWarehouse ? Math.min(safeLuminance, HUMAN_EYE_DARK_LUMINANCE) : safeLuminance;
+};
+
+/** Use different, pupil-aware accommodation timing for near and far gaze changes. */
 export const resolveFocusAccommodationDamping = (
   currentDistance: number,
   targetDistance: number,
-): number =>
-  targetDistance < currentDistance
-    ? BOKEH_NEAR_ACCOMMODATION_DAMPING
-    : BOKEH_FAR_ACCOMMODATION_DAMPING;
+  pupilDiameterMm = HUMAN_EYE_REFERENCE_PUPIL_MM,
+): number => {
+  const baseDamping =
+    targetDistance < currentDistance
+      ? BOKEH_NEAR_ACCOMMODATION_DAMPING
+      : BOKEH_FAR_ACCOMMODATION_DAMPING;
+  const safePupilDiameter = Number.isFinite(pupilDiameterMm)
+    ? THREE.MathUtils.clamp(pupilDiameterMm, HUMAN_EYE_BRIGHT_PUPIL_MM, HUMAN_EYE_DARK_PUPIL_MM)
+    : HUMAN_EYE_REFERENCE_PUPIL_MM;
+  const dilationMix = clampUnit(
+    (safePupilDiameter - HUMAN_EYE_REFERENCE_PUPIL_MM) /
+      (HUMAN_EYE_DARK_PUPIL_MM - HUMAN_EYE_REFERENCE_PUPIL_MM),
+  );
+  const darkDamping = baseDamping * HUMAN_EYE_DARK_ACCOMMODATION_SCALE;
+  return THREE.MathUtils.lerp(baseDamping, darkDamping, dilationMix);
+};
 
 /** Resolve restrained scene-space bokeh from eye focus and pupil size. */
 export const resolveHumanEyeBokeh = (
@@ -4280,9 +4476,9 @@ const addHand = (
   parent.add(hand);
 };
 
-const createSimulantBody = (color: THREE.Color): THREE.Group => {
+const createSimulantBody = (color: THREE.Color, name = "SimulantBody"): THREE.Group => {
   const root = new THREE.Group();
-  root.name = "SimulantBody";
+  root.name = name;
   const bodyScale = SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS;
   root.scale.setScalar(bodyScale);
   root.position.y = SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS * bodyScale;
@@ -4294,23 +4490,35 @@ const createSimulantBody = (color: THREE.Color): THREE.Group => {
     emissiveIntensity: 0.2,
   });
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), bodyMaterial);
+  head.name = "RagdollHead";
+  head.userData = { combatHitZone: "head", ragdollPart: "head" };
   head.position.set(0, 0.86, 0);
   root.add(head);
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.52, 8, 8), bodyMaterial);
+  torso.name = "RagdollTorso";
+  torso.userData = { combatHitZone: "body", ragdollPart: "torso" };
   torso.position.set(0, 0.44, 0);
   root.add(torso);
   const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  leftArm.name = "RagdollLeftArm";
+  leftArm.userData = { combatHitZone: "body", ragdollPart: "leftArm" };
   leftArm.position.set(-0.28, 0.52, 0.02);
   leftArm.rotation.z = 0.25;
   root.add(leftArm);
   const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  rightArm.name = "RagdollRightArm";
+  rightArm.userData = { combatHitZone: "body", ragdollPart: "rightArm" };
   rightArm.position.set(0.28, 0.52, 0.02);
   rightArm.rotation.z = -0.25;
   root.add(rightArm);
   const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  leftLeg.name = "RagdollLeftLeg";
+  leftLeg.userData = { combatHitZone: "body", ragdollPart: "leftLeg" };
   leftLeg.position.set(-0.12, 0.05, 0);
   root.add(leftLeg);
   const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  rightLeg.name = "RagdollRightLeg";
+  rightLeg.userData = { combatHitZone: "body", ragdollPart: "rightLeg" };
   rightLeg.position.set(0.12, 0.05, 0);
   root.add(rightLeg);
   root.traverse((node) => {
@@ -4320,6 +4528,65 @@ const createSimulantBody = (color: THREE.Color): THREE.Group => {
     }
   });
   return root;
+};
+
+interface RagdollBodyParts {
+  readonly head: THREE.Object3D;
+  readonly torso: THREE.Object3D;
+  readonly leftArm: THREE.Object3D;
+  readonly rightArm: THREE.Object3D;
+  readonly leftLeg: THREE.Object3D;
+  readonly rightLeg: THREE.Object3D;
+}
+
+const resolveRagdollBodyParts = (body: THREE.Group): RagdollBodyParts => {
+  const resolve = (name: string): THREE.Object3D => {
+    const part = body.getObjectByName(name);
+    if (part === undefined) {
+      throw new Error(`Ragdoll body is missing ${name}`);
+    }
+    return part;
+  };
+  return {
+    head: resolve("RagdollHead"),
+    torso: resolve("RagdollTorso"),
+    leftArm: resolve("RagdollLeftArm"),
+    rightArm: resolve("RagdollRightArm"),
+    leftLeg: resolve("RagdollLeftLeg"),
+    rightLeg: resolve("RagdollRightLeg"),
+  };
+};
+
+const resetRagdollBodyPose = (body: THREE.Group, parts: RagdollBodyParts): void => {
+  body.position.y =
+    SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+    (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+  body.rotation.set(0, 0, 0);
+  parts.head.rotation.set(0, 0, 0);
+  parts.torso.rotation.set(0, 0, 0);
+  parts.leftArm.rotation.set(0, 0, 0.25);
+  parts.rightArm.rotation.set(0, 0, -0.25);
+  parts.leftLeg.rotation.set(0, 0, 0);
+  parts.rightLeg.rotation.set(0, 0, 0);
+};
+
+const applyRagdollBodyPose = (
+  marker: THREE.Group,
+  body: THREE.Group,
+  parts: RagdollBodyParts,
+  state: RagdollState,
+): void => {
+  const jointPose = resolveRagdollJointPose(state);
+  marker.position.set(state.position.x, state.position.y, state.position.z);
+  marker.rotation.set(state.rotation.x, state.rotation.y, state.rotation.z);
+  resetRagdollBodyPose(body, parts);
+  parts.head.rotation.x = jointPose.headPitch;
+  parts.torso.rotation.x = jointPose.torsoPitch;
+  parts.torso.rotation.z = jointPose.torsoRoll;
+  parts.leftArm.rotation.z = jointPose.leftArmRoll;
+  parts.rightArm.rotation.z = jointPose.rightArmRoll;
+  parts.leftLeg.rotation.x = jointPose.leftLegPitch;
+  parts.rightLeg.rotation.x = jointPose.rightLegPitch;
 };
 
 const addOpenMeld = (
@@ -4450,6 +4717,47 @@ const makeWeaponSmokeTexture = (): THREE.CanvasTexture => {
   return texture;
 };
 
+/** Create one shared, dark-red splat mask for every projected blood decal. */
+const makeWeaponBloodSplatTexture = (): THREE.CanvasTexture => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = 96;
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    throw new Error("Unable to create a canvas context for blood splat");
+  }
+  const center = canvas.width / 2;
+  const points = 32;
+  const color = `#${WEAPON_BLOOD_SPLAT_COLOR.toString(16).padStart(6, "0")}`;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.beginPath();
+  for (let index = 0; index < points; index += 1) {
+    const angle = (index / points) * Math.PI * 2;
+    const radius =
+      center *
+      (0.57 +
+        Math.sin(index * 2.7) * 0.08 +
+        Math.sin(index * 5.1 + 0.6) * 0.05 +
+        (index % 7 === 0 ? 0.12 : 0));
+    const x = center + Math.cos(angle) * radius;
+    const y = center + Math.sin(angle) * radius;
+    if (index === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+  context.closePath();
+  context.fillStyle = color;
+  context.fill();
+  const texture = createCanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
+};
+
 const addLabel = (
   scene: THREE.Scene,
   label: string,
@@ -4485,12 +4793,14 @@ interface WeaponSmokeParticle {
   riseAcceleration: number;
   velocityDrag: number;
   spin: number;
+  isGunshot: boolean;
   active: boolean;
 }
 
 interface WeaponModelResources {
   readonly root: THREE.Group;
   readonly muzzleFlash: THREE.Mesh;
+  readonly muzzleFlashLight: THREE.PointLight | null;
   readonly barrels: readonly WeaponBarrelResources[];
   readonly hotBarrelLength: number;
   readonly muzzleSmokeRoot: THREE.Group | null;
@@ -4520,7 +4830,17 @@ interface WeaponEffect {
   readonly object: THREE.Object3D;
   readonly kind: WeaponEffectKind;
   readonly materials: readonly (THREE.MeshBasicMaterial | THREE.LineBasicMaterial)[];
+  readonly opacityMultiplier: number;
   remainingSeconds: number;
+}
+
+interface WeaponHitResponse {
+  readonly targetKind?: "simulant";
+  readonly shieldHit?: boolean;
+  readonly bloodEligible?: boolean;
+  readonly targetVelocity?: PhysicsVector;
+  /** Resolved impact damage for size/momentum-based melee hits. */
+  readonly resolvedDamage?: number;
 }
 
 interface WeaponRuntime {
@@ -4532,22 +4852,44 @@ interface WeaponRuntime {
     viewActive: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
+    meleeActive: boolean,
+    worldVelocity: PhysicsVector,
+    airborne: boolean,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
+  readonly setReticleEnabled: (enabled: boolean) => void;
   readonly fire: () => void;
+  /** Swing the active gun as a melee weapon without consuming ammunition. */
+  readonly melee: () => boolean;
   readonly fireFrom: (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
     weapon: WeaponId,
     options?: WeaponFireFromOptions,
   ) => void;
+  readonly playMeleeSwingSound: (
+    attributes: MeleeObjectSnapshot,
+    sourcePosition: THREE.Vector3,
+    swingDurationSeconds: number,
+  ) => void;
+  readonly playMeleeImpactSound: (
+    attributes: MeleeObjectSnapshot,
+    sourcePosition: THREE.Vector3,
+  ) => void;
+  /** Render the same shield spark/blood response used by projectile hits. */
+  readonly playMeleeHitEffects: (
+    position: PhysicsVector,
+    direction: PhysicsVector,
+    damage: number,
+    response: WeaponHitResponse,
+  ) => void;
   readonly reload: () => void;
   readonly interruptReload: () => void;
   readonly isReloading: () => boolean;
-  readonly interact: () => void;
+  readonly interact: () => boolean;
   readonly holster: () => void;
-  readonly cycleWeapon: (direction?: 1 | -1) => void;
-  readonly cycleWeaponTo: (weapon: WeaponId) => void;
+  readonly cycleWeapon: (direction?: 1 | -1) => boolean;
+  readonly cycleWeaponTo: (weapon: WeaponId) => boolean;
   readonly dropActiveWeapon: (playerVelocity?: PhysicsVector) => void;
   readonly recordDeath: () => void;
   readonly getWeaponScopeLens: () => {
@@ -4573,8 +4915,29 @@ interface WeaponFireFromOptions {
   readonly playAudio?: boolean;
   readonly playPassByAudio?: boolean;
   readonly trackShotHits?: boolean;
-  readonly onHit?: (hitObject: THREE.Object3D, damage: number) => void;
+  readonly onHit?: (
+    hitObject: THREE.Object3D,
+    damage: number,
+    context: WeaponHitContext,
+  ) => WeaponHitResponse | undefined;
   readonly onTargetHit?: () => void;
+}
+
+interface WeaponHitContext {
+  /** Projectile travel direction at the resolved hit. */
+  readonly direction: PhysicsVector;
+  /** World-space impact point for hit reactions and diagnostics. */
+  readonly point: PhysicsVector;
+  readonly distance: number;
+  readonly pelletIndex: number;
+  readonly projectileCount: number;
+  readonly instanceIndex?: number;
+  /** Gun strikes reuse the projectile hit seam without creating shot effects. */
+  readonly mode?: "projectile" | "melee";
+  readonly attackerVelocity?: PhysicsVector;
+  readonly attackerAirborne?: boolean;
+  readonly meleeSwingSpeedRadiansPerSecond?: number;
+  readonly meleeStoppingPower?: number;
 }
 
 interface WeaponAudioSpatialOutput {
@@ -4584,6 +4947,23 @@ interface WeaponAudioSpatialOutput {
 
 const getWeaponAccent = (weapon: WeaponId): string =>
   `#${new THREE.Color(WEAPON_DEFINITIONS[weapon].color).getHexString()}`;
+
+/** Build the shared melee attributes from a gun's physical size proxy. */
+const resolveWeaponMeleeAttributes = (weapon: WeaponId): MeleeObjectSnapshot => {
+  const definition = WEAPON_DEFINITIONS[weapon];
+  const swing = resolveMeleeSwing(definition.meleeVolumeM3);
+  return {
+    objectId: -(WEAPON_IDS.indexOf(weapon) + 1),
+    displayName: `${definition.label} melee`,
+    volumeM3: definition.meleeVolumeM3,
+    rangeMeters: resolveMeleeRangeMeters(definition.meleeLengthMeters),
+    swingSpeedRadiansPerSecond: swing.swingSpeedRadiansPerSecond,
+    damage: swing.damage,
+    stoppingPower: swing.stoppingPower,
+    oxygenCost: swing.oxygenCost,
+  };
+};
+
 interface MeleeRuntime {
   readonly update: (
     deltaSeconds: number,
@@ -4591,6 +4971,8 @@ interface MeleeRuntime {
     aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
     controlsActive: boolean,
     viewActive: boolean,
+    worldVelocity: PhysicsVector,
+    airborne: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
   ) => void;
@@ -4598,8 +4980,11 @@ interface MeleeRuntime {
   readonly fire: () => boolean;
   readonly interact: () => boolean;
   readonly isActive: () => boolean;
+  /** Hide the carried prop without returning it to the world. */
+  readonly stash: () => boolean;
   readonly holster: () => boolean;
   readonly dropActiveObject: (playerVelocity?: PhysicsVector) => boolean;
+  readonly throwActiveObject: (playerVelocity?: PhysicsVector) => boolean;
   readonly getSnapshot: () => MeleeStateSnapshot;
   readonly dispose: () => void;
 }
@@ -4610,9 +4995,9 @@ const WEAPON_BLACK = 0x050607;
 const WEAPON_BARREL_HEAT_COLOR = new THREE.Color(0xff3518);
 const WEAPON_BARREL_HEAT_EMISSIVE = new THREE.Color(0xff1600);
 const WEAPON_BARREL_HEAT_EMISSIVE_INTENSITY = 1;
-/** Muzzle and thermal smoke fade in quickly, then expand into a transparent linger. */
+/** Thermal smoke fades in slowly, then expands into a transparent linger. */
 const WEAPON_SMOKE_FADE_IN_SECONDS = 0.24;
-const WEAPON_SMOKE_LIFETIME_SECONDS = 5;
+const WEAPON_THERMAL_SMOKE_LIFETIME_SECONDS = 5;
 const WEAPON_SMOKE_SIGMOID_STEEPNESS = 10;
 const WEAPON_SMOKE_SIGMOID_START = 1 / (1 + Math.exp(WEAPON_SMOKE_SIGMOID_STEEPNESS / 2));
 const WEAPON_SMOKE_SIGMOID_END = 1 / (1 + Math.exp(-WEAPON_SMOKE_SIGMOID_STEEPNESS / 2));
@@ -4621,7 +5006,6 @@ const WEAPON_SMOKE_REFERENCE_BARREL_LENGTH = 0.34;
 const WEAPON_SMOKE_LONGEST_BARREL_LENGTH = 1.35;
 const WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE = 0.6;
 const WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION = 0.45;
-const WEAPON_MUZZLE_SMOKE_LOG_STRENGTH = 24;
 const WEAPON_THERMAL_SMOKE_RATE_MULTIPLIER = 2;
 const WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS = 0.05;
 const WEAPON_SHOT_SOUND_CRACK_DURATION_SECONDS = 0.006;
@@ -4830,6 +5214,7 @@ const createWeaponSmokeParticles = (
       riseAcceleration: 0,
       velocityDrag: 0,
       spin: 0,
+      isGunshot: false,
       active: false,
     });
   }
@@ -5007,6 +5392,25 @@ const createWeaponModel = (
   muzzleFlash.visible = false;
   muzzleFlash.userData = { weaponVisual: true, dofIgnore: true };
   root.add(muzzleFlash);
+  let muzzleFlashLight: THREE.PointLight | null = null;
+  if (held) {
+    muzzleFlashLight = new THREE.PointLight(
+      definition.color,
+      0,
+      WEAPON_MUZZLE_FLASH_LIGHT_DISTANCE,
+      WEAPON_MUZZLE_FLASH_LIGHT_DECAY,
+    );
+    muzzleFlashLight.name = "WeaponMuzzleFlashLight";
+    muzzleFlashLight.position.z = muzzleZ;
+    muzzleFlashLight.visible = false;
+    muzzleFlashLight.castShadow = false;
+    muzzleFlashLight.userData = {
+      weaponVisual: true,
+      dofIgnore: true,
+      muzzleFlashLight: true,
+    };
+    root.add(muzzleFlashLight);
+  }
   if (held) {
     root.add(createRightHandViewModel());
   }
@@ -5024,6 +5428,7 @@ const createWeaponModel = (
   return {
     root,
     muzzleFlash,
+    muzzleFlashLight,
     barrels,
     hotBarrelLength: Math.max(...barrels.map((barrel) => barrel.length), 0),
     muzzleSmokeRoot,
@@ -5062,6 +5467,21 @@ const isWeaponVisual = (object: THREE.Object3D): boolean => {
   return false;
 };
 
+/** Presentation-only groups must not stop a hitscan projectile. */
+export const isWeaponRaycastSurface = (object: THREE.Object3D): boolean => {
+  if (object instanceof THREE.Sprite || isWeaponVisual(object)) {
+    return false;
+  }
+  let current: THREE.Object3D | null = object;
+  while (current !== null) {
+    if (current.userData.weaponRaycastIgnore === true) {
+      return false;
+    }
+    current = current.parent;
+  }
+  return true;
+};
+
 interface WindowWithLegacyAudioContext extends Window {
   readonly AudioContext?: typeof AudioContext;
   readonly webkitAudioContext?: typeof AudioContext;
@@ -5087,7 +5507,12 @@ const createWeaponRuntime = (
   pickups: readonly WeaponPickupSpawn[],
   onStateChange?: (state: WeaponStateSnapshot) => void,
   onWeaponShot?: (damage: number, projectileCount: number) => void,
-  onWeaponHit?: (hitObject: THREE.Object3D, damage: number) => void,
+  onWeaponMeleeSwing?: (damage: number) => number,
+  onWeaponHit?: (
+    hitObject: THREE.Object3D,
+    damage: number,
+    context: WeaponHitContext,
+  ) => WeaponHitResponse | undefined,
   onWeaponSwitch?: (hasOutgoingWeapon: boolean) => void,
 ): WeaponRuntime => {
   const pickupRoot = new THREE.Group();
@@ -5109,6 +5534,7 @@ const createWeaponRuntime = (
   };
   scene.add(worldSmokeRoot);
   const weaponSmokeTexture = makeWeaponSmokeTexture();
+  const bloodSplatTexture = makeWeaponBloodSplatTexture();
   const bulletHoleRoot = new THREE.Group();
   bulletHoleRoot.name = "WeaponBulletHoleRoot";
   // Bullet holes are presentation-only scene objects, but they should still
@@ -5116,6 +5542,12 @@ const createWeaponRuntime = (
   // separate overlay like the short-lived tracer and muzzle effects.
   bulletHoleRoot.userData = { weaponVisual: true, bulletHoleRoot: true };
   scene.add(bulletHoleRoot);
+  const bloodRoot = new THREE.Group();
+  bloodRoot.name = "WeaponBloodRoot";
+  // Blood is a world effect: keep it in the depth-tested scene and let the
+  // scope feed include it alongside the persistent surface decals.
+  bloodRoot.userData = { weaponVisual: true, bloodRoot: true };
+  scene.add(bloodRoot);
   const pickupVisuals: WeaponPickupVisual[] = [];
   for (const spawn of pickups) {
     const definition = WEAPON_DEFINITIONS[spawn.weapon];
@@ -5218,6 +5650,18 @@ const createWeaponRuntime = (
   let shotsFired = 0;
   let shotsHit = 0;
   let fireHeld = false;
+  let meleeSwinging = false;
+  let meleeSwingElapsedSeconds = 0;
+  let meleeSwingDurationSeconds = 0;
+  let meleeSwingDirection: MeleeSwingDirection = "right-to-left";
+  let meleeNextSwingDirection: MeleeSwingDirection = "right-to-left";
+  let meleeSwingHitResolved = false;
+  let latestWorldVelocity: PhysicsVector = { x: 0, y: 0, z: 0 };
+  let latestAirborne = false;
+  /** Blocks the Caps-Lock pistol until the physical trigger is released. */
+  let triggerReleaseLocked = false;
+  let reticleEnabled = false;
+  let burstCooldownAfterCurrentBurstSeconds = 0;
   let controlsActive = false;
   let viewActive = false;
   let pickupPositionInitialized = false;
@@ -5258,6 +5702,14 @@ const createWeaponRuntime = (
   const bulletHoleNormalMatrix = new THREE.Matrix3();
   const effects: WeaponEffect[] = [];
   const bulletHoleEffects: WeaponEffect[] = [];
+  const bloodDecalEffects: WeaponEffect[] = [];
+  const bloodSurfaceRaycaster = new THREE.Raycaster();
+  bloodSurfaceRaycaster.camera = camera;
+  const bloodSurfaceOrigin = new THREE.Vector3();
+  const bloodSurfaceNormal = new THREE.Vector3();
+  const bloodSmearDirection = new THREE.Vector3();
+  const bloodSmearLocal = new THREE.Vector3();
+  const bloodDecalQuaternion = new THREE.Quaternion();
   const weaponForward = new THREE.Vector3(0, 0, -1);
   const weaponAimTargetWorld = new THREE.Vector3();
   const weaponAimTargetLocal = new THREE.Vector3();
@@ -5508,6 +5960,124 @@ const createWeaponRuntime = (
     });
   };
 
+  const playWeaponImpactSound = (
+    profile: ReturnType<typeof resolveBulletImpactAudioProfile>,
+    sourcePosition: THREE.Vector3,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    updateShotAudioListener(audio.context);
+    const propagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const start = audio.context.currentTime + Math.max(0, propagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, start);
+    let noiseSource: AudioBufferSourceNode | null = null;
+    let noiseFilter: BiquadFilterNode | null = null;
+    let noiseEnvelope: GainNode | null = null;
+    let toneOscillator: OscillatorNode | null = null;
+    let toneEnvelope: GainNode | null = null;
+    let glancingSource: AudioBufferSourceNode | null = null;
+    let glancingFilter: BiquadFilterNode | null = null;
+    let glancingEnvelope: GainNode | null = null;
+    let compressor: DynamicsCompressorNode | null = null;
+    let saturation: WaveShaperNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      noiseSource?.disconnect();
+      noiseFilter?.disconnect();
+      noiseEnvelope?.disconnect();
+      toneOscillator?.disconnect();
+      toneEnvelope?.disconnect();
+      glancingSource?.disconnect();
+      glancingFilter?.disconnect();
+      glancingEnvelope?.disconnect();
+      compressor?.disconnect();
+      saturation?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 3) {
+        cleanup();
+      }
+    };
+    const duration = Math.max(0.045, profile.impactDurationSeconds);
+    const glancingDuration = Math.max(0.025, profile.glancingDurationSeconds);
+    try {
+      noiseSource = audio.context.createBufferSource();
+      noiseFilter = audio.context.createBiquadFilter();
+      noiseEnvelope = audio.context.createGain();
+      compressor = audio.context.createDynamicsCompressor();
+      saturation = audio.context.createWaveShaper();
+      noiseSource.buffer = audio.noiseBuffer;
+      noiseSource.playbackRate.setValueAtTime(profile.impactNoisePlaybackRate, start);
+      noiseFilter.type = "lowpass";
+      noiseFilter.frequency.setValueAtTime(profile.impactNoiseCutoffFrequencyHz, start);
+      noiseFilter.Q.setValueAtTime(profile.impactNoiseQ, start);
+      noiseEnvelope.gain.setValueAtTime(Math.max(0.0001, profile.impactNoiseGain), start);
+      noiseEnvelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      compressor.threshold.setValueAtTime(-22, start);
+      compressor.knee.setValueAtTime(10, start);
+      compressor.ratio.setValueAtTime(3.4, start);
+      compressor.attack.setValueAtTime(0.001, start);
+      compressor.release.setValueAtTime(0.06, start);
+      saturation.curve = WEAPON_SHOT_SATURATION_CURVE as unknown as Float32Array<ArrayBuffer>;
+      saturation.oversample = "2x";
+      noiseSource.connect(noiseFilter);
+      noiseFilter.connect(noiseEnvelope);
+      noiseEnvelope.connect(compressor);
+      compressor.connect(saturation);
+      saturation.connect(spatialOutput.destination);
+
+      toneOscillator = audio.context.createOscillator();
+      toneEnvelope = audio.context.createGain();
+      toneOscillator.type = "triangle";
+      toneOscillator.frequency.setValueAtTime(profile.impactToneFrequencyHz, start);
+      toneOscillator.frequency.exponentialRampToValueAtTime(
+        Math.max(20, profile.impactToneEndFrequencyHz),
+        start + duration,
+      );
+      toneEnvelope.gain.setValueAtTime(profile.impactToneGain, start);
+      toneEnvelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      toneOscillator.connect(toneEnvelope);
+      toneEnvelope.connect(spatialOutput.destination);
+
+      glancingSource = audio.context.createBufferSource();
+      glancingFilter = audio.context.createBiquadFilter();
+      glancingEnvelope = audio.context.createGain();
+      glancingSource.buffer = audio.noiseBuffer;
+      glancingSource.playbackRate.setValueAtTime(profile.glancingNoisePlaybackRate, start);
+      glancingFilter.type = "bandpass";
+      glancingFilter.frequency.setValueAtTime(profile.glancingNoiseCenterFrequencyHz, start);
+      glancingFilter.Q.setValueAtTime(profile.glancingNoiseQ, start);
+      glancingEnvelope.gain.setValueAtTime(Math.max(0.0001, profile.glancingNoiseGain), start);
+      glancingEnvelope.gain.exponentialRampToValueAtTime(0.0001, start + glancingDuration);
+      glancingSource.connect(glancingFilter);
+      glancingFilter.connect(glancingEnvelope);
+      glancingEnvelope.connect(spatialOutput.destination);
+
+      noiseSource.onended = finishLayer;
+      toneOscillator.onended = finishLayer;
+      glancingSource.onended = finishLayer;
+      noiseSource.start(start);
+      noiseSource.stop(start + duration);
+      toneOscillator.start(start);
+      toneOscillator.stop(start + duration);
+      glancingSource.start(start);
+      glancingSource.stop(start + glancingDuration);
+    } catch {
+      cleanup();
+    }
+  };
+
   const playWeaponPassBySound = (
     profile: ReturnType<typeof resolveGunAudioProfile>,
     origin: THREE.Vector3,
@@ -5697,6 +6267,194 @@ const createWeaponRuntime = (
     }
   };
 
+  const playMeleeSwingSound = (
+    attributes: MeleeObjectSnapshot,
+    sourcePosition: THREE.Vector3,
+    swingDurationSeconds: number,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    const profile = resolveMeleeAudioProfile(attributes);
+    updateShotAudioListener(audio.context);
+    const propagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const start = audio.context.currentTime + Math.max(0, propagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, start);
+    let noiseSource: AudioBufferSourceNode | null = null;
+    let noiseFilter: BiquadFilterNode | null = null;
+    let noiseEnvelope: GainNode | null = null;
+    let toneOscillator: OscillatorNode | null = null;
+    let toneEnvelope: GainNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      noiseSource?.disconnect();
+      noiseFilter?.disconnect();
+      noiseEnvelope?.disconnect();
+      toneOscillator?.disconnect();
+      toneEnvelope?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 2) {
+        cleanup();
+      }
+    };
+    const duration = Number.isFinite(swingDurationSeconds)
+      ? Math.max(0.05, swingDurationSeconds)
+      : Math.max(0.05, profile.swingDurationSeconds);
+    try {
+      noiseSource = audio.context.createBufferSource();
+      noiseFilter = audio.context.createBiquadFilter();
+      noiseEnvelope = audio.context.createGain();
+      toneOscillator = audio.context.createOscillator();
+      toneEnvelope = audio.context.createGain();
+      noiseSource.buffer = audio.noiseBuffer;
+      noiseSource.loop = true;
+      noiseSource.playbackRate.setValueAtTime(profile.swingNoisePlaybackRate, start);
+      noiseFilter.type = "bandpass";
+      noiseFilter.frequency.setValueAtTime(profile.swingNoiseCenterFrequencyHz, start);
+      noiseFilter.Q.setValueAtTime(profile.swingNoiseQ, start);
+      const apex = start + duration * 0.5;
+      const noiseQuietGain = resolveMeleeSwingEnvelopeGain(0, profile.swingNoiseGain);
+      const noisePeakGain = resolveMeleeSwingEnvelopeGain(0.5, profile.swingNoiseGain);
+      noiseEnvelope.gain.setValueAtTime(noiseQuietGain, start);
+      noiseEnvelope.gain.exponentialRampToValueAtTime(noisePeakGain, apex);
+      noiseEnvelope.gain.exponentialRampToValueAtTime(noiseQuietGain, start + duration);
+      noiseSource.connect(noiseFilter);
+      noiseFilter.connect(noiseEnvelope);
+      noiseEnvelope.connect(spatialOutput.destination);
+
+      toneOscillator.type = "sine";
+      toneOscillator.frequency.setValueAtTime(profile.swingToneFrequencyHz, start);
+      toneOscillator.frequency.exponentialRampToValueAtTime(
+        profile.swingToneFrequencyHz * 1.08,
+        start + duration,
+      );
+      const toneQuietGain = resolveMeleeSwingEnvelopeGain(0, profile.swingToneGain);
+      const tonePeakGain = resolveMeleeSwingEnvelopeGain(0.5, profile.swingToneGain);
+      toneEnvelope.gain.setValueAtTime(toneQuietGain, start);
+      toneEnvelope.gain.exponentialRampToValueAtTime(tonePeakGain, apex);
+      toneEnvelope.gain.exponentialRampToValueAtTime(toneQuietGain, start + duration);
+      toneOscillator.connect(toneEnvelope);
+      toneEnvelope.connect(spatialOutput.destination);
+      noiseSource.onended = finishLayer;
+      toneOscillator.onended = finishLayer;
+      noiseSource.start(start);
+      noiseSource.stop(start + duration);
+      toneOscillator.start(start);
+      toneOscillator.stop(start + duration);
+    } catch {
+      cleanup();
+    }
+  };
+
+  const playMeleeImpactSound = (
+    attributes: MeleeObjectSnapshot,
+    sourcePosition: THREE.Vector3,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    const profile = resolveMeleeAudioProfile(attributes);
+    updateShotAudioListener(audio.context);
+    const propagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const start = audio.context.currentTime + Math.max(0, propagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, start);
+    let noiseSource: AudioBufferSourceNode | null = null;
+    let noiseFilter: BiquadFilterNode | null = null;
+    let noiseEnvelope: GainNode | null = null;
+    let toneOscillator: OscillatorNode | null = null;
+    let toneEnvelope: GainNode | null = null;
+    let compressor: DynamicsCompressorNode | null = null;
+    let saturation: WaveShaperNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      noiseSource?.disconnect();
+      noiseFilter?.disconnect();
+      noiseEnvelope?.disconnect();
+      toneOscillator?.disconnect();
+      toneEnvelope?.disconnect();
+      compressor?.disconnect();
+      saturation?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 2) {
+        cleanup();
+      }
+    };
+    const duration = Math.max(0.045, profile.impactDurationSeconds);
+    try {
+      noiseSource = audio.context.createBufferSource();
+      noiseFilter = audio.context.createBiquadFilter();
+      noiseEnvelope = audio.context.createGain();
+      compressor = audio.context.createDynamicsCompressor();
+      saturation = audio.context.createWaveShaper();
+      toneOscillator = audio.context.createOscillator();
+      toneEnvelope = audio.context.createGain();
+      noiseSource.buffer = audio.noiseBuffer;
+      noiseSource.playbackRate.setValueAtTime(profile.impactNoisePlaybackRate, start);
+      noiseFilter.type = "lowpass";
+      noiseFilter.frequency.setValueAtTime(profile.impactNoiseCutoffFrequencyHz, start);
+      noiseFilter.Q.setValueAtTime(0.8, start);
+      noiseEnvelope.gain.setValueAtTime(Math.max(0.0001, profile.impactNoiseGain), start);
+      noiseEnvelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      compressor.threshold.setValueAtTime(-22, start);
+      compressor.knee.setValueAtTime(10, start);
+      compressor.ratio.setValueAtTime(3.4, start);
+      compressor.attack.setValueAtTime(0.001, start);
+      compressor.release.setValueAtTime(0.06, start);
+      saturation.curve = WEAPON_SHOT_SATURATION_CURVE as unknown as Float32Array<ArrayBuffer>;
+      saturation.oversample = "2x";
+      noiseSource.connect(noiseFilter);
+      noiseFilter.connect(noiseEnvelope);
+      noiseEnvelope.connect(compressor);
+      compressor.connect(saturation);
+      saturation.connect(spatialOutput.destination);
+
+      toneOscillator.type = "triangle";
+      toneOscillator.frequency.setValueAtTime(profile.impactToneFrequencyHz, start);
+      toneOscillator.frequency.exponentialRampToValueAtTime(
+        profile.impactToneFrequencyHz * 0.58,
+        start + duration,
+      );
+      toneEnvelope.gain.setValueAtTime(profile.impactToneGain, start);
+      toneEnvelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      toneOscillator.connect(toneEnvelope);
+      toneEnvelope.connect(spatialOutput.destination);
+      noiseSource.onended = (): void => {
+        finishLayer();
+      };
+      toneOscillator.onended = (): void => {
+        finishLayer();
+      };
+      noiseSource.start(start);
+      noiseSource.stop(start + duration);
+      toneOscillator.start(start);
+      toneOscillator.stop(start + duration);
+    } catch {
+      cleanup();
+    }
+  };
+
   const isReloadPresentationActive = (): boolean =>
     reloadingSeconds > 0 || roundReloadReturnElapsedSeconds !== null;
 
@@ -5735,6 +6493,11 @@ const createWeaponRuntime = (
     reloadInsertionImpulseElapsedSeconds = 0;
     reloadInsertionPending = true;
   };
+  /** Restart the visible load kick at the exact frame the ammo is committed. */
+  const commitReloadInsertionImpulse = (): void => {
+    reloadInsertionImpulseElapsedSeconds = 0;
+    reloadInsertionPending = false;
+  };
   const beginRoundReloadReturn = (): void => {
     if (activeWeapon !== null && WEAPON_DEFINITIONS[activeWeapon].reloadMode === "round") {
       if (reloadInsertionPending) {
@@ -5742,6 +6505,45 @@ const createWeaponRuntime = (
         reloadInsertionPending = false;
       }
       roundReloadReturnElapsedSeconds = 0;
+    }
+  };
+  const startReload = (allowDuringWeaponSwitch = false): boolean => {
+    if (
+      activeWeapon === null ||
+      reloadingSeconds > 0 ||
+      (!allowDuringWeaponSwitch && (switchAnimation !== null || viewmodelTransitionActive))
+    ) {
+      return false;
+    }
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    const slot = inventory.get(activeWeapon);
+    if (
+      slot === undefined ||
+      slot.ammoInMagazine >= definition.magazineSize ||
+      slot.reserveAmmo <= 0
+    ) {
+      return false;
+    }
+    reloadingSeconds = definition.reloadSeconds;
+    burstShotsRemaining = 0;
+    burstCooldownAfterCurrentBurstSeconds = 0;
+    triggerReleaseLocked = false;
+    resetRoundReloadPresentation();
+    emitState(true);
+    return true;
+  };
+  const autoReloadActiveWeapon = (): void => {
+    if (activeWeapon === null) {
+      return;
+    }
+    const slot = inventory.get(activeWeapon);
+    if (
+      slot !== undefined &&
+      shouldAutoReloadOnWeaponEquip(slot.ammoInMagazine, slot.reserveAmmo)
+    ) {
+      // The incoming viewmodel is still in the shared switch pose. Starting
+      // the timer here means it is already reloading as it rises into view.
+      startReload(true);
     }
   };
   const showWeaponViewModel = (weapon: WeaponId | null): void => {
@@ -5767,9 +6569,27 @@ const createWeaponRuntime = (
   const resetWeaponSmoke = (model: WeaponModelResources): void => {
     for (const particle of model.smokeParticles) {
       particle.active = false;
+      particle.isGunshot = false;
       particle.age = 0;
       particle.material.opacity = 0;
       particle.sprite.visible = false;
+    }
+  };
+  const clearGunshotSmoke = (model: WeaponModelResources): void => {
+    for (const particle of model.smokeParticles) {
+      if (!particle.active || !particle.isGunshot) {
+        continue;
+      }
+      particle.active = false;
+      particle.isGunshot = false;
+      particle.age = 0;
+      particle.material.opacity = 0;
+      particle.sprite.visible = false;
+    }
+  };
+  const clearAllGunshotSmoke = (): void => {
+    for (const model of viewModels.values()) {
+      clearGunshotSmoke(model);
     }
   };
   /** Keep visual smoke power tied to one trigger round's total damage. */
@@ -5851,18 +6671,25 @@ const createWeaponRuntime = (
     }
     smokeRightWorld.normalize();
     particle.active = true;
+    particle.isGunshot = !thermal;
     particle.age = 0;
-    // Keep the first frame soft at the captured muzzle point, then use the
-    // shared five-second diffusion for both muzzle puffs and thermal wisps.
-    particle.lifetime = WEAPON_SMOKE_LIFETIME_SECONDS;
+    // Gunshot gas is deliberately short-lived: it begins at zero size and
+    // disperses over one second. Thermal wisps keep their slower five-second
+    // diffusion so barrel heat remains readable during sustained fire.
+    particle.lifetime = thermal
+      ? WEAPON_THERMAL_SMOKE_LIFETIME_SECONDS
+      : WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS;
     const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 5;
-    particle.startScale =
-      (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) *
-      powerForSmoke *
-      smokeScaleMultiplier;
-    particle.endScale =
-      particle.startScale * (thermal ? 5.2 + random() * 1.6 : 4.8 + random() * 1.5);
-    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.94 + random() * 0.06;
+    if (thermal) {
+      particle.startScale = (0.22 + random() * 0.12) * powerForSmoke * smokeScaleMultiplier;
+      particle.endScale = particle.startScale * (5.2 + random() * 1.6);
+      particle.startOpacity = 0.55 + random() * 0.15;
+    } else {
+      particle.startScale = 0;
+      particle.endScale =
+        (0.26 + random() * 0.14) * powerForSmoke * smokeScaleMultiplier * (4.8 + random() * 1.5);
+      particle.startOpacity = 1;
+    }
     particle.riseAcceleration = thermal ? 0.1 + random() * 0.06 : 0.08 + random() * 0.06;
     particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0.38 + random() * 0.12;
     particle.spin = (random() - 0.5) * (thermal ? 2.2 : 3.6);
@@ -5882,13 +6709,9 @@ const createWeaponRuntime = (
     // Muzzle smoke is a soft gray; hot-barrel steam keeps its pale white
     // material. Starting transparent prevents a visible sprite pop.
     particle.material.color.setHex(thermal ? 0xf1f4ef : 0x7f8985);
-    particle.material.opacity = 0;
+    particle.material.opacity = thermal ? 0 : particle.startOpacity;
     particle.sprite.rotation.set(0, 0, random() * Math.PI * 2);
-    particle.sprite.scale.set(
-      particle.startScale,
-      particle.startScale * (0.82 + random() * 0.3),
-      1,
-    );
+    particle.sprite.scale.set(particle.startScale, particle.startScale, 1);
     particle.sprite.visible = true;
   };
   const updateWeaponSmoke = (
@@ -5934,33 +6757,44 @@ const createWeaponRuntime = (
       particle.sprite.position.z +=
         Math.cos(particle.phase + particle.age * 3.4) * 0.008 * safeDelta;
       particle.sprite.rotation.z += particle.spin * safeDelta;
-      const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
-      const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
-      const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
-      const muzzleExpansionProgress = Math.min(
-        1,
-        Math.max(
-          0,
-          (particle.age - fadeInDuration) /
-            (Math.max(0.001, particle.lifetime - fadeInDuration) *
-              WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
-        ),
-      );
-      const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
-      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
-      particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
-      // Both plumes follow the same restrained expansion: bright at source
-      // scale, then transparent while the max-size cloud lingers.
-      particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
+      const thermalFadeInDuration = particle.isGunshot
+        ? 0
+        : Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
+      if (particle.isGunshot) {
+        const sizeProgress = resolveWeaponMuzzleSmokeLogProgress(particle.age);
+        const scale = particle.endScale * sizeProgress;
+        particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
+        particle.material.opacity =
+          particle.startOpacity * resolveWeaponMuzzleSmokeOpacity(particle.age);
+      } else {
+        const fadeInProgress = Math.min(1, particle.age / thermalFadeInDuration);
+        const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
+        const thermalExpansionProgress = Math.min(
+          1,
+          Math.max(
+            0,
+            (particle.age - thermalFadeInDuration) /
+              (Math.max(0.001, particle.lifetime - thermalFadeInDuration) *
+                WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
+          ),
+        );
+        const sizeProgress = resolveNormalizedLogExpansion(thermalExpansionProgress);
+        const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
+        particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
+        // Thermal wisps follow the restrained expansion: bright at source
+        // scale, then transparent while the max-size cloud lingers.
+        particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
+      }
       if (
         shouldClearWeaponSmoke(
           particle.material.opacity,
           particle.age,
           particle.lifetime,
-          fadeInDuration,
+          thermalFadeInDuration,
         )
       ) {
         particle.active = false;
+        particle.isGunshot = false;
         particle.sprite.visible = false;
         particle.material.opacity = 0;
       }
@@ -5992,14 +6826,19 @@ const createWeaponRuntime = (
       applyWeaponBarrelTemperature(weapon, nextTemperatureC);
     }
   };
-  const setActiveWeapon = (weapon: WeaponId | null): void => {
+  const setActiveWeapon = (weapon: WeaponId | null): boolean => {
     if (weapon !== null && inventory.get(weapon)?.owned !== true) {
-      return;
+      return false;
     }
     const previousWeapon = activeWeapon;
     activeWeapon = weapon;
+    meleeSwinging = false;
+    meleeSwingElapsedSeconds = 0;
+    meleeSwingHitResolved = false;
     reloadingSeconds = 0;
     burstShotsRemaining = 0;
+    burstCooldownAfterCurrentBurstSeconds = 0;
+    triggerReleaseLocked = false;
     resetRoundReloadPresentation();
     if (previousWeapon !== weapon) {
       switchAnimation = { fromWeapon: previousWeapon, toWeapon: weapon };
@@ -6010,19 +6849,21 @@ const createWeaponRuntime = (
       switchAnimation = null;
       showWeaponViewModel(activeWeapon);
     }
+    autoReloadActiveWeapon();
+    return true;
   };
-  const equipWeapon = (weapon: WeaponId): void => {
-    setActiveWeapon(weapon);
+  const equipWeapon = (weapon: WeaponId): boolean => {
+    return setActiveWeapon(weapon);
   };
   const holsterWeapon = (): void => {
     setActiveWeapon(null);
     emitState(true);
   };
-  const collectPickup = (visual: WeaponPickupVisual): void => {
+  const collectPickup = (visual: WeaponPickupVisual, equip = true): boolean => {
     const definition = WEAPON_DEFINITIONS[visual.spawn.weapon];
     const slot = inventory.get(visual.spawn.weapon);
     if (slot === undefined) {
-      return;
+      return false;
     }
     if (!slot.owned) {
       slot.owned = true;
@@ -6036,9 +6877,16 @@ const createWeaponRuntime = (
     }
     visual.collected = true;
     visual.root.visible = false;
-    equipWeapon(visual.spawn.weapon);
+    if (equip) {
+      equipWeapon(visual.spawn.weapon);
+    } else if (activeWeapon === visual.spawn.weapon) {
+      // A walk-over pickup can add reserve ammo without changing the active
+      // slot. Do not leave that same held gun empty after the pickup.
+      autoReloadActiveWeapon();
+    }
     nearbyPickup = null;
     emitState(true);
+    return true;
   };
   const findNearestPickup = (
     position: THREE.Vector3,
@@ -6048,16 +6896,17 @@ const createWeaponRuntime = (
       .map((visual) => ({ visual, distance: visual.root.position.distanceTo(position) }))
       .filter(({ distance }) => distance <= WEAPON_PICKUP_RANGE_METERS)
       .sort((left, right) => left.distance - right.distance)[0];
-  const interact = (): void => {
+  const interact = (): boolean => {
     const candidate = findNearestPickup(camera.position);
     if (candidate !== undefined) {
-      collectPickup(candidate.visual);
+      return collectPickup(candidate.visual, true);
     }
+    return false;
   };
-  const cycleWeapon = (direction: 1 | -1 = 1): void => {
+  const cycleWeapon = (direction: 1 | -1 = 1): boolean => {
     const owned = WEAPON_IDS.filter((weapon) => inventory.get(weapon)?.owned === true);
     if (owned.length === 0) {
-      return;
+      return false;
     }
     const currentIndex = activeWeapon === null ? -1 : owned.indexOf(activeWeapon);
     const nextIndex =
@@ -6068,14 +6917,18 @@ const createWeaponRuntime = (
         : (currentIndex + direction + owned.length) % owned.length;
     const nextWeapon = owned[nextIndex] ?? owned[0];
     if (nextWeapon === undefined) {
-      return;
+      return false;
     }
-    equipWeapon(nextWeapon);
+    const selected = equipWeapon(nextWeapon);
     emitState(true);
+    return selected;
   };
-  const selectWeapon = (weapon: WeaponId): void => {
-    equipWeapon(weapon);
-    emitState(true);
+  const selectWeapon = (weapon: WeaponId): boolean => {
+    const selected = equipWeapon(weapon);
+    if (selected) {
+      emitState(true);
+    }
+    return selected;
   };
   const getWeaponScopeLens = (): {
     readonly anchor: THREE.Object3D;
@@ -6111,11 +6964,16 @@ const createWeaponRuntime = (
     if (bulletHoleIndex >= 0) {
       bulletHoleEffects.splice(bulletHoleIndex, 1);
     }
+    const bloodDecalIndex = bloodDecalEffects.indexOf(effect);
+    if (bloodDecalIndex >= 0) {
+      bloodDecalEffects.splice(bloodDecalIndex, 1);
+    }
   };
   const registerEffect = (
     object: THREE.Object3D,
     kind: WeaponEffectKind,
     remainingSeconds: number,
+    opacityMultiplier = 1,
   ): void => {
     const materials: (THREE.MeshBasicMaterial | THREE.LineBasicMaterial)[] = [];
     object.traverse((child) => {
@@ -6137,7 +6995,18 @@ const createWeaponRuntime = (
         }
       }
     });
-    const effect: WeaponEffect = { object, kind, materials, remainingSeconds };
+    const effect: WeaponEffect = {
+      object,
+      kind,
+      materials,
+      opacityMultiplier: Number.isFinite(opacityMultiplier)
+        ? Math.max(0, Math.min(1, opacityMultiplier))
+        : 1,
+      remainingSeconds,
+    };
+    for (const material of effect.materials) {
+      material.opacity = effect.opacityMultiplier;
+    }
     effects.push(effect);
     if (kind === "bulletHole") {
       bulletHoleEffects.push(effect);
@@ -6149,29 +7018,19 @@ const createWeaponRuntime = (
         removeEffect(oldest);
       }
     }
+    if (kind === "bloodDecal") {
+      bloodDecalEffects.push(effect);
+      while (bloodDecalEffects.length > WEAPON_BLOOD_DECAL_MAX_COUNT) {
+        const oldest = bloodDecalEffects[0];
+        if (oldest === undefined) {
+          break;
+        }
+        removeEffect(oldest);
+      }
+    }
   };
   const reload = (): void => {
-    if (
-      activeWeapon === null ||
-      reloadingSeconds > 0 ||
-      switchAnimation !== null ||
-      viewmodelTransitionActive
-    ) {
-      return;
-    }
-    const definition = WEAPON_DEFINITIONS[activeWeapon];
-    const slot = inventory.get(activeWeapon);
-    if (
-      slot === undefined ||
-      slot.ammoInMagazine >= definition.magazineSize ||
-      slot.reserveAmmo <= 0
-    ) {
-      return;
-    }
-    reloadingSeconds = definition.reloadSeconds;
-    burstShotsRemaining = 0;
-    resetRoundReloadPresentation();
-    emitState(true);
+    startReload();
   };
 
   /**
@@ -6203,18 +7062,19 @@ const createWeaponRuntime = (
       slot.ammoInMagazine += loaded;
       slot.reserveAmmo -= loaded;
       reloadingSeconds = 0;
-      reloadInsertionPending = false;
     } else {
       slot.ammoInMagazine += 1;
       slot.reserveAmmo -= 1;
-      reloadInsertionPending = false;
       reloadingSeconds =
         slot.ammoInMagazine < definition.magazineSize && slot.reserveAmmo > 0
           ? definition.reloadSeconds
           : 0;
-      if (reloadingSeconds === 0) {
-        beginRoundReloadReturn();
-      }
+    }
+    // The lead-in pulse makes the insertion readable, while this reset keeps
+    // its strongest frame aligned with the authoritative ammo commit.
+    commitReloadInsertionImpulse();
+    if (definition.reloadMode === "round" && reloadingSeconds === 0) {
+      beginRoundReloadReturn();
     }
     emitState(true);
   };
@@ -6273,10 +7133,244 @@ const createWeaponRuntime = (
     effectsRoot.add(impact);
     registerEffect(impact, "impact", WEAPON_IMPACT_LIFETIME_SECONDS);
   };
-  const addBulletHole = (
+  const addShieldSpark = (position: THREE.Vector3, direction: THREE.Vector3): void => {
+    const spark = new THREE.Group();
+    spark.name = "WeaponShieldSpark";
+    spark.position.copy(position);
+    spark.userData = { weaponVisual: true, dofIgnore: true, shieldSpark: true };
+    spark.frustumCulled = false;
+    const sparkMaterial = new THREE.MeshBasicMaterial({
+      color: WEAPON_SHIELD_SPARK_COLOR,
+      transparent: true,
+      opacity: 1,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6), sparkMaterial);
+    core.name = "WeaponShieldSparkCore";
+    core.userData = { weaponVisual: true, dofIgnore: true, shieldSpark: true };
+    spark.add(core);
+    const streakGeometry = new THREE.BufferGeometry();
+    streakGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(
+        [
+          -0.14, 0, 0, -0.035, 0, 0, 0.035, 0, 0, 0.14, 0, 0, 0, -0.14, 0, 0, -0.035, 0, 0, 0.035,
+          0, 0, 0.14, 0,
+        ],
+        3,
+      ),
+    );
+    const streaks = new THREE.LineSegments(
+      streakGeometry,
+      new THREE.LineBasicMaterial({
+        color: WEAPON_SHIELD_SPARK_COLOR,
+        transparent: true,
+        opacity: 1,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      }),
+    );
+    streaks.name = "WeaponShieldSparkStreaks";
+    streaks.userData = { weaponVisual: true, dofIgnore: true, shieldSpark: true };
+    spark.add(streaks);
+    const sparkDirection = direction.clone();
+    if (sparkDirection.lengthSq() <= 0.0001) {
+      sparkDirection.copy(bulletHoleForward);
+    } else {
+      sparkDirection.normalize();
+    }
+    spark.quaternion.setFromUnitVectors(bulletHoleForward, sparkDirection);
+    effectsRoot.add(spark);
+    registerEffect(
+      spark,
+      "shieldSpark",
+      WEAPON_SHIELD_SPARK_LIFETIME_SECONDS,
+      WEAPON_SHIELD_SPARK_OPACITY,
+    );
+  };
+  const addBloodCloud = (position: THREE.Vector3, damage: number): void => {
+    const cloudScale = resolveWeaponBloodCloudScale(damage);
+    const cloud = new THREE.Mesh(
+      new THREE.SphereGeometry(0.055, 10, 8),
+      new THREE.MeshBasicMaterial({
+        color: WEAPON_BLOOD_CLOUD_COLOR,
+        transparent: true,
+        opacity: 1,
+        depthTest: true,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    cloud.name = "WeaponBloodCloud";
+    cloud.position.copy(position);
+    cloud.userData = { weaponVisual: true, bloodCloud: true };
+    cloud.scale.setScalar(cloudScale);
+    cloud.frustumCulled = false;
+    bloodRoot.add(cloud);
+    registerEffect(
+      cloud,
+      "bloodCloud",
+      WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS,
+      WEAPON_BLOOD_CLOUD_OPACITY,
+    );
+  };
+  const isCombatActorVisual = (object: THREE.Object3D): boolean => {
+    let current: THREE.Object3D | null = object;
+    while (current !== null) {
+      if (typeof current.userData.combatActorId === "string") {
+        return true;
+      }
+      current = current.parent;
+    }
+    return false;
+  };
+  const findBloodSurface = (
+    position: THREE.Vector3,
+    impactDirection: THREE.Vector3,
+    targetVelocity: PhysicsVector,
+  ): { readonly hit: THREE.Intersection; readonly direction: THREE.Vector3 } | null => {
+    const candidates: THREE.Vector3[] = [];
+    const motion = new THREE.Vector3(targetVelocity.x, targetVelocity.y, targetVelocity.z);
+    if (motion.lengthSq() > 0.01) {
+      candidates.push(motion.clone().normalize());
+    }
+    const projectile = impactDirection.clone();
+    if (projectile.lengthSq() > 0.01) {
+      candidates.push(projectile.normalize());
+    }
+    candidates.push(new THREE.Vector3(0, -1, 0));
+    if (motion.lengthSq() > 0.01) {
+      candidates.push(motion.clone().normalize().negate());
+    }
+    candidates.push(new THREE.Vector3(0, 1, 0));
+    const roots = scene.children.filter(
+      (object) => object.name !== "LightingRoot" && object.name !== "DebugRoot",
+    );
+    for (const candidate of candidates) {
+      bloodSurfaceOrigin.copy(position).addScaledVector(candidate, 0.035);
+      bloodSurfaceRaycaster.set(bloodSurfaceOrigin, candidate);
+      bloodSurfaceRaycaster.near = 0.01;
+      bloodSurfaceRaycaster.far = 3.5;
+      const hit = bloodSurfaceRaycaster
+        .intersectObjects(roots, true)
+        .find(
+          (intersection) =>
+            !isWeaponVisual(intersection.object) &&
+            !isCombatActorVisual(intersection.object) &&
+            !(intersection.object instanceof THREE.Sprite),
+        );
+      if (hit !== undefined) {
+        return { hit, direction: candidate.clone() };
+      }
+    }
+    return null;
+  };
+  const addBloodDecal = (
     hit: THREE.Intersection,
     direction: THREE.Vector3,
-    color: number,
+    damage: number,
+    targetVelocity: PhysicsVector,
+  ): void => {
+    resolveBulletImpactSurfaceNormal(hit, direction, surfaceNormal);
+    bloodSurfaceNormal.copy(surfaceNormal);
+    const cloudScale = resolveWeaponBloodCloudScale(damage);
+    const smearRatio = resolveWeaponBloodSmearRatio(
+      Math.hypot(targetVelocity.x, targetVelocity.y, targetVelocity.z),
+    );
+    const radius = 0.085 + cloudScale * 0.028;
+    const stain = new THREE.Mesh(
+      new THREE.CircleGeometry(1, 32),
+      new THREE.MeshBasicMaterial({
+        map: bloodSplatTexture,
+        color: 0xffffff,
+        transparent: true,
+        opacity: 1,
+        depthTest: true,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      }),
+    );
+    stain.name = "WeaponBloodDecal";
+    stain.userData = { weaponVisual: true, bloodDecal: true };
+    stain.position.copy(hit.point).addScaledVector(bloodSurfaceNormal, 0.006);
+    bloodDecalQuaternion.setFromUnitVectors(bulletHoleForward, bloodSurfaceNormal);
+    stain.quaternion.copy(bloodDecalQuaternion);
+    bloodSmearDirection.set(targetVelocity.x, targetVelocity.y, targetVelocity.z);
+    bloodSmearDirection.addScaledVector(
+      bloodSurfaceNormal,
+      -bloodSmearDirection.dot(bloodSurfaceNormal),
+    );
+    if (bloodSmearDirection.lengthSq() <= 0.0001) {
+      bloodSmearDirection.copy(direction);
+      bloodSmearDirection.addScaledVector(
+        bloodSurfaceNormal,
+        -bloodSmearDirection.dot(bloodSurfaceNormal),
+      );
+    }
+    if (bloodSmearDirection.lengthSq() > 0.0001) {
+      bloodSmearLocal.copy(bloodSmearDirection).normalize();
+      bloodSmearLocal.applyQuaternion(bloodDecalQuaternion.clone().invert());
+      stain.rotateZ(Math.atan2(bloodSmearLocal.y, bloodSmearLocal.x));
+    }
+    stain.scale.set(radius * (1 + smearRatio * 2.5), radius * (0.72 + smearRatio * 0.1), 1);
+    stain.renderOrder = 50;
+    stain.frustumCulled = false;
+    bloodRoot.add(stain);
+    registerEffect(
+      stain,
+      "bloodDecal",
+      WEAPON_BLOOD_DECAL_LIFETIME_SECONDS,
+      WEAPON_BLOOD_SPLAT_OPACITY,
+    );
+  };
+  const addBloodHitEffects = (
+    position: THREE.Vector3,
+    direction: THREE.Vector3,
+    damage: number,
+    targetVelocity: PhysicsVector,
+  ): void => {
+    addBloodCloud(position, damage);
+    const surface = findBloodSurface(position, direction, targetVelocity);
+    if (surface !== null) {
+      addBloodDecal(surface.hit, surface.direction, damage, targetVelocity);
+    }
+  };
+  const playMeleeHitEffects = (
+    position: PhysicsVector,
+    direction: PhysicsVector,
+    damage: number,
+    response: WeaponHitResponse,
+  ): void => {
+    if (response.targetKind !== "simulant") {
+      return;
+    }
+    const impactPosition = new THREE.Vector3(position.x, position.y, position.z);
+    const impactDirection = new THREE.Vector3(direction.x, direction.y, direction.z);
+    if (response.shieldHit === true) {
+      addShieldSpark(impactPosition, impactDirection);
+    }
+    if (response.bloodEligible === true) {
+      addBloodHitEffects(
+        impactPosition,
+        impactDirection,
+        damage,
+        response.targetVelocity ?? { x: 0, y: 0, z: 0 },
+      );
+    }
+  };
+  const resolveBulletImpactSurfaceNormal = (
+    hit: THREE.Intersection,
+    direction: THREE.Vector3,
+    target: THREE.Vector3,
   ): void => {
     const hitObject = hit.object;
     const face = hit.face;
@@ -6288,18 +7382,25 @@ const createWeaponRuntime = (
     }
     if (face !== undefined && face !== null) {
       bulletHoleNormalMatrix.getNormalMatrix(bulletHoleWorldMatrix);
-      surfaceNormal.copy(face.normal).applyMatrix3(bulletHoleNormalMatrix).normalize();
+      target.copy(face.normal).applyMatrix3(bulletHoleNormalMatrix).normalize();
     } else {
-      surfaceNormal.copy(direction).multiplyScalar(-1).normalize();
+      target.copy(direction).multiplyScalar(-1).normalize();
     }
-    if (surfaceNormal.lengthSq() < 0.0001) {
-      surfaceNormal.set(0, 1, 0);
+    if (target.lengthSq() < 0.0001) {
+      target.set(0, 1, 0);
     }
-    // Keep the decal's front face toward the shooter even when a mesh reports
-    // the opposite winding for its hit triangle.
-    if (surfaceNormal.dot(direction) > 0) {
-      surfaceNormal.negate();
+    // Keep the normal pointed toward the shooter for both decals and the
+    // acute impact-angle calculation, independent of triangle winding.
+    if (target.dot(direction) > 0) {
+      target.negate();
     }
+  };
+  const addBulletHole = (
+    hit: THREE.Intersection,
+    direction: THREE.Vector3,
+    color: number,
+  ): void => {
+    resolveBulletImpactSurfaceNormal(hit, direction, surfaceNormal);
     // Make the mark readable at normal gameplay distances. It remains much
     // smaller than a tile or prop, but the contrasting rim prevents it from
     // disappearing into a dark or low-contrast surface.
@@ -6374,10 +7475,7 @@ const createWeaponRuntime = (
       );
       return shotRaycaster
         .intersectObjects(liveRaycastRoots, true)
-        .find(
-          (intersection) =>
-            !isWeaponVisual(intersection.object) && !(intersection.object instanceof THREE.Sprite),
-        );
+        .find((intersection) => isWeaponRaycastSurface(intersection.object));
     } catch {
       // A malformed or concurrently-disposed render subtree must not take
       // down the interactive scene. The tracer still renders to the camera's
@@ -6424,14 +7522,17 @@ const createWeaponRuntime = (
       playWeaponShotSound(shotProfile, soundOrigin);
     }
     if (useCameraMuzzle && viewModel !== undefined) {
+      // A new round replaces the previous gunshot gas immediately. Thermal
+      // wisps are a separate heat signal and continue through the shot.
+      clearAllGunshotSmoke();
       viewModel.muzzleFlash.visible = true;
       viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
+      if (viewModel.muzzleFlashLight !== null) {
+        viewModel.muzzleFlashLight.visible = true;
+        viewModel.muzzleFlashLight.intensity = WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY;
+      }
       const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
-      const puffCount = Math.min(
-        WEAPON_BARREL_SMOKE_POOL_SIZE,
-        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
-      );
-      for (let puff = 0; puff < puffCount; puff += 1) {
+      for (let puff = 0; puff < WEAPON_MUZZLE_SMOKE_PARTICLE_COUNT; puff += 1) {
         spawnWeaponSmoke(viewModel, false, smokePower);
       }
     }
@@ -6469,15 +7570,53 @@ const createWeaponRuntime = (
           shotsHit += 1;
         }
         addWeaponHitHeat(definition.id, definition.damage);
-        onHit?.(hit.object, definition.damage);
+        const hitResponse = onHit?.(hit.object, definition.damage, {
+          direction: {
+            x: pelletDirection.x,
+            y: pelletDirection.y,
+            z: pelletDirection.z,
+          },
+          point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+          distance: hit.distance,
+          pelletIndex: pellet,
+          projectileCount: definition.pellets,
+          ...(hit.instanceId === undefined ? {} : { instanceIndex: hit.instanceId }),
+        });
+        if (shouldPlayAudio) {
+          resolveBulletImpactSurfaceNormal(hit, pelletDirection, surfaceNormal);
+          playWeaponImpactSound(
+            resolveBulletImpactAudioProfile({
+              damage: definition.damage,
+              impactAngleRadians: resolveBulletImpactAngleRadians(
+                pelletDirection.dot(surfaceNormal),
+              ),
+            }),
+            hit.point,
+          );
+        }
         if (useWorldEffects) {
-          addImpact(hit.point, definition.color);
-          addBulletHole(hit, pelletDirection, definition.color);
+          if (hitResponse?.targetKind === "simulant") {
+            if (hitResponse.shieldHit === true) {
+              addShieldSpark(hit.point, pelletDirection);
+            }
+            if (hitResponse.bloodEligible === true) {
+              addBloodHitEffects(
+                hit.point,
+                pelletDirection,
+                definition.damage,
+                hitResponse.targetVelocity ?? { x: 0, y: 0, z: 0 },
+              );
+            }
+          } else {
+            addImpact(hit.point, definition.color);
+            addBulletHole(hit, pelletDirection, definition.color);
+          }
         }
         hitColor.set(definition.color);
         hit.object.userData.lastWeaponHit = {
           weapon: definition.id,
           damage: definition.damage,
+          stoppingPower: resolveWeaponStoppingPower(definition.damage),
           color: hitColor.getHexString(),
         };
       } else if (applyTargetHit && maxDistance !== undefined && !targetWasHit) {
@@ -6487,12 +7626,97 @@ const createWeaponRuntime = (
     }
   };
 
+  /** Resolve one close-range gun strike through the normal ray/actor seam. */
+  const resolveMeleeHit = (): void => {
+    if (activeWeapon === null || latestAimRay === null) {
+      return;
+    }
+    const attributes = resolveWeaponMeleeAttributes(activeWeapon);
+    const direction = latestAimRay.direction.clone().normalize();
+    if (direction.lengthSq() <= 0.0001) {
+      return;
+    }
+    const hit = findWeaponHit(latestAimRay.origin, direction, attributes.rangeMeters);
+    if (hit === undefined) {
+      return;
+    }
+    const definition = WEAPON_DEFINITIONS[activeWeapon];
+    playMeleeImpactSound(attributes, hit.point);
+    addImpact(hit.point, definition.color);
+    const hitResponse = onWeaponHit?.(hit.object, attributes.damage, {
+      direction: { x: direction.x, y: direction.y, z: direction.z },
+      point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+      distance: hit.distance,
+      pelletIndex: 0,
+      projectileCount: 1,
+      mode: "melee",
+      attackerVelocity: latestWorldVelocity,
+      attackerAirborne: latestAirborne,
+      meleeSwingSpeedRadiansPerSecond: attributes.swingSpeedRadiansPerSecond,
+      meleeStoppingPower: attributes.stoppingPower,
+      ...(hit.instanceId === undefined ? {} : { instanceIndex: hit.instanceId }),
+    });
+    const resolvedDamage = hitResponse?.resolvedDamage ?? attributes.damage;
+    if (hitResponse?.targetKind === "simulant") {
+      playMeleeHitEffects(hit.point, direction, resolvedDamage, hitResponse);
+    }
+    hit.object.userData.lastMeleeHit = {
+      weapon: definition.id,
+      damage: resolvedDamage,
+      stoppingPower: attributes.stoppingPower,
+      volumeM3: attributes.volumeM3,
+      swingSpeedRadiansPerSecond: attributes.swingSpeedRadiansPerSecond,
+    };
+  };
+
+  const tryMelee = (): boolean => {
+    if (
+      !controlsActive ||
+      activeWeapon === null ||
+      switchAnimation !== null ||
+      viewmodelTransitionActive ||
+      meleeSwinging ||
+      latestAimRay === null
+    ) {
+      return false;
+    }
+    if (shouldInterruptReloadForMelee(isReloadPresentationActive())) {
+      // Gun melee is an explicit reload cancel. Clear the timer and any
+      // round-reload return pose so the swing starts from a clean viewmodel;
+      // rounds committed before the interruption remain in the magazine.
+      reloadingSeconds = 0;
+      resetRoundReloadPresentation();
+      emitState(true);
+    }
+    const attributes = resolveWeaponMeleeAttributes(activeWeapon);
+    meleeSwingDirection = meleeNextSwingDirection;
+    meleeNextSwingDirection =
+      meleeSwingDirection === "right-to-left" ? "left-to-right" : "right-to-left";
+    meleeSwingDurationSeconds =
+      MELEE_SWING_ARC_RADIANS / attributes.swingSpeedRadiansPerSecond +
+      MELEE_SWING_RECOVERY_SECONDS;
+    meleeSwingElapsedSeconds = 0;
+    meleeSwingHitResolved = false;
+    meleeSwinging = true;
+    // Gun melee uses the same exertion and shared camera/reticule impulse path
+    // as a picked-up melee object. It does not consume ammunition or increment
+    // projectile telemetry.
+    if (onWeaponMeleeSwing !== undefined) {
+      onWeaponMeleeSwing(attributes.damage);
+    } else {
+      onWeaponShot?.(attributes.damage, 1);
+    }
+    playMeleeSwingSound(attributes, camera.position, meleeSwingDurationSeconds);
+    return true;
+  };
+
   const tryFire = (canStartBurst: boolean): void => {
     if (
       !controlsActive ||
       activeWeapon === null ||
       switchAnimation !== null ||
       viewmodelTransitionActive ||
+      meleeSwinging ||
       fireCooldownSeconds > 0
     ) {
       return;
@@ -6502,6 +7726,9 @@ const createWeaponRuntime = (
     if (startingBurst && !canStartBurst) {
       return;
     }
+    const triggerProfile = startingBurst
+      ? resolveWeaponTriggerProfile(definition, reticleEnabled)
+      : null;
     const slot = inventory.get(activeWeapon);
     if (slot === undefined) {
       return;
@@ -6511,14 +7738,21 @@ const createWeaponRuntime = (
       reload();
       return;
     }
+    if (triggerProfile?.requiresTriggerRelease && triggerReleaseLocked) {
+      return;
+    }
     if (latestAimRay === null) {
       return;
     }
     if (reloadingSeconds > 0 && !canInterruptWeaponReload(definition, slot.ammoInMagazine)) {
       return;
     }
-    if (startingBurst) {
-      burstShotsRemaining = definition.burstSize;
+    if (triggerProfile !== null) {
+      burstShotsRemaining = triggerProfile.burstSize;
+      burstCooldownAfterCurrentBurstSeconds = triggerProfile.burstCooldownSeconds;
+      if (triggerProfile.requiresTriggerRelease) {
+        triggerReleaseLocked = true;
+      }
     }
     // A held fire input cancels a round reload as soon as a shell or bullet
     // has been chambered. Clip reloads remain atomic and cannot be cancelled.
@@ -6529,8 +7763,10 @@ const createWeaponRuntime = (
     slot.ammoInMagazine -= 1;
     burstShotsRemaining = Math.max(0, burstShotsRemaining - 1);
     fireCooldownSeconds =
-      burstShotsRemaining > 0 ? definition.fireIntervalSeconds : definition.burstCooldownSeconds;
-    muzzleFlashSeconds = 0.055;
+      burstShotsRemaining > 0
+        ? definition.fireIntervalSeconds
+        : burstCooldownAfterCurrentBurstSeconds;
+    muzzleFlashSeconds = WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS;
     recoilAmount = Math.min(1, recoilAmount + resolveWeaponRecoilAmount(definition.damage));
     onWeaponShot?.(definition.damage, definition.pellets);
     shotsFired += 1;
@@ -6555,10 +7791,15 @@ const createWeaponRuntime = (
     visibleInView: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
+    meleeActive: boolean,
+    worldVelocity: PhysicsVector,
+    airborne: boolean,
   ): void => {
     controlsActive = active;
     viewActive = visibleInView;
     latestAimRay = aimRay;
+    latestWorldVelocity = worldVelocity;
+    latestAirborne = airborne;
     if (shotAudioContext !== null && shotAudioContext.state !== "closed") {
       // Keep active tails and pass-by voices attached to the moving listener,
       // not just to the camera pose from the frame that spawned them.
@@ -6635,6 +7876,22 @@ const createWeaponRuntime = (
     if (fireHeld || burstShotsRemaining > 0) {
       tryFire(fireHeld || burstShotsRemaining > 0);
     }
+    const meleeDeltaSeconds = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+    if (meleeSwinging) {
+      meleeSwingElapsedSeconds += meleeDeltaSeconds;
+      const progress = Math.min(
+        1,
+        meleeSwingElapsedSeconds / Math.max(0.001, meleeSwingDurationSeconds),
+      );
+      if (!meleeSwingHitResolved && progress >= 0.5) {
+        meleeSwingHitResolved = true;
+        resolveMeleeHit();
+      }
+      if (progress >= 1) {
+        meleeSwinging = false;
+        meleeSwingElapsedSeconds = 0;
+      }
+    }
     for (const visual of pickupVisuals) {
       if (visual.collected) {
         continue;
@@ -6652,10 +7909,11 @@ const createWeaponRuntime = (
     lastPickupCheckPosition.copy(cameraPosition);
     pickupPositionInitialized = true;
     const nearest = findNearestPickup(cameraPosition);
-    // Walking through the expanded pickup radius equips the closest gun. The
-    // manual E interaction remains available for players who stop nearby.
+    // Walking through the expanded pickup radius stores the closest gun while
+    // melee is drawn (or another gun is already active). E/number selection
+    // remains the deliberate handoff action.
     if (controlsActive && horizontalDistanceMoved > 0.001 && nearest !== undefined) {
-      collectPickup(nearest.visual);
+      collectPickup(nearest.visual, shouldEquipWalkOverGun(meleeActive, activeWeapon !== null));
     }
     const nextNearby = findNearestPickup(cameraPosition)?.visual.spawn.weapon ?? null;
     if (nextNearby !== nearbyPickup) {
@@ -6700,6 +7958,10 @@ const createWeaponRuntime = (
       model.root.visible = visible;
       if (!visible) {
         model.muzzleFlash.visible = false;
+        if (model.muzzleFlashLight !== null) {
+          model.muzzleFlashLight.visible = false;
+          model.muzzleFlashLight.intensity = 0;
+        }
         // Existing world smoke continues diffusing after a switch, holster,
         // or camera move. Do not emit new thermal wisps from a hidden barrel.
         updateWeaponSmoke(model, weapon, deltaSeconds, false);
@@ -6731,15 +7993,29 @@ const createWeaponRuntime = (
                 insertionImpulseElapsedSeconds,
               })
             : null;
+      const meleePose =
+        weapon === activeWeapon && meleeSwinging
+          ? resolveMeleeSwingPose(
+              Math.min(1, meleeSwingElapsedSeconds / Math.max(0.001, meleeSwingDurationSeconds)),
+              meleeSwingDirection,
+            )
+          : null;
       model.root.position.x =
-        viewmodelOffset.x + (viewmodelPose?.offset.x ?? 0) + (reloadPose?.lateralOffset ?? 0);
+        viewmodelOffset.x +
+        (viewmodelPose?.offset.x ?? 0) +
+        (reloadPose?.lateralOffset ?? 0) +
+        (meleePose?.offsetX ?? 0);
       model.root.position.y =
-        viewmodelOffset.y + (viewmodelPose?.offset.y ?? 0) + (reloadPose?.verticalOffset ?? 0);
+        viewmodelOffset.y +
+        (viewmodelPose?.offset.y ?? 0) +
+        (reloadPose?.verticalOffset ?? 0) +
+        (meleePose?.offsetY ?? 0);
       model.root.position.z =
         viewmodelOffset.z +
         (viewmodelPose?.offset.z ?? 0) +
         recoilAmount * 0.07 +
-        (reloadPose?.depthOffset ?? 0);
+        (reloadPose?.depthOffset ?? 0) +
+        (meleePose?.offsetZ ?? 0);
       weaponAimDirectionLocal.copy(weaponAimTargetLocal).sub(model.root.position);
       if (weaponAimDirectionLocal.lengthSq() > 0.0001) {
         weaponAimDirectionLocal.normalize();
@@ -6758,11 +8034,25 @@ const createWeaponRuntime = (
           weaponReloadQuaternion.setFromEuler(weaponReloadEuler);
           model.root.quaternion.multiply(weaponReloadQuaternion);
         }
+        if (meleePose !== null) {
+          weaponReloadEuler.set(
+            meleePose.pitchRadians,
+            meleePose.yawRadians,
+            meleePose.rollRadians,
+          );
+          weaponReloadQuaternion.setFromEuler(weaponReloadEuler);
+          model.root.quaternion.multiply(weaponReloadQuaternion);
+        }
         // The camera child already inherits the shared damper, and this root
         // is aimed at the live reticule ray. Do not add a second breathing
         // oscillator here or the sights will drift away from that ray.
       }
       model.muzzleFlash.visible = muzzleFlashSeconds > 0;
+      if (model.muzzleFlashLight !== null) {
+        const lightRatio = resolveWeaponMuzzleFlashLightRatio(muzzleFlashSeconds);
+        model.muzzleFlashLight.visible = lightRatio > 0;
+        model.muzzleFlashLight.intensity = WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY * lightRatio;
+      }
       updateWeaponSmoke(model, weapon, deltaSeconds);
     }
     const bulletHoleCountBeforeCleanup = bulletHoleEffects.length;
@@ -6774,7 +8064,7 @@ const createWeaponRuntime = (
       effect.remainingSeconds -= deltaSeconds;
       const opacity = resolveWeaponEffectOpacity(effect.kind, effect.remainingSeconds);
       for (const material of effect.materials) {
-        material.opacity = opacity;
+        material.opacity = opacity * effect.opacityMultiplier;
       }
       if (effect.remainingSeconds <= 0) {
         removeEffect(effect);
@@ -6787,8 +8077,12 @@ const createWeaponRuntime = (
   const setFireHeld = (held: boolean): void => {
     fireHeld = held;
     if (!held) {
+      triggerReleaseLocked = false;
       muzzleFlashSeconds = Math.min(muzzleFlashSeconds, 0.035);
     }
+  };
+  const setReticleEnabled = (enabled: boolean): void => {
+    reticleEnabled = enabled;
   };
   const interruptReload = (): void => {
     if (reloadingSeconds <= 0) {
@@ -6805,7 +8099,12 @@ const createWeaponRuntime = (
   };
   const recordDeath = (): void => {
     fireHeld = false;
+    meleeSwinging = false;
+    meleeSwingElapsedSeconds = 0;
+    meleeSwingHitResolved = false;
+    triggerReleaseLocked = false;
     burstShotsRemaining = 0;
+    burstCooldownAfterCurrentBurstSeconds = 0;
     interruptReload();
   };
   const dispose = (): void => {
@@ -6813,6 +8112,7 @@ const createWeaponRuntime = (
     effectsRoot.removeFromParent();
     worldSmokeRoot.removeFromParent();
     bulletHoleRoot.removeFromParent();
+    bloodRoot.removeFromParent();
     for (const model of viewModels.values()) {
       resetWeaponSmoke(model);
       camera.remove(model.root);
@@ -6822,9 +8122,12 @@ const createWeaponRuntime = (
     disposeObject(effectsRoot);
     disposeObject(worldSmokeRoot);
     disposeObject(bulletHoleRoot);
+    disposeObject(bloodRoot);
     weaponSmokeTexture.dispose();
+    bloodSplatTexture.dispose();
     effects.length = 0;
     bulletHoleEffects.length = 0;
+    bloodDecalEffects.length = 0;
     const audioContext = shotAudioContext;
     shotAudioContext = null;
     shotAudioMasterGain = null;
@@ -6837,10 +8140,15 @@ const createWeaponRuntime = (
   return {
     update,
     setFireHeld,
+    setReticleEnabled,
     fire: () => tryFire(true),
+    melee: tryMelee,
     fireFrom: (origin, direction, weapon, options) => {
       fireFrom(origin, direction, weapon, options);
     },
+    playMeleeSwingSound,
+    playMeleeImpactSound,
+    playMeleeHitEffects,
     reload,
     interruptReload,
     isReloading: isReloadPresentationActive,
@@ -6879,7 +8187,18 @@ const createMeleeRuntime = (
   explorationWorld: ExplorationWorld,
   onStateChange?: (state: MeleeStateSnapshot) => void,
   onMeleeSwing?: (damage: number) => number,
-  onMeleeEquip?: () => void,
+  onMeleeHit?: (
+    hitObject: THREE.Object3D,
+    damage: number,
+    context: MeleeHitContext,
+  ) => number | null,
+  onMeleeSwingSound?: (
+    attributes: MeleeObjectSnapshot,
+    sourcePosition: THREE.Vector3,
+    swingDurationSeconds: number,
+  ) => void,
+  onMeleeImpactSound?: (attributes: MeleeObjectSnapshot, sourcePosition: THREE.Vector3) => void,
+  onMeleeEquip?: (redrawingClaimedObject: boolean) => void,
 ): MeleeRuntime => {
   const effectRoot = new THREE.Group();
   effectRoot.name = "MeleeEffectsRoot";
@@ -6898,6 +8217,10 @@ const createMeleeRuntime = (
   const dropDirection = new THREE.Vector3();
   const dropPosition = new THREE.Vector3();
   let activePickup: ExplorationMeleePickup | null = null;
+  // A carried prop can be stashed while a gun is selected. It remains claimed
+  // in the world simulation, but only the drawn item is active for input and
+  // presentation.
+  let drawn = false;
   let viewModel: MeleeViewModelResources | null = null;
   let nearby: MeleeStateSnapshot["nearby"] = null;
   let swinging = false;
@@ -6906,6 +8229,7 @@ const createMeleeRuntime = (
   let swingDirection: MeleeSwingDirection = "right-to-left";
   let nextSwingDirection: MeleeSwingDirection = "right-to-left";
   let swingHitResolved = false;
+  let idleElapsedSeconds = 0;
   let swings = 0;
   let hits = 0;
   let lastDamage = 0;
@@ -6917,6 +8241,8 @@ const createMeleeRuntime = (
     readonly origin: THREE.Vector3;
     readonly direction: THREE.Vector3;
   } | null = null;
+  let latestWorldVelocity: PhysicsVector = { x: 0, y: 0, z: 0 };
+  let latestAirborne = false;
   let latestViewmodelOffset: CameraViewmodelOffset = { x: 0, y: 0, z: 0 };
   let latestViewmodelTransition: CameraViewmodelTransition = {
     phase: "idle",
@@ -6929,7 +8255,7 @@ const createMeleeRuntime = (
   let lastSerializedSnapshot = "";
 
   const getSnapshot = (): MeleeStateSnapshot => ({
-    active: activePickup?.snapshot ?? null,
+    active: drawn ? (activePickup?.snapshot ?? null) : null,
     nearby,
     swinging,
     swings,
@@ -6965,12 +8291,15 @@ const createMeleeRuntime = (
     if (sourceMatrix === undefined) {
       pickup.mesh.getMatrixAt(pickup.index, instanceMatrix);
     }
-    const instanceQuaternion = new THREE.Quaternion();
     const instanceScale = new THREE.Vector3();
-    instanceMatrix.decompose(new THREE.Vector3(), instanceQuaternion, instanceScale);
+    // A knocked or dropped prop's matrix can contain an arbitrary ragdoll
+    // rotation. Keep its scale for the full-size viewmodel, but deliberately
+    // discard that transient quaternion; pickup should always normalize the
+    // held object back to its canonical upright grip.
+    instanceMatrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), instanceScale);
     // Use the source InstancedMesh geometry/material instead of inventing a
-    // proxy shape. The instance matrix supplies the prop's authored rotation,
-    // proportions, and full world size; do not rescale it for the viewmodel.
+    // proxy shape. The instance matrix supplies the prop's proportions and
+    // full world size; orientation is rebuilt from its canonical axis below.
     const geometry = pickup.mesh.geometry.clone();
     geometry.computeBoundingBox();
     const sourceSize = new THREE.Vector3();
@@ -7003,10 +8332,10 @@ const createMeleeRuntime = (
     // The center is offset along the now-upright source axis so the bottom of
     // a pole sits at the hand instead of pivoting around its center of mass.
     object.position.set(0, sourceLength * 0.38, -0.1);
-    // Keep the longest source axis upright. The swing pose then rotates that
-    // axis through the outward baseball-bat arc instead of laying a pole
-    // sideways and making it look like a katana.
-    object.quaternion.copy(instanceQuaternion).multiply(uprightGripQuaternion);
+    // Keep the longest source axis upright. The shared swing pose can then
+    // present bats, signs, pipes, and cones from their natural grip axis
+    // instead of laying every item sideways like a generic blade.
+    object.quaternion.copy(uprightGripQuaternion);
     object.scale.copy(instanceScale);
     object.castShadow = true;
     object.receiveShadow = true;
@@ -7082,11 +8411,33 @@ const createMeleeRuntime = (
     if (hit === undefined) {
       return;
     }
+    onMeleeImpactSound?.(activePickup.snapshot, hit.point);
     addImpact(hit, activePickup.color);
+    const combatDamage = onMeleeHit?.(hit.object, activePickup.snapshot.damage, {
+      point: {
+        x: hit.point.x,
+        y: hit.point.y,
+        z: hit.point.z,
+      },
+      attackDirection: {
+        x: latestAimRay.direction.x,
+        y: latestAimRay.direction.y,
+        z: latestAimRay.direction.z,
+      },
+      attackerVelocity: latestWorldVelocity,
+      attackerAirborne: latestAirborne,
+    });
+    if (combatDamage !== null && combatDamage !== undefined) {
+      hits += 1;
+      lastDamage = combatDamage;
+      emitState(true);
+      return;
+    }
     const objectId = explorationWorld.getMeleeObjectIdForHit(hit.object, hit.instanceId);
     if (objectId === null) {
       hit.object.userData.lastMeleeHit = {
         damage: activePickup.snapshot.damage,
+        stoppingPower: activePickup.snapshot.stoppingPower,
         volumeM3: activePickup.snapshot.volumeM3,
       };
       return;
@@ -7099,6 +8450,7 @@ const createMeleeRuntime = (
         z: latestAimRay.direction.z,
       },
       activePickup.snapshot.swingSpeedRadiansPerSecond,
+      activePickup.snapshot.stoppingPower,
     );
     if (didApply) {
       hits += 1;
@@ -7110,6 +8462,7 @@ const createMeleeRuntime = (
   const trySwing = (): boolean => {
     if (
       !controlsActive ||
+      !drawn ||
       activePickup === null ||
       latestAimRay === null ||
       swinging ||
@@ -7124,15 +8477,21 @@ const createMeleeRuntime = (
     swingElapsedSeconds = 0;
     swingHitResolved = false;
     swinging = true;
+    idleElapsedSeconds = 0;
     swings += 1;
-    lastDamage = swing.damage;
     lastOxygenCost = onMeleeSwing?.(swing.damage) ?? resolveMeleeO2Cost(swing.damage);
+    onMeleeSwingSound?.(activePickup.snapshot, latestCameraPosition, swing.swingDurationSeconds);
     emitState(true);
     return true;
   };
 
   const interact = (): boolean => {
     if (activePickup !== null) {
+      if (!drawn) {
+        drawn = true;
+        onMeleeEquip?.(true);
+        emitState(true);
+      }
       return true;
     }
     if (!controlsActive) {
@@ -7149,10 +8508,27 @@ const createMeleeRuntime = (
       return false;
     }
     activePickup = equipped;
+    drawn = true;
     swingDirection = "right-to-left";
     nextSwingDirection = "right-to-left";
     viewModel = createViewModel(equipped, sourceMatrix);
-    onMeleeEquip?.();
+    onMeleeEquip?.(false);
+    emitState(true);
+    return true;
+  };
+
+  const stash = (): boolean => {
+    if (activePickup === null || !drawn) {
+      return false;
+    }
+    drawn = false;
+    swinging = false;
+    swingElapsedSeconds = 0;
+    idleElapsedSeconds = 0;
+    fireHeld = false;
+    if (viewModel !== null) {
+      viewModel.root.visible = false;
+    }
     emitState(true);
     return true;
   };
@@ -7180,10 +8556,37 @@ const createMeleeRuntime = (
     }
     swinging = false;
     swingElapsedSeconds = 0;
+    idleElapsedSeconds = 0;
+    drawn = false;
     disposeViewModel();
     activePickup = null;
     emitState(true);
     return true;
+  };
+
+  /** Launch the held object along the reticle with a volume-weighted speed. */
+  const throwActiveObject = (playerVelocity?: PhysicsVector): boolean => {
+    if (activePickup === null) {
+      return false;
+    }
+    const throwDirection = latestAimDirection.clone();
+    if (throwDirection.lengthSq() <= 0.0001) {
+      throwDirection.set(0, 0, -1);
+    } else {
+      throwDirection.normalize();
+    }
+    const throwSpeed = resolveMeleeThrowSpeed(activePickup.snapshot.volumeM3);
+    const baseX =
+      playerVelocity !== undefined && Number.isFinite(playerVelocity.x) ? playerVelocity.x : 0;
+    const baseY =
+      playerVelocity !== undefined && Number.isFinite(playerVelocity.y) ? playerVelocity.y : 0;
+    const baseZ =
+      playerVelocity !== undefined && Number.isFinite(playerVelocity.z) ? playerVelocity.z : 0;
+    return dropActiveObject({
+      x: baseX + throwDirection.x * throwSpeed,
+      y: baseY + throwDirection.y * throwSpeed,
+      z: baseZ + throwDirection.z * throwSpeed,
+    });
   };
 
   const update = (
@@ -7192,6 +8595,8 @@ const createMeleeRuntime = (
     aimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 },
     active: boolean,
     visibleInView: boolean,
+    worldVelocity: PhysicsVector,
+    airborne: boolean,
     viewmodelOffset: CameraViewmodelOffset,
     viewmodelTransition: CameraViewmodelTransition,
   ): void => {
@@ -7201,9 +8606,11 @@ const createMeleeRuntime = (
     latestCameraPosition.copy(cameraPosition);
     latestAimRay = aimRay;
     latestAimDirection.copy(aimRay.direction);
+    latestWorldVelocity = worldVelocity;
+    latestAirborne = airborne;
     latestViewmodelOffset = viewmodelOffset;
     latestViewmodelTransition = viewmodelTransition;
-    if (fireHeld && activePickup !== null && !swinging) {
+    if (fireHeld && drawn && activePickup !== null && !swinging) {
       trySwing();
     }
     if (swinging) {
@@ -7222,6 +8629,28 @@ const createMeleeRuntime = (
         swingDirection = nextSwingDirection;
         emitState(true);
       }
+    }
+    const canAdvanceIdleReset = shouldAdvanceMeleeIdleReset({
+      drawn,
+      active: activePickup !== null,
+      controlsActive,
+      swinging,
+      fireHeld,
+      viewmodelTransitionIdle: latestViewmodelTransition.phase === "idle",
+    });
+    if (canAdvanceIdleReset) {
+      idleElapsedSeconds += safeDelta;
+    } else {
+      idleElapsedSeconds = 0;
+    }
+    if (
+      swingDirection === "left-to-right" &&
+      resolveMeleeIdleResetProgress(idleElapsedSeconds) >= 1
+    ) {
+      // The reset has put the prop on the default right side. Seed the next
+      // swing from that same side instead of snapping back to the left.
+      swingDirection = "right-to-left";
+      nextSwingDirection = "right-to-left";
     }
     const nearest = activePickup === null ? findNearestMeleePickup(cameraPosition) : null;
     const nextNearby =
@@ -7245,7 +8674,9 @@ const createMeleeRuntime = (
             Math.min(1, swingElapsedSeconds / Math.max(0.001, swingDurationSeconds)),
             swingDirection,
           )
-        : resolveMeleeSwingPose(0, swingDirection);
+        : swingDirection === "left-to-right"
+          ? resolveMeleeIdleResetPose(resolveMeleeIdleResetProgress(idleElapsedSeconds))
+          : resolveMeleeSwingPose(0, swingDirection);
       aimTargetWorld.copy(aimRay.origin).addScaledVector(aimRay.direction, 32);
       aimTargetLocal.copy(aimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
       viewModel.root.position.set(
@@ -7266,7 +8697,7 @@ const createMeleeRuntime = (
         );
         viewModel.root.quaternion.multiply(new THREE.Quaternion().setFromEuler(swingEuler));
       }
-      viewModel.root.visible = viewActive && controlsActive && activePickup !== null;
+      viewModel.root.visible = viewActive && controlsActive && drawn && activePickup !== null;
     }
     for (let index = impactEffects.length - 1; index >= 0; index -= 1) {
       const effect = impactEffects[index];
@@ -7306,9 +8737,11 @@ const createMeleeRuntime = (
     setFireHeld,
     fire: trySwing,
     interact,
-    isActive: () => activePickup !== null,
+    isActive: () => drawn && activePickup !== null,
+    stash,
     holster,
     dropActiveObject,
+    throwActiveObject,
     getSnapshot,
     dispose,
   };
@@ -7944,7 +9377,7 @@ const makeWeaponChartTexture = (): THREE.CanvasTexture => {
   context.fillText("ARMORY / WEAPON CHART", 64, 74);
   context.fillStyle = "#d8e4e1";
   context.font = "500 19px ui-monospace, monospace";
-  context.fillText("PENTHOUSE LOADOUT  ·  DAMAGE + STARTING AMMO", 66, 110);
+  context.fillText("PENTHOUSE LOADOUT  ·  DAMAGE + STOPPING POWER + STARTING AMMO", 66, 110);
   context.fillStyle = "#e94136";
   context.fillRect(66, 132, 1468, 5);
 
@@ -7952,9 +9385,10 @@ const makeWeaponChartTexture = (): THREE.CanvasTexture => {
   const rowHeight = 104;
   const columnX = {
     weapon: 104,
-    damage: 720,
-    pellets: 930,
-    ammo: 1260,
+    damage: 620,
+    stoppingPower: 850,
+    pellets: 1_025,
+    ammo: 1_290,
     total: 1496,
   } as const;
   context.fillStyle = "#8fa7aa";
@@ -7962,6 +9396,7 @@ const makeWeaponChartTexture = (): THREE.CanvasTexture => {
   context.fillText("WEAPON", columnX.weapon, tableTop);
   context.textAlign = "right";
   context.fillText("DAMAGE / BULLET", columnX.damage, tableTop);
+  context.fillText("STOPPING / BULLET", columnX.stoppingPower, tableTop);
   context.fillText("PELLETS", columnX.pellets, tableTop);
   context.fillText("MAG / RESERVE", columnX.ammo, tableTop);
   context.fillText("TOTAL", columnX.total, tableTop);
@@ -7992,6 +9427,7 @@ const makeWeaponChartTexture = (): THREE.CanvasTexture => {
     context.font = "700 29px ui-monospace, monospace";
     context.textAlign = "right";
     context.fillText(String(entry.damagePerBullet), columnX.damage, rowY + 48);
+    context.fillText(entry.stoppingPowerPerBullet.toFixed(2), columnX.stoppingPower, rowY + 48);
     context.fillText(String(entry.pelletsPerShot), columnX.pellets, rowY + 48);
     context.fillText(
       `${String(entry.magazineSize)} / ${String(entry.reserveAmmo)}`,
@@ -9147,6 +10583,11 @@ interface ExplorationWorld {
     object: THREE.Object3D,
     instanceIndex: number | undefined,
   ) => number | null;
+  /** Resolve any streamed knockable prop, including one already in ragdoll. */
+  readonly getRagdollObjectIdForHit: (
+    object: THREE.Object3D,
+    instanceIndex: number | undefined,
+  ) => number | null;
   readonly equipMeleeObject: (objectId: number) => ExplorationMeleePickup | null;
   readonly dropMeleeObject: (
     objectId: number,
@@ -9158,6 +10599,18 @@ interface ExplorationWorld {
     objectId: number,
     direction: PhysicsVector,
     swingSpeed: number,
+    stoppingPower?: number,
+  ) => boolean;
+  /** Apply one projectile's stopping-power impulse to a knockable prop. */
+  readonly applyProjectileHit: (
+    objectId: number,
+    direction: PhysicsVector,
+    stoppingPower: number,
+    applyImpulse?: (
+      dynamicId: number,
+      linearVelocity: PhysicsVector,
+      angularVelocity: PhysicsVector,
+    ) => void,
   ) => boolean;
   readonly getPhysicsVersion: () => number;
   readonly dispose: () => void;
@@ -9187,12 +10640,14 @@ interface ExplorationKnockable {
   readonly halfExtents: PhysicsVector;
   readonly displayName: string;
   readonly color: number;
-  readonly rotationY?: number;
+  rotationY?: number;
   readonly physicsId: number;
   readonly fallAxis: THREE.Vector3;
   readonly launchLinearVelocity: THREE.Vector3;
   readonly launchAngularVelocity: THREE.Vector3;
   isKnocked: boolean;
+  /** A dropped held prop remains recoverable while its ragdoll body settles. */
+  isDropped: boolean;
   isEquipped: boolean;
   angle: number;
   angularVelocity: number;
@@ -9204,6 +10659,173 @@ interface ExplorationKnockable {
 const refreshKnockableMeshBounds = (mesh: THREE.InstancedMesh): void => {
   mesh.computeBoundingBox();
   mesh.computeBoundingSphere();
+};
+
+type WarehouseSilhouettePoint = readonly [number, number];
+
+/** Build a shallow, bevelled tool silhouette in the local X/Y plane. */
+const createWarehouseSilhouetteGeometry = (
+  points: readonly WarehouseSilhouettePoint[],
+  depth = 0.18,
+): THREE.BufferGeometry => {
+  const firstPoint = points[0];
+  if (firstPoint === undefined) {
+    throw new Error("Warehouse melee silhouettes must contain at least one point");
+  }
+  const shape = new THREE.Shape();
+  shape.moveTo(firstPoint[0], firstPoint[1]);
+  for (const point of points.slice(1)) {
+    shape.lineTo(point[0], point[1]);
+  }
+  shape.closePath();
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: true,
+    bevelSegments: 2,
+    bevelSize: 0.018,
+    bevelThickness: 0.018,
+    steps: 1,
+  });
+  geometry.translate(0, 0, -depth / 2);
+  geometry.computeBoundingBox();
+  return geometry;
+};
+
+/** Create the recognizable procedural silhouette for one warehouse pickup. */
+const createWarehouseMeleeGeometry = (kind: DebuggingTwoMeleeKind): THREE.BufferGeometry => {
+  switch (kind) {
+    case "steel-pipe":
+      return new THREE.CylinderGeometry(0.09, 0.09, 1, 16);
+    case "crowbar":
+      return createWarehouseSilhouetteGeometry([
+        [-0.055, -0.5],
+        [0.055, -0.5],
+        [0.055, 0.19],
+        [0.12, 0.3],
+        [0.2, 0.31],
+        [0.21, 0.4],
+        [0.09, 0.4],
+        [-0.035, 0.28],
+        [-0.035, -0.5],
+      ]);
+    case "fire-extinguisher":
+      return createWarehouseSilhouetteGeometry(
+        [
+          [-0.15, -0.32],
+          [0.15, -0.32],
+          [0.17, -0.24],
+          [0.17, 0.25],
+          [0.1, 0.34],
+          [0.08, 0.43],
+          [0.14, 0.47],
+          [0.13, 0.5],
+          [-0.08, 0.5],
+          [-0.08, 0.46],
+          [-0.03, 0.42],
+          [-0.04, 0.34],
+          [-0.14, 0.27],
+          [-0.17, 0.2],
+        ],
+        0.22,
+      );
+    case "pipe-wrench":
+      return createWarehouseSilhouetteGeometry([
+        [-0.055, -0.5],
+        [0.055, -0.5],
+        [0.055, 0.19],
+        [0.14, 0.27],
+        [0.2, 0.38],
+        [0.13, 0.45],
+        [0.07, 0.35],
+        [0.01, 0.31],
+        [-0.08, 0.4],
+        [-0.18, 0.43],
+        [-0.14, 0.3],
+        [-0.055, 0.19],
+      ]);
+    case "hammer":
+      return createWarehouseSilhouetteGeometry(
+        [
+          [-0.05, -0.5],
+          [0.05, -0.5],
+          [0.05, 0.25],
+          [0.22, 0.28],
+          [0.22, 0.44],
+          [-0.22, 0.44],
+          [-0.22, 0.28],
+          [-0.05, 0.25],
+        ],
+        0.2,
+      );
+    case "screwdriver":
+      return createWarehouseSilhouetteGeometry(
+        [
+          [-0.12, -0.5],
+          [0.12, -0.5],
+          [0.16, -0.42],
+          [0.14, -0.22],
+          [0.1, -0.12],
+          [0.03, -0.1],
+          [0.03, 0.5],
+          [-0.03, 0.5],
+          [-0.03, -0.1],
+          [-0.1, -0.12],
+          [-0.14, -0.22],
+          [-0.16, -0.42],
+        ],
+        0.14,
+      );
+    case "fireman-axe":
+      return createWarehouseSilhouetteGeometry(
+        [
+          [-0.05, -0.5],
+          [0.05, -0.5],
+          [0.05, 0.2],
+          [0.16, 0.25],
+          [0.29, 0.37],
+          [0.25, 0.49],
+          [0.13, 0.47],
+          [-0.04, 0.38],
+          [-0.08, 0.27],
+          [-0.05, 0.2],
+        ],
+        0.2,
+      );
+    case "box-cutter":
+      return createWarehouseSilhouetteGeometry(
+        [
+          [-0.14, -0.5],
+          [0.14, -0.5],
+          [0.14, 0.12],
+          [0.24, 0.18],
+          [0.24, 0.26],
+          [0.07, 0.31],
+          [0.07, 0.5],
+          [-0.07, 0.5],
+          [-0.07, 0.31],
+          [-0.14, 0.26],
+        ],
+        0.16,
+      );
+  }
+};
+
+const resolveWarehouseMeleeHalfExtents = (
+  geometry: THREE.BufferGeometry,
+  scale: THREE.Vector3,
+): PhysicsVector => {
+  geometry.computeBoundingBox();
+  const bounds = geometry.boundingBox;
+  if (bounds === null) {
+    return { x: 0.09 * scale.x, y: 0.5 * scale.y, z: 0.09 * scale.z };
+  }
+  const size = new THREE.Vector3();
+  bounds.getSize(size);
+  return {
+    x: (size.x * Math.abs(scale.x)) / 2,
+    y: (size.y * Math.abs(scale.y)) / 2,
+    z: (size.z * Math.abs(scale.z)) / 2,
+  };
 };
 
 interface ExplorationBuildingSpec {
@@ -9282,11 +10904,17 @@ export const createExplorationWorld = (
   roomSeed: string,
   surfaceTextures?: InteriorSurfaceTextures,
   onAreaChange?: (area: string) => void,
+  warehouseResources?: DebuggingTwoMapResources,
 ): ExplorationWorld => {
   const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
+  const isWarehouseMode = warehouseResources !== undefined;
   const root = new THREE.Group();
   root.name = "ExplorationWorldRoot";
-  root.userData = { roomSeed: normalizedSeed, streaming: true };
+  root.userData = {
+    roomSeed: normalizedSeed,
+    streaming: !isWarehouseMode,
+    ...(isWarehouseMode ? { mapId: "debugging-02", generation: "warehouse-melee-v1" } : {}),
+  };
   scene.add(root);
 
   const groundGeometry = new THREE.BoxGeometry(
@@ -9329,6 +10957,30 @@ export const createExplorationWorld = (
   const utilityPostMaterials = EXPLORATION_BIOMES.map((style) =>
     createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
   );
+  const warehouseMeleeGeometries = new Map<DebuggingTwoMeleeKind, THREE.BufferGeometry>(
+    (
+      [
+        "crowbar",
+        "steel-pipe",
+        "fire-extinguisher",
+        "pipe-wrench",
+        "hammer",
+        "screwdriver",
+        "fireman-axe",
+        "box-cutter",
+      ] as const
+    ).map((kind): [DebuggingTwoMeleeKind, THREE.BufferGeometry] => {
+      const geometry = createWarehouseMeleeGeometry(kind);
+      geometry.userData = { warehouseMeleeKind: kind };
+      return [kind, geometry];
+    }),
+  );
+  const warehouseMeleeMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.72,
+    metalness: 0.22,
+    vertexColors: true,
+  });
   const activeChunks = new Map<string, ExplorationChunk>();
   const knockCollisionRefreshDistance = 1.05;
   const knockImpactSpeedMin = 0.9;
@@ -9353,7 +11005,7 @@ export const createExplorationWorld = (
   const knockQuaternion = new THREE.Quaternion();
   const knockMatrix = new THREE.Matrix4();
   let physicsVersion = 0;
-  let currentArea = "Penthouse";
+  let currentArea = warehouseResources?.explorationArea ?? "Penthouse";
 
   const activateKnockableRagdoll = (
     knockable: ExplorationKnockable,
@@ -9432,6 +11084,9 @@ export const createExplorationWorld = (
     Math.hypot(chunkX * EXPLORATION_CHUNK_SIZE, chunkZ * EXPLORATION_CHUNK_SIZE) <=
     EXPLORATION_WORLD_RADIUS_METERS;
   const describeArea = (position: THREE.Vector3): string => {
+    if (warehouseResources !== undefined) {
+      return warehouseResources.explorationArea;
+    }
     const playArea = PLAY_AREA_BOUNDS.find(
       (bounds) =>
         position.x >= bounds.minX &&
@@ -9457,7 +11112,78 @@ export const createExplorationWorld = (
     return "Exploration grounds";
   };
 
+  const createWarehouseChunk = (): ExplorationChunk => {
+    if (warehouseResources === undefined) {
+      throw new Error("Warehouse exploration resources are missing");
+    }
+    const chunk = new THREE.Group();
+    chunk.name = "DebuggingTwoWarehouseMeleeChunk";
+    chunk.userData = {
+      mapId: "debugging-02",
+      roomSeed: normalizedSeed,
+      area: warehouseResources.explorationArea,
+      generation: "warehouse-melee-v1",
+    };
+    const knockableProps: ExplorationKnockable[] = [];
+    const yAxis = new THREE.Vector3(0, 1, 0);
+    for (const spawn of warehouseResources.meleeObjects) {
+      const geometry = warehouseMeleeGeometries.get(spawn.kind);
+      if (geometry === undefined) {
+        throw new Error(`Warehouse melee geometry is missing for: ${spawn.kind}`);
+      }
+      const mesh = new THREE.InstancedMesh(geometry, warehouseMeleeMaterial, 1);
+      mesh.name = `WarehouseMeleeObject:${spawn.id}`;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.userData = {
+        mapId: "debugging-02",
+        mapFeature: "warehouse-melee",
+        meleeObjectId: spawn.id,
+      };
+      const basePosition = new THREE.Vector3(...spawn.position);
+      const baseScale = new THREE.Vector3(...spawn.scale);
+      const baseQuaternion = new THREE.Quaternion().setFromAxisAngle(yAxis, spawn.rotationY);
+      const matrix = new THREE.Matrix4().compose(basePosition, baseQuaternion, baseScale);
+      mesh.setMatrixAt(0, matrix);
+      mesh.setColorAt(0, new THREE.Color(spawn.color));
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor !== null) {
+        mesh.instanceColor.needsUpdate = true;
+      }
+      mesh.computeBoundingSphere();
+      chunk.add(mesh);
+      knockableProps.push({
+        mesh,
+        index: 0,
+        basePosition,
+        baseScale,
+        baseQuaternion,
+        halfExtents: resolveWarehouseMeleeHalfExtents(geometry, baseScale),
+        displayName: spawn.displayName,
+        color: spawn.color,
+        rotationY: spawn.rotationY,
+        physicsId: nextKnockablePhysicsId,
+        fallAxis: new THREE.Vector3(0, 0, 1),
+        launchLinearVelocity: new THREE.Vector3(),
+        launchAngularVelocity: new THREE.Vector3(),
+        isKnocked: false,
+        isDropped: false,
+        isEquipped: false,
+        angle: 0,
+        angularVelocity: 0,
+        targetAngle: Math.PI * 0.7,
+        hasBodyState: false,
+        kickCooldownSeconds: 0,
+      });
+      nextKnockablePhysicsId += 1;
+    }
+    return { root: chunk, physicsBoxes: [], knockableProps };
+  };
+
   const createChunk = (chunkX: number, chunkZ: number): ExplorationChunk => {
+    if (isWarehouseMode) {
+      return createWarehouseChunk();
+    }
     const random = createSeededRandom(
       `${normalizedSeed}|exploration|${String(chunkX)}|${String(chunkZ)}`,
     );
@@ -9994,6 +11720,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
           isEquipped: false,
           angle: 0,
           angularVelocity: 0,
@@ -10039,6 +11766,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
           isEquipped: false,
           angle: 0,
           angularVelocity: 0,
@@ -10084,6 +11812,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
           isEquipped: false,
           angle: 0,
           angularVelocity: 0,
@@ -10180,6 +11909,7 @@ export const createExplorationWorld = (
           hasBodyState: false,
           kickCooldownSeconds: 0,
           isKnocked: false,
+          isDropped: false,
           isEquipped: false,
           angle: 0,
           angularVelocity: 0,
@@ -10211,6 +11941,13 @@ export const createExplorationWorld = (
   };
 
   const preloadAllChunks = (): void => {
+    if (isWarehouseMode) {
+      const chunk = createWarehouseChunk();
+      activeChunks.set("warehouse", chunk);
+      root.add(chunk.root);
+      physicsVersion += 1;
+      return;
+    }
     let physicsChanged = false;
     const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX);
     const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX);
@@ -10482,6 +12219,7 @@ export const createExplorationWorld = (
         rangeMeters: resolveMeleeRangeMeters(meleeLongestSize(knockable)),
         swingSpeedRadiansPerSecond: swing.swingSpeedRadiansPerSecond,
         damage: swing.damage,
+        stoppingPower: swing.stoppingPower,
         oxygenCost: swing.oxygenCost,
       },
       mesh: knockable.mesh,
@@ -10512,6 +12250,10 @@ export const createExplorationWorld = (
     propGeometry.dispose();
     citySignGeometry.dispose();
     utilityPostGeometry.dispose();
+    for (const geometry of warehouseMeleeGeometries.values()) {
+      geometry.dispose();
+    }
+    warehouseMeleeMaterial.dispose();
     beaconGeometry.dispose();
     buildingGeometry.dispose();
     windowGeometry.dispose();
@@ -10592,7 +12334,10 @@ export const createExplorationWorld = (
       const pickups: ExplorationMeleePickup[] = [];
       for (const chunk of activeChunks.values()) {
         for (const knockable of chunk.knockableProps) {
-          if (!knockable.isKnocked && !knockable.isEquipped) {
+          // Every world prop is a valid melee weapon. A toppled prop follows
+          // the same live instance transform as a deliberately dropped one,
+          // so it can be recovered while its ragdoll body is still settling.
+          if (!knockable.isEquipped) {
             pickups.push(toMeleePickup(knockable));
           }
         }
@@ -10600,6 +12345,20 @@ export const createExplorationWorld = (
       return pickups;
     },
     getMeleeObjectIdForHit: (object, instanceIndex) => {
+      if (!(object instanceof THREE.InstancedMesh) || instanceIndex === undefined) {
+        return null;
+      }
+      for (const chunk of activeChunks.values()) {
+        const knockable = chunk.knockableProps.find(
+          (candidate) => candidate.mesh === object && candidate.index === instanceIndex,
+        );
+        if (knockable !== undefined && !knockable.isEquipped && !knockable.isDropped) {
+          return knockable.physicsId;
+        }
+      }
+      return null;
+    },
+    getRagdollObjectIdForHit: (object, instanceIndex) => {
       if (!(object instanceof THREE.InstancedMesh) || instanceIndex === undefined) {
         return null;
       }
@@ -10615,9 +12374,41 @@ export const createExplorationWorld = (
     },
     equipMeleeObject: (objectId) => {
       const knockable = findKnockable(objectId);
-      if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
+      if (knockable === null || knockable.isEquipped) {
         return null;
       }
+      // A toppled or dropped prop may still be rotating or moving in the
+      // dynamic body. Capture its current instance transform before removing
+      // that body so the recovered item does not snap back to its seeded
+      // spawn transform.
+      const currentMatrix = new THREE.Matrix4();
+      knockable.mesh.getMatrixAt(knockable.index, currentMatrix);
+      const currentPosition = new THREE.Vector3();
+      const currentQuaternion = new THREE.Quaternion();
+      currentMatrix.decompose(currentPosition, currentQuaternion, knockable.baseScale);
+      if (
+        Number.isFinite(currentPosition.x) &&
+        Number.isFinite(currentPosition.y) &&
+        Number.isFinite(currentPosition.z)
+      ) {
+        knockable.basePosition.copy(currentPosition);
+      }
+      if (
+        Number.isFinite(currentQuaternion.x) &&
+        Number.isFinite(currentQuaternion.y) &&
+        Number.isFinite(currentQuaternion.z) &&
+        Number.isFinite(currentQuaternion.w)
+      ) {
+        knockable.baseQuaternion.copy(currentQuaternion);
+      }
+      knockable.isDropped = false;
+      knockable.isKnocked = false;
+      knockable.hasBodyState = false;
+      knockable.angle = 0;
+      knockable.angularVelocity = 0;
+      knockable.kickCooldownSeconds = 0;
+      knockable.launchLinearVelocity.set(0, 0, 0);
+      knockable.launchAngularVelocity.set(0, 0, 0);
       knockable.isEquipped = true;
       writeKnockableMatrix(
         knockable,
@@ -10634,8 +12425,10 @@ export const createExplorationWorld = (
         return false;
       }
       knockable.isEquipped = false;
+      knockable.isDropped = true;
       knockable.basePosition.copy(position);
       knockable.baseQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotationY);
+      knockable.rotationY = rotationY;
       activateKnockableRagdoll(knockable, {
         x: Math.sin(rotationY),
         y: 0,
@@ -10659,23 +12452,93 @@ export const createExplorationWorld = (
       physicsVersion += 1;
       return true;
     },
-    applyMeleeHit: (objectId, direction, swingSpeed) => {
+    applyMeleeHit: (objectId, direction, swingSpeed, stoppingPower) => {
       const knockable = findKnockable(objectId);
       if (knockable === null || knockable.isKnocked || knockable.isEquipped) {
         return false;
       }
+      knockable.isDropped = false;
       const safeSwingSpeed = Number.isFinite(swingSpeed) ? Math.max(0, swingSpeed) : 0;
       const swingScale = THREE.MathUtils.clamp(safeSwingSpeed / 8, 0.35, 2.2);
+      const safeStoppingPower =
+        stoppingPower !== undefined && Number.isFinite(stoppingPower)
+          ? Math.max(0, stoppingPower)
+          : 0;
+      const swingImpulse = knockLinearImpulseScale * swingScale * 2.4;
+      // Keep the historical swing response for callers that do not provide a
+      // resolved stat, but let the carried melee stopping-power value provide
+      // the stronger, object-facing impulse when it is available.
+      const impactImpulse = Math.max(swingImpulse, safeStoppingPower);
       activateKnockableRagdoll(knockable, direction);
       knockable.launchLinearVelocity.set(
-        knockDirection.x * knockLinearImpulseScale * swingScale * 2.4,
-        knockLiftImpulse + swingScale * 0.45,
-        knockDirection.z * knockLinearImpulseScale * swingScale * 2.4,
+        knockDirection.x * impactImpulse,
+        knockLiftImpulse + Math.max(swingScale * 0.45, safeStoppingPower * 0.08),
+        knockDirection.z * impactImpulse,
       );
       knockable.launchAngularVelocity
         .copy(knockAxis)
-        .multiplyScalar(knockAngularImpulseScale * (swingScale + 0.4));
+        .multiplyScalar(
+          Math.max(knockAngularImpulseScale * (swingScale + 0.4), safeStoppingPower * 1.25),
+        );
       physicsVersion += 1;
+      return true;
+    },
+    applyProjectileHit: (objectId, direction, stoppingPower, applyImpulse) => {
+      const knockable = findKnockable(objectId);
+      if (knockable === null || knockable.isEquipped) {
+        return false;
+      }
+      const safeStoppingPower = Number.isFinite(stoppingPower) ? Math.max(0, stoppingPower) : 0;
+      if (safeStoppingPower <= 0) {
+        return false;
+      }
+      const wasKnocked = knockable.isKnocked;
+      knockable.isDropped = false;
+      if (!wasKnocked) {
+        activateKnockableRagdoll(knockable, direction);
+      } else {
+        // A shot should continue to contribute force after the first pellet
+        // starts the ragdoll. This is what makes a full shotgun spread read as
+        // one large impact instead of dropping seven later pellets.
+        knockDirection.set(direction.x, 0, direction.z);
+        if (knockDirection.lengthSq() <= Number.EPSILON) {
+          knockDirection.set(0, 0, -1);
+        } else {
+          knockDirection.normalize();
+        }
+      }
+      const safeVerticalDirection = Number.isFinite(direction.y)
+        ? THREE.MathUtils.clamp(direction.y, -0.5, 0.5)
+        : 0;
+      const impulseLinear = {
+        x: knockDirection.x * safeStoppingPower,
+        y: safeStoppingPower * (0.16 + safeVerticalDirection * 0.24),
+        z: knockDirection.z * safeStoppingPower,
+      };
+      knockAxis.set(knockDirection.z, 0, -knockDirection.x);
+      if (knockAxis.lengthSq() <= Number.EPSILON) {
+        knockAxis.set(1, 0, 0);
+      }
+      knockAxis.normalize();
+      const impulseAngular = {
+        x: knockAxis.x * safeStoppingPower * 1.25,
+        y: knockAxis.y * safeStoppingPower * 1.25,
+        z: knockAxis.z * safeStoppingPower * 1.25,
+      };
+      if (knockable.hasBodyState && applyImpulse !== undefined) {
+        applyImpulse(knockable.physicsId, impulseLinear, impulseAngular);
+      } else {
+        knockable.launchLinearVelocity.x += impulseLinear.x;
+        knockable.launchLinearVelocity.y += impulseLinear.y;
+        knockable.launchLinearVelocity.z += impulseLinear.z;
+        knockable.launchAngularVelocity.x += impulseAngular.x;
+        knockable.launchAngularVelocity.y += impulseAngular.y;
+        knockable.launchAngularVelocity.z += impulseAngular.z;
+        physicsVersion += 1;
+      }
+      // Projectile impacts are not subject to the player-contact re-hit
+      // cooldown. Every pellet must be able to add its own impulse.
+      knockable.kickCooldownSeconds = 0;
       return true;
     },
     getPhysicsVersion: () => physicsVersion,
@@ -10825,6 +12688,55 @@ const addFloor = (scene: THREE.Scene, quality: SceneQuality): ArchitectureResour
   return addArchitecture(scene, quality);
 };
 
+/**
+ * Allocate only the shared disposable resources needed by the standalone map.
+ * Debugging 02 must not instantiate the penthouse architecture just to obtain
+ * its texture cache or chart materials.
+ */
+const createCleanSlateArchitectureResources = (): ArchitectureResources => {
+  const makeBlankTexture = (fill: string): THREE.CanvasTexture => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 2;
+    canvas.height = 2;
+    const context = canvas.getContext("2d");
+    if (context === null) {
+      throw new Error("Unable to create a clean-slate resource texture");
+    }
+    context.fillStyle = fill;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    return createCanvasTexture(canvas);
+  };
+  const simpleGlassMaterial = new THREE.MeshStandardMaterial({
+    color: 0x273d5b,
+    roughness: 0.6,
+    metalness: 0.12,
+    transparent: true,
+    opacity: 0.24,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const physicalGlassMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0x273d5b,
+    roughness: 0.38,
+    metalness: 0.08,
+    transmission: 0.1,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    ior: 1.45,
+  });
+  return {
+    ambient: { cyanMaterials: [], redMaterials: [] },
+    teacherTexture: makeBlankTexture("#07101f"),
+    weaponChartTexture: makeBlankTexture("#07101f"),
+    glassSurfaces: [],
+    simpleGlassMaterial,
+    physicalGlassMaterial,
+    surfaceTextures: createInteriorSurfaceTextures(),
+  };
+};
+
 const SKY_SUN_DISTANCE = 10;
 // Lower the visible reference into the north glazing so the complete disk stays
 // inside the seat camera's sky band instead of clipping against the viewport edge.
@@ -10856,8 +12768,9 @@ const setCameraPreset = (
   camera: THREE.PerspectiveCamera,
   controls: OrbitControls,
   view: SceneView,
+  presets: Readonly<Record<SceneView, CameraPreset>> = cameraPresets,
 ): void => {
-  const preset = cameraPresets[view];
+  const preset = presets[view];
   camera.position.copy(preset.position);
   controls.target.copy(preset.target);
   controls.update();
@@ -10915,13 +12828,22 @@ export const createMahjongTableScene = (
   options: MahjongTableSceneOptions = {},
 ): MahjongTableMount => {
   const debugEnabled = options.debug === true;
+  const mapId = normalizeVisualMapId(options.mapId ?? DEFAULT_VISUAL_MAP_ID);
+  const isCleanSlateMap = mapId === "debugging-02";
+  const activeWorldBounds: WorldBounds = isCleanSlateMap
+    ? DEBUGGING_TWO_WORLD_BOUNDS
+    : WORLD_BOUNDS;
   const roomSeed = normalizeVisualRoomSeed(options.roomSeed);
-  const debugPreferencesStorage = getVisualDebugPreferencesStorage();
+  const debugPreferencesStorage = getVisualDebugPreferencesStorage(debugEnabled);
   const persistedDebugPreferences = readVisualDebugPreferences(debugPreferencesStorage);
   const enabledAreas: Record<VisualSceneAreaId, boolean> = {
     ...DEFAULT_ENABLED_VISUAL_SCENE_AREAS,
   };
-  if (options.enabledAreas !== undefined) {
+  if (isCleanSlateMap) {
+    for (const area of VISUAL_SCENE_AREA_IDS) {
+      enabledAreas[area] = false;
+    }
+  } else if (options.enabledAreas !== undefined) {
     for (const area of VISUAL_SCENE_AREA_IDS) {
       enabledAreas[area] = options.enabledAreas.includes(area);
     }
@@ -10942,14 +12864,38 @@ export const createMahjongTableScene = (
   const visualCameraPresets = createVisualCameraPresets();
   const sceneStateStorage = getVisualSceneStateStorage();
   const persistedSceneState = readVisualSceneState(sceneStateStorage, roomSeed);
-  const authoredRoomMap = getAuthoredVisualMapDocument();
+  const authoredRoomMap = isCleanSlateMap ? null : getAuthoredVisualMapDocument(mapId);
   const persistedQuality = persistedDebugPreferences?.qualityMode;
   const requestedQuality =
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
+  const cleanSlateSeatPreset: CameraPreset = {
+    position: new THREE.Vector3(0, STANDING_EYE_HEIGHT, 27),
+    target: new THREE.Vector3(0, 1.1, 0),
+  };
+  const cleanSlateOverheadPreset: CameraPreset = {
+    position: new THREE.Vector3(0, 42, 22),
+    target: new THREE.Vector3(0, 0, 0),
+  };
+  const activeSceneCameraPresets: Readonly<Record<SceneView, CameraPreset>> = isCleanSlateMap
+    ? { seat: cleanSlateSeatPreset, overhead: cleanSlateOverheadPreset }
+    : cameraPresets;
+  const activeVisualCameraPresets: Readonly<Record<VisualCameraPreset, CameraPreset>> =
+    isCleanSlateMap
+      ? {
+          ...visualCameraPresets,
+          table: cleanSlateSeatPreset,
+          roomReveal: {
+            position: new THREE.Vector3(18, 20, 28),
+            target: new THREE.Vector3(0, 0.8, 0),
+          },
+          assetReview: cleanSlateOverheadPreset,
+        }
+      : visualCameraPresets;
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
-  // Keep the world fully clear. The legacy debug preference is still read for
-  // snapshot compatibility, but it can no longer attach a fog pass.
+  // Start authored maps fully clear. Warehouse installs its map-local haze
+  // after its isolated world is constructed; the legacy debug preference is
+  // still read for snapshot compatibility but cannot attach a general pass.
   scene.fog = null;
   const camera = new THREE.PerspectiveCamera(TABLE_CAMERA_FOV, 1, 0.05, 1200);
   // This camera is deliberately not added to the scene graph. When the optic
@@ -10979,7 +12925,9 @@ export const createMahjongTableScene = (
   const quality = resolveQuality(requestedQuality);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.dprCap));
   renderer.shadowMap.enabled = quality.shadows !== "off";
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  // The warehouse uses softer shadow receivers to complement its high-bay
+  // pools and ground-truth contact pass; keep the penthouse's sharper default.
+  renderer.shadowMap.type = isCleanSlateMap ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.AgXToneMapping;
   renderer.toneMappingExposure = 1.02;
@@ -10991,6 +12939,7 @@ export const createMahjongTableScene = (
   renderer.domElement.dataset.sceneReady = "true";
   container.dataset.sceneReady = "false";
   container.dataset.sceneQuality = quality.preset;
+  container.dataset.mapId = mapId;
   container.dataset.controlActive = "false";
   container.replaceChildren(renderer.domElement);
   const deathFadeOverlay = document.createElement("div");
@@ -11017,16 +12966,16 @@ export const createMahjongTableScene = (
   composer.addPass(new RenderPass(scene, camera));
   const gtaoPass = new GTAOPass(scene, camera, 512, 320);
   gtaoPass.output = GTAOPass.OUTPUT.Default;
-  gtaoPass.blendIntensity = 0.72;
-  // Keep GTAO opt-in so the adaptive/high baseline remains the last good
-  // checkpoint. The debug checkbox can enable it without changing Bokeh.
-  gtaoPass.enabled = false;
+  gtaoPass.blendIntensity = isCleanSlateMap ? 1.05 : 0.72;
+  // Ground-truth ambient occlusion supplies ray-style crate contact shading
+  // in the warehouse; other maps keep it opt-in from the debug panel.
+  gtaoPass.enabled = isCleanSlateMap;
   gtaoPass.updateGtaoMaterial({
-    radius: 0.24,
+    radius: isCleanSlateMap ? 0.38 : 0.24,
     distanceExponent: 1.15,
-    thickness: 1.1,
+    thickness: isCleanSlateMap ? 1.35 : 1.1,
     scale: 1.05,
-    samples: 8,
+    samples: isCleanSlateMap ? 12 : 8,
   });
   gtaoPass.updatePdMaterial({
     radius: 4,
@@ -11186,6 +13135,7 @@ export const createMahjongTableScene = (
   let debugWireframe = false;
   let debugBoundsVisible = false;
   let generatedRoomVariant = GENERATED_ROOM_PALETTES[0]?.label ?? "Northlight";
+  let debuggingTwoMap: DebuggingTwoMapResources | null = null;
   let debugFps = 60;
   let debugFrameTimeMs = 1000 / 60;
   let previousAnimationTimestamp = 0;
@@ -11566,6 +13516,8 @@ export const createMahjongTableScene = (
   let physicsCharacterPosition: PhysicsVector | null = null;
   let weaponRuntime: WeaponRuntime | null = null;
   let meleeRuntime: MeleeRuntime | null = null;
+  let meleeRearmWeapon: WeaponId | null = null;
+  let meleeDropRearmSuppressed = false;
   let staticPhysicsBoxes: readonly PhysicsBox[] = [];
   let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
   let appliedPhysicsVersion = -1;
@@ -11578,11 +13530,13 @@ export const createMahjongTableScene = (
   const isLiveWallHangingEnabled = (): boolean => false;
   let touchingWall = false;
   let wallContact: PlayerWallContact | null = null;
+  let wallProximity: PlayerWallContact | null = null;
   let wallBracedAim = false;
   let coverMode = false;
   let coverActivationPending = false;
   let coverActivationPendingWall: PlayerWallContact | null = null;
   let coverWall: PlayerWallContact | null = null;
+  let coverSnapTarget: PhysicsVector | null = null;
   let forwardVelocity = 0;
   let strafeVelocity = 0;
   const cameraMotion = createCameraMotionDamper();
@@ -11597,8 +13551,28 @@ export const createMahjongTableScene = (
   const playerRespawnRandom = createSeededRandom(`${roomSeed}|player-death-respawn-v1`);
   let simulantMarker: THREE.Group | null = null;
   let simulantBody: THREE.Group | null = null;
+  let simulantBodyParts: RagdollBodyParts | null = null;
+  let simulantRing: THREE.Mesh | null = null;
+  let simulantRagdollState: RagdollState | null = null;
+  let simulantRagdollFloorY = PLAYER_COLLIDER_CENTER_HEIGHT;
+  let simulantDeathImpulse: RagdollImpulse = {
+    direction: { x: 0, y: 0, z: -1 },
+    force: 3,
+  };
+  let playerRagdollMarker: THREE.Group | null = null;
+  let playerRagdollBody: THREE.Group | null = null;
+  let playerRagdollBodyParts: RagdollBodyParts | null = null;
+  let playerRagdollState: RagdollState | null = null;
+  let playerRagdollFloorY = PLAYER_COLLIDER_CENTER_HEIGHT;
+  let simulantShieldFlareMaterial: THREE.ShaderMaterial | null = null;
+  let simulantShieldShell: THREE.Mesh | null = null;
+  let simulantShieldFlareRemainingSeconds = 0;
+  let simulantShieldFlareElapsedSeconds = 0;
   let simulantRespawnTimer = 0;
   const simulantPosition = new THREE.Vector3();
+  let simulantWorldVelocity: PhysicsVector = { x: 0, y: 0, z: 0 };
+  const simulantKnockbackVelocity = new THREE.Vector3();
+  let simulantStaggerSeconds = 0;
   const simulantPerspectiveRig = createCameraMotionDamper();
   let simulantVitals = createPlayerVitals();
   let playerVitals = createPlayerVitals();
@@ -11617,6 +13591,7 @@ export const createMahjongTableScene = (
   let crouchedActivity = false;
   let leftCommandHeld = false;
   let rightMouseAiming = false;
+  let aimingDownSightsRequested = false;
   let aimingDownSights = false;
   let impactDamageCooldown = 0;
   let maximumFallSpeed = 0;
@@ -11696,7 +13671,61 @@ export const createMahjongTableScene = (
       deathFadeOverlay.style.opacity = "0";
     }, PLAYER_DEATH_RESPAWN_DELAY_MS);
   };
+  const startPlayerRagdoll = (): void => {
+    if (
+      playerRagdollMarker === null ||
+      playerRagdollBody === null ||
+      playerRagdollBodyParts === null
+    ) {
+      return;
+    }
+    const anchor = physicsCharacterPosition ?? {
+      x: camera.position.x,
+      y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
+      z: camera.position.z,
+    };
+    const viewForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    viewForward.y = 0;
+    if (viewForward.lengthSq() <= 0.0001) {
+      viewForward.set(0, 0, -1);
+    } else {
+      viewForward.normalize();
+    }
+    const cameraForward = viewForward.clone();
+    const movement = new THREE.Vector3(presentationWorldVelocity.x, 0, presentationWorldVelocity.z);
+    if (movement.lengthSq() > 0.04) {
+      cameraForward.copy(movement.normalize());
+    }
+    const speed = Math.hypot(presentationWorldVelocity.x, presentationWorldVelocity.z);
+    const viewRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    viewRight.y = 0;
+    if (viewRight.lengthSq() <= 0.0001) {
+      viewRight.set(1, 0, 0);
+    } else {
+      viewRight.normalize();
+    }
+    const origin = {
+      x: anchor.x + viewForward.x * 1.05 + viewRight.x * 0.35,
+      y: anchor.y + 0.15,
+      z: anchor.z + viewForward.z * 1.05 + viewRight.z * 0.35,
+    };
+    playerRagdollFloorY = anchor.y;
+    playerRagdollState = startRagdoll(origin, {
+      direction: cameraForward,
+      force: 4 + speed * 0.55,
+      upwardForce: Math.max(0, presentationWorldVelocity.y) * 0.08,
+    });
+    playerRagdollMarker.visible = true;
+    playerRagdollMarker.userData.weaponRaycastIgnore = true;
+    applyRagdollBodyPose(
+      playerRagdollMarker,
+      playerRagdollBody,
+      playerRagdollBodyParts,
+      playerRagdollState,
+    );
+  };
   const handlePlayerKilled = (): void => {
+    startPlayerRagdoll();
     cameraMotion.applyDeathTumble();
     pressedKeys.clear();
     jumpKeyHeld = false;
@@ -11704,6 +13733,10 @@ export const createMahjongTableScene = (
     touchForward = 0;
     touchRight = 0;
     isSprinting = false;
+    leftCommandHeld = false;
+    rightMouseAiming = false;
+    aimingDownSightsRequested = false;
+    syncAimingFromInput();
     forwardVelocity = 0;
     strafeVelocity = 0;
     verticalVelocity = 0;
@@ -11711,21 +13744,50 @@ export const createMahjongTableScene = (
     weaponRuntime?.setFireHeld(false);
     scheduleDeathRespawn();
   };
-  const damagePlayer = (damage: number): PlayerVitalsDamageResult => {
-    const wasDead = playerVitals.isDead;
-    const result = applyPlayerDamage(playerVitals, damage);
-    if (result.damage > 0) {
-      playerVitals = result.state;
+  const combatDamageRouter = createCombatDamageRouter();
+  combatDamageRouter.register({
+    id: LOCAL_PLAYER_COMBAT_ACTOR_ID,
+    kind: "player",
+    getVitals: () => playerVitals,
+    setVitals: (nextVitals) => {
+      playerVitals = nextVitals;
+    },
+    onDamage: (result) => {
       addDamageVignette("shield", result.shieldDamage);
       addDamageVignette("health", result.healthDamage);
       publishPlayerVitals(true);
-      if (!wasDead && result.killed) {
-        weaponRuntime?.recordDeath();
-        handlePlayerKilled();
+    },
+    onKilled: () => {
+      weaponRuntime?.recordDeath();
+      handlePlayerKilled();
+    },
+  });
+  combatDamageRouter.register({
+    id: SIMULANT_COMBAT_ACTOR_ID,
+    kind: "bot",
+    getVitals: () => simulantVitals,
+    setVitals: (nextVitals) => {
+      simulantVitals = nextVitals;
+    },
+    onDamage: (result) => {
+      if (result.shieldDamage > 0) {
+        simulantShieldFlareRemainingSeconds = SIMULANT_SHIELD_FLARE_LIFETIME_SECONDS;
       }
-    }
-    return result;
-  };
+      syncSimulantMarkerVitals();
+    },
+    onKilled: () => {
+      scheduleSimulantRespawn();
+    },
+  });
+  const damagePlayer = (
+    damage: number,
+    source: CombatDamageSource = { kind: "impact" },
+  ): PlayerVitalsDamageResult =>
+    combatDamageRouter.apply({
+      targetId: LOCAL_PLAYER_COMBAT_ACTOR_ID,
+      amount: damage,
+      source,
+    });
   const applyLandingO2 = (downwardSpeed: number): void => {
     const oxygenCost = resolveLandingO2Cost(downwardSpeed);
     if (oxygenCost <= 0 || playerVitals.isDead) {
@@ -11736,22 +13798,22 @@ export const createMahjongTableScene = (
       oxygenCost,
       playerVitals.o2,
     );
-    const result = applyPlayerO2ImpactCost(
+    const oxygenResult = applyPlayerO2ImpactCost(
       playerVitals,
       oxygenCost,
       O2_LANDING_RECOVERY_DELAY_SECONDS,
-      shortfallDamage,
+      0,
     );
-    if (result.oxygenSpent <= 0 && result.damage <= 0) {
+    if (oxygenResult.oxygenSpent <= 0 && shortfallDamage <= 0) {
       return;
     }
-    playerVitals = result.state;
-    addDamageVignette("shield", result.shieldDamage);
-    addDamageVignette("health", result.healthDamage);
-    publishPlayerVitals(true);
-    if (result.killed) {
-      weaponRuntime?.recordDeath();
-      handlePlayerKilled();
+    if (oxygenResult.oxygenSpent > 0 || shortfallDamage > 0) {
+      playerVitals = oxygenResult.state;
+    }
+    if (shortfallDamage > 0) {
+      damagePlayer(shortfallDamage, { kind: "oxygen", id: "landing-overflow" });
+    } else if (oxygenResult.oxygenSpent > 0) {
+      publishPlayerVitals(true);
     }
   };
   const spendPlayerO2 = (oxygenCost: number, recoveryDelaySeconds = 0): boolean => {
@@ -11765,40 +13827,57 @@ export const createMahjongTableScene = (
     }
     return true;
   };
-  const spendPlayerProjectileO2 = (damage: number, projectileCount: number): number => {
+  const spendPlayerProjectileO2 = (
+    damage: number,
+    projectileCount: number,
+    aimingDownSights = true,
+  ): number => {
     if (playerVitals.isDead || playerVitals.o2 <= 0) {
       return 0;
     }
     const previousO2 = playerVitals.o2;
-    const nextVitals = applyPlayerProjectileO2Cost(playerVitals, damage, projectileCount);
+    const nextVitals = applyPlayerProjectileO2Cost(
+      playerVitals,
+      damage,
+      projectileCount,
+      aimingDownSights,
+    );
     if (didPlayerVitalsChange(nextVitals)) {
       playerVitals = nextVitals;
       publishPlayerVitals(true);
     }
     return previousO2 - playerVitals.o2;
   };
+  const clearCoverMode = (): void => {
+    coverMode = false;
+    coverActivationPending = false;
+    coverActivationPendingWall = null;
+    coverWall = null;
+    coverSnapTarget = null;
+  };
   const setAiming = (aiming: boolean, holdingBreath: boolean): void => {
     const controlsActive =
       firstPersonControls.isLocked || (isTouchDevice && firstPersonControls.enabled);
     const requestedAiming = aiming && activeView === "seat" && controlsActive;
+    const zoomActivatedByInput = resolveZoomActivationEdge(
+      aimingDownSightsRequested,
+      requestedAiming,
+    );
+    aimingDownSightsRequested = requestedAiming;
     const nextAiming = resolveReloadAimingDownSights(
       requestedAiming,
       weaponRuntime?.isReloading() ?? false,
     );
     const aimingChanged = aimingDownSights !== nextAiming;
-    const zoomActivated = !aimingDownSights && nextAiming;
     aimingDownSights = nextAiming;
-    if (!nextAiming) {
-      coverMode = false;
-      coverActivationPending = false;
-      coverActivationPendingWall = null;
-      coverWall = null;
-    } else if (aimingChanged && zoomActivated) {
-      // The contact flag is the last completed physics probe. This records
-      // contact at the zoom-on edge, so walking into a wall while already
-      // zoomed cannot arm cover later.
-      coverActivationPending = touchingWall;
-      coverActivationPendingWall = wallContact;
+    if (!requestedAiming) {
+      clearCoverMode();
+    } else if (aimingChanged && zoomActivatedByInput) {
+      // The wall-range flag is the last completed physics probe. This records
+      // the near-wall state at the zoom-on edge, so walking into a wall while
+      // already zoomed cannot arm cover later.
+      coverActivationPending = wallProximity !== null;
+      coverActivationPendingWall = wallProximity;
     }
     const nextVitals = setPlayerHoldingBreath(
       playerVitals,
@@ -11814,8 +13893,28 @@ export const createMahjongTableScene = (
     const aimInput = resolveDesktopAimInput(leftCommandHeld, rightMouseAiming);
     setAiming(aimInput.aimingDownSights, aimInput.holdingBreath);
   };
+  /** Melee is a hip-fire action: release both persistent zoom inputs first. */
+  const cancelZoomForMelee = (): void => {
+    if (!leftCommandHeld && !rightMouseAiming && !aimingDownSightsRequested && !aimingDownSights) {
+      return;
+    }
+    leftCommandHeld = false;
+    rightMouseAiming = false;
+    syncAimingFromInput();
+  };
   const resetVitalsState = (): PlayerVitalsState => {
     clearDamageVignettePulses();
+    cancelDeathRespawn();
+    playerRagdollState = null;
+    if (playerRagdollMarker !== null) {
+      playerRagdollMarker.visible = false;
+      playerRagdollMarker.rotation.set(0, 0, 0);
+      playerRagdollMarker.userData.weaponRaycastIgnore = true;
+    }
+    if (playerRagdollBody !== null && playerRagdollBodyParts !== null) {
+      resetRagdollBodyPose(playerRagdollBody, playerRagdollBodyParts);
+    }
+    cameraMotion.reset();
     playerVitals = resetPlayerVitals();
     vitalsPublishElapsed = 0;
     publishPlayerVitals(true);
@@ -11826,7 +13925,9 @@ export const createMahjongTableScene = (
   const captureSceneState = (): VisualSceneState => {
     const standingEyeHeight =
       !debugEnabled && activeDebugPreset === null
-        ? TABLE_CAMERA_STANDING_EYE_HEIGHT
+        ? isCleanSlateMap
+          ? cleanSlateSeatPreset.position.y
+          : TABLE_CAMERA_STANDING_EYE_HEIGHT
         : STANDING_EYE_HEIGHT;
     const cameraPosition: VisualSceneState["cameraPosition"] = [
       camera.position.x,
@@ -12006,12 +14107,66 @@ export const createMahjongTableScene = (
       syncAimingFromInput();
     }
   };
+  const runGunActionWithMeleeHandoff = (action: () => boolean): boolean => {
+    const meleeWasActive = meleeRuntime?.isActive() ?? false;
+    if (meleeWasActive && !(meleeRuntime?.stash() ?? false)) {
+      return false;
+    }
+    const succeeded = action();
+    if (!succeeded && meleeWasActive) {
+      meleeRuntime?.interact();
+    }
+    return succeeded;
+  };
+  const triggerMeleeAttack = (): boolean => {
+    const started = meleeRuntime?.isActive()
+      ? meleeRuntime.fire()
+      : (weaponRuntime?.melee() ?? false);
+    if (started) {
+      cancelZoomForMelee();
+    }
+    return started;
+  };
+  const releaseMeleeObjectAndRearmGun = (throwObject: boolean): boolean => {
+    const playerVelocity = resolvePlayerWorldVelocity();
+    const dropped = throwObject
+      ? (meleeRuntime?.throwActiveObject(playerVelocity) ?? false)
+      : (meleeRuntime?.dropActiveObject(playerVelocity) ?? false);
+    const rearmWeapon = resolveMeleeDropRearmWeapon(meleeRearmWeapon, dropped);
+    if (!dropped) {
+      return false;
+    }
+    const shouldCycleToOwnedGun = shouldAutoRearmOwnedGunAfterMeleeDrop(
+      meleeRearmWeapon,
+      dropped,
+      meleeDropRearmSuppressed,
+    );
+    meleeRearmWeapon = null;
+    meleeDropRearmSuppressed = false;
+    if (rearmWeapon !== null) {
+      weaponRuntime?.cycleWeaponTo(rearmWeapon);
+    } else if (shouldCycleToOwnedGun) {
+      weaponRuntime?.cycleWeapon(1);
+    }
+    return true;
+  };
+  const dropMeleeObjectAndRearmGun = (): boolean => releaseMeleeObjectAndRearmGun(false);
+  const throwMeleeObjectAndRearmGun = (): boolean => {
+    const thrown = releaseMeleeObjectAndRearmGun(true);
+    if (thrown) {
+      cancelZoomForMelee();
+    }
+    return thrown;
+  };
   const onKeyDown = (event: KeyboardEvent): void => {
     const leftCommandKey = isLeftCommandKeyEvent(event);
     const captureLeftCommand = shouldCaptureLeftCommandKeystroke(event, leftCommandHeld);
     const controlsActive =
       firstPersonControls.isLocked || (isTouchDevice && firstPersonControls.enabled);
     if (activeView !== "seat" || (!controlsActive && !captureLeftCommand)) {
+      return;
+    }
+    if (playerVitals.isDead) {
       return;
     }
     if (captureLeftCommand) {
@@ -12033,12 +14188,20 @@ export const createMahjongTableScene = (
       event.code === "KeyE" ||
       event.code === "KeyR" ||
       event.code === "KeyQ" ||
+      event.code === "KeyF" ||
       /^Digit[0-6]$/u.test(event.code)
     ) {
       event.preventDefault();
       if (event.code === "KeyE") {
         if (!event.repeat) {
-          if (!meleeRuntime?.interact()) {
+          const meleeActive = meleeRuntime?.isActive() ?? false;
+          const gunNearby = (weaponRuntime?.getSnapshot().nearbyPickup ?? null) !== null;
+          if (meleeActive || gunNearby) {
+            // Stash before changing gun state so the two viewmodels can never
+            // be active in the same frame. Restore melee if the gun action
+            // does not succeed.
+            runGunActionWithMeleeHandoff(() => weaponRuntime?.interact() ?? false);
+          } else if (!meleeRuntime?.interact()) {
             weaponRuntime?.interact();
           }
         }
@@ -12048,18 +14211,28 @@ export const createMahjongTableScene = (
         }
       } else if (event.code === "KeyQ") {
         if (!event.repeat) {
-          if (!meleeRuntime?.dropActiveObject(resolvePlayerWorldVelocity())) {
+          if (!meleeRuntime?.isActive()) {
             weaponRuntime?.dropActiveWeapon(resolvePlayerWorldVelocity());
+          } else {
+            dropMeleeObjectAndRearmGun();
           }
+        }
+      } else if (event.code === "KeyF") {
+        if (!event.repeat) {
+          triggerMeleeAttack();
         }
       } else if (/^Digit[0-6]$/u.test(event.code)) {
         if (!event.repeat) {
           const selectedWeapon = resolveWeaponHotkey(event.code);
           if (selectedWeapon === null) {
             meleeRuntime?.holster();
+            meleeRearmWeapon = null;
+            meleeDropRearmSuppressed = true;
             weaponRuntime?.holster();
           } else if (selectedWeapon !== undefined) {
-            weaponRuntime?.cycleWeaponTo(selectedWeapon);
+            runGunActionWithMeleeHandoff(
+              () => weaponRuntime?.cycleWeaponTo(selectedWeapon) ?? false,
+            );
           }
         }
       } else if (crouchKeys.has(event.code)) {
@@ -12099,6 +14272,12 @@ export const createMahjongTableScene = (
     }
   };
   const setTouchMovementVector = (forward: number, right: number, active: boolean): void => {
+    if (playerVitals.isDead) {
+      touchMovementActive = false;
+      touchForward = 0;
+      touchRight = 0;
+      return;
+    }
     touchForward = THREE.MathUtils.clamp(forward, -1, 1);
     touchRight = THREE.MathUtils.clamp(right, -1, 1);
     touchMovementActive = active;
@@ -12110,6 +14289,9 @@ export const createMahjongTableScene = (
     return isCrouched;
   };
   const jump = (): boolean => {
+    if (playerVitals.isDead) {
+      return isCrouched;
+    }
     if (isLiveWallHangingEnabled() && activeView === "seat" && wallHangState !== null) {
       beginWallClimb();
       return isCrouched;
@@ -12126,6 +14308,12 @@ export const createMahjongTableScene = (
       }
       const launchSpeed = resolveJumpLaunchSpeed(fullJumpAccepted);
       isCrouched = resolveCrouchedStateAfterJump(isCrouched, true);
+      isWalkingMode = resolveWalkingModeAfterJump(isWalkingMode, true);
+      coverMode = resolveCoverModeAfterJump(coverMode, true);
+      coverActivationPending = false;
+      coverActivationPendingWall = null;
+      coverWall = null;
+      coverSnapTarget = null;
       verticalVelocity = launchSpeed;
       grounded = false;
     }
@@ -12153,8 +14341,10 @@ export const createMahjongTableScene = (
     rightMouseAiming = false;
     syncAimingFromInput();
     wallContact = null;
+    wallProximity = null;
     coverActivationPendingWall = null;
     coverWall = null;
+    coverSnapTarget = null;
     meleeRuntime?.setFireHeld(false);
     weaponRuntime?.setFireHeld(false);
     lastMovementTapAtByKey.clear();
@@ -12184,6 +14374,9 @@ export const createMahjongTableScene = (
     if (activeView !== "seat") {
       return;
     }
+    if (playerVitals.isDead) {
+      return;
+    }
     if (event.button === 2) {
       event.preventDefault();
       rightMouseAiming = !rightMouseAiming;
@@ -12195,8 +14388,13 @@ export const createMahjongTableScene = (
     }
     const activeMeleeRuntime = meleeRuntime;
     if (activeMeleeRuntime?.isActive()) {
-      activeMeleeRuntime.setFireHeld(true);
-      activeMeleeRuntime.fire();
+      if (aimingDownSightsRequested || aimingDownSights) {
+        activeMeleeRuntime.setFireHeld(false);
+        throwMeleeObjectAndRearmGun();
+      } else {
+        activeMeleeRuntime.setFireHeld(true);
+        triggerMeleeAttack();
+      }
     } else {
       weaponRuntime?.setFireHeld(true);
       weaponRuntime?.fire();
@@ -12226,7 +14424,7 @@ export const createMahjongTableScene = (
   firstPersonControls.addEventListener("unlock", onControlsUnlock);
 
   const setFirstPersonPreset = (): void => {
-    const preset = cameraPresets.seat;
+    const preset = activeSceneCameraPresets.seat;
     firstPersonGroundY = 0;
     eyeHeight = STANDING_EYE_HEIGHT;
     isCrouched = false;
@@ -12251,7 +14449,7 @@ export const createMahjongTableScene = (
     resetMotionCalibration();
   };
   const setComposedTablePreset = (): void => {
-    const preset = cameraPresets.seat;
+    const preset = activeSceneCameraPresets.seat;
     firstPersonGroundY = 0;
     eyeHeight = TABLE_CAMERA_STANDING_EYE_HEIGHT;
     activeView = "seat";
@@ -12306,7 +14504,7 @@ export const createMahjongTableScene = (
     resetMotionCalibration();
     firstPersonControls.enabled = false;
     orbitControls.enabled = true;
-    setCameraPreset(camera, orbitControls, view);
+    setCameraPreset(camera, orbitControls, view, activeSceneCameraPresets);
     camera.fov = TABLE_CAMERA_FOV;
     camera.updateProjectionMatrix();
     syncReticleZoomProjection();
@@ -12332,7 +14530,10 @@ export const createMahjongTableScene = (
     isSprinting = false;
     lastMovementTapAtByKey.clear();
 
-    const spawnPosition = resolveRandomSpawnPosition();
+    const spawnPosition =
+      isCleanSlateMap && debuggingTwoMap !== null
+        ? debuggingTwoMap.spawn
+        : resolveRandomSpawnPosition();
     camera.position.set(
       spawnPosition.x,
       spawnPosition.y + STANDING_EYE_HEIGHT - PLAYER_COLLIDER_CENTER_HEIGHT,
@@ -12350,14 +14551,14 @@ export const createMahjongTableScene = (
   };
 
   const resolveRandomSpawnPosition = (): PhysicsVector => {
-    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
-    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
-    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
-    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const minX = activeWorldBounds.minX + WORLD_SPAWN_MARGIN;
+    const maxX = activeWorldBounds.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = activeWorldBounds.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = activeWorldBounds.maxZ - WORLD_SPAWN_MARGIN;
     const spawnRangeX = maxX - minX;
     const spawnRangeZ = maxZ - minZ;
-    const fallbackX = THREE.MathUtils.clamp(WORLD_BOUNDS.minX + spawnRangeX / 2, minX, maxX);
-    const fallbackZ = THREE.MathUtils.clamp(WORLD_BOUNDS.minZ + spawnRangeZ / 2, minZ, maxZ);
+    const fallbackX = THREE.MathUtils.clamp(activeWorldBounds.minX + spawnRangeX / 2, minX, maxX);
+    const fallbackZ = THREE.MathUtils.clamp(activeWorldBounds.minZ + spawnRangeZ / 2, minZ, maxZ);
     for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
       const sampleX =
         spawnRangeX > 0 ? minX + spawnRangeX * playerRespawnRandom.nextFloat() : fallbackX;
@@ -12386,19 +14587,34 @@ export const createMahjongTableScene = (
     return { x: fallbackX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: fallbackZ };
   };
   const resolveSimulantSpawnPosition = (): PhysicsVector => {
-    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
-    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
-    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
-    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const minX = activeWorldBounds.minX + WORLD_SPAWN_MARGIN;
+    const maxX = activeWorldBounds.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = activeWorldBounds.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = activeWorldBounds.maxZ - WORLD_SPAWN_MARGIN;
     const playerX = camera.position.x;
     const playerZ = camera.position.z;
+    const spawnRadius = isCleanSlateMap
+      ? Math.min(
+          (activeWorldBounds.maxX - activeWorldBounds.minX) / 2 - WORLD_SPAWN_MARGIN,
+          (activeWorldBounds.maxZ - activeWorldBounds.minZ) / 2 - WORLD_SPAWN_MARGIN,
+        ) * 0.78
+      : SIMULANT_SPAWN_RADIUS_METERS;
+    const minimumStartDistance = isCleanSlateMap
+      ? Math.min(
+          SIMULANT_MIN_START_DISTANCE_METERS,
+          Math.min(
+            activeWorldBounds.maxX - activeWorldBounds.minX,
+            activeWorldBounds.maxZ - activeWorldBounds.minZ,
+          ) * 0.72,
+        )
+      : SIMULANT_MIN_START_DISTANCE_METERS;
     let bestDistance = Number.NEGATIVE_INFINITY;
     let bestX = minX;
     let bestZ = minZ;
     for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
       const angle = simulantRandom.nextFloat() * Math.PI * 2;
-      const sampleX = Math.cos(angle) * SIMULANT_SPAWN_RADIUS_METERS;
-      const sampleZ = Math.sin(angle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const sampleX = Math.cos(angle) * spawnRadius;
+      const sampleZ = Math.sin(angle) * spawnRadius;
       const candidateX = THREE.MathUtils.clamp(sampleX, minX, maxX);
       const candidateZ = THREE.MathUtils.clamp(sampleZ, minZ, maxZ);
       const distanceToPlayer =
@@ -12410,40 +14626,107 @@ export const createMahjongTableScene = (
         bestX = candidateX;
         bestZ = candidateZ;
       }
-      if (distanceToPlayer >= SIMULANT_MIN_START_DISTANCE_METERS) {
+      if (distanceToPlayer >= minimumStartDistance) {
         return { x: candidateX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: candidateZ };
       }
     }
     return { x: bestX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: bestZ };
   };
+  const syncSimulantShieldFlare = (): void => {
+    if (simulantShieldFlareMaterial === null) {
+      return;
+    }
+    updateShieldFlareMaterial(
+      simulantShieldFlareMaterial,
+      simulantVitals.shield,
+      PLAYER_MAX_SHIELD,
+      simulantShieldFlareRemainingSeconds,
+      simulantShieldFlareElapsedSeconds,
+    );
+  };
   const syncSimulantMarkerVitals = (): void => {
     if (simulantMarker === null) {
+      syncSimulantShieldFlare();
       return;
     }
     simulantMarker.userData.simulantHealth = simulantVitals.health;
     simulantMarker.userData.simulantShield = simulantVitals.shield;
     simulantMarker.userData.simulantO2 = simulantVitals.o2;
+    simulantMarker.userData.simulantStoppingPower = Math.hypot(
+      simulantKnockbackVelocity.x,
+      simulantKnockbackVelocity.z,
+    );
+    simulantMarker.userData.simulantStaggerSeconds = simulantStaggerSeconds;
+    if (simulantShieldShell !== null) {
+      // Once the shield is empty, let the ray continue to the body so the
+      // actual head mesh can produce a headshot hit zone. The flare remains
+      // visible for presentation, but it no longer blocks weapon rays.
+      simulantShieldShell.userData.weaponRaycastIgnore =
+        simulantVitals.isDead || simulantVitals.shield <= 0;
+    }
+    syncSimulantShieldFlare();
   };
   const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
+    if (simulantRagdollState !== null || simulantBody === null) {
+      return;
+    }
     const bodyBaseY =
       SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
       (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
-    if (simulantBody !== null) {
-      simulantBody.position.y = bodyBaseY + motion.verticalOffset;
-      simulantBody.rotation.z = motion.roll;
-    }
+    simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+    simulantBody.rotation.z = motion.roll;
   };
   const respawnSimulant = (): void => {
     if (simulantMarker === null) {
       return;
     }
-    const position = resolveSimulantSpawnPosition();
+    simulantRagdollState = null;
+    const position =
+      isCleanSlateMap && debuggingTwoMap !== null
+        ? debuggingTwoMap.simulantSpawn
+        : resolveSimulantSpawnPosition();
     simulantPosition.set(position.x, position.y, position.z);
+    simulantWorldVelocity = { x: 0, y: 0, z: 0 };
+    simulantKnockbackVelocity.set(0, 0, 0);
+    simulantStaggerSeconds = 0;
+    simulantShieldFlareRemainingSeconds = 0;
+    simulantShieldFlareElapsedSeconds = 0;
     simulantMarker.position.copy(simulantPosition);
+    simulantMarker.rotation.set(0, 0, 0);
+    simulantMarker.userData.weaponRaycastIgnore = false;
     simulantMarker.visible = true;
+    if (simulantBody !== null && simulantBodyParts !== null) {
+      resetRagdollBodyPose(simulantBody, simulantBodyParts);
+    }
+    if (simulantRing !== null) {
+      simulantRing.visible = true;
+    }
+    if (simulantShieldShell !== null) {
+      simulantShieldShell.visible = true;
+    }
     simulantVitals = createPlayerVitals();
     simulantPerspectiveRig.reset();
     syncSimulantMarkerVitals();
+  };
+  const startSimulantRagdoll = (): void => {
+    if (simulantMarker === null || simulantBody === null || simulantBodyParts === null) {
+      return;
+    }
+    simulantRagdollState = startRagdoll(
+      simulantPosition,
+      simulantDeathImpulse,
+      RAGDOLL_DURATION_SECONDS,
+    );
+    simulantRagdollFloorY = simulantPosition.y;
+    simulantMarker.visible = true;
+    simulantMarker.userData.weaponRaycastIgnore = true;
+    if (simulantRing !== null) {
+      simulantRing.visible = false;
+    }
+    if (simulantShieldShell !== null) {
+      simulantShieldShell.visible = false;
+    }
+    applyRagdollBodyPose(simulantMarker, simulantBody, simulantBodyParts, simulantRagdollState);
   };
   const scheduleSimulantRespawn = (): void => {
     if (simulantRespawnTimer !== 0) {
@@ -12452,47 +14735,105 @@ export const createMahjongTableScene = (
     if (simulantMarker === null) {
       return;
     }
-    simulantMarker.visible = false;
+    startSimulantRagdoll();
+    simulantWorldVelocity = { x: 0, y: 0, z: 0 };
+    simulantKnockbackVelocity.set(0, 0, 0);
+    simulantStaggerSeconds = 0;
     simulantRespawnTimer = window.setTimeout(() => {
       simulantRespawnTimer = 0;
       respawnSimulant();
     }, PLAYER_DEATH_RESPAWN_DELAY_MS);
   };
-  const getSimulantHitObject = (hitObject: THREE.Object3D): THREE.Object3D | null => {
+  const getCombatActorHitTarget = (
+    hitObject: THREE.Object3D,
+  ): { readonly actorId: CombatActorId; readonly object: THREE.Object3D } | null => {
     let current: THREE.Object3D | null = hitObject;
     while (current !== null) {
-      if (current.userData.simulantCombatMarker === true) {
-        return current;
+      const actorId = current.userData.combatActorId;
+      if (typeof actorId === "string" && actorId.trim().length > 0) {
+        return { actorId, object: current };
       }
       current = current.parent;
     }
     return null;
   };
-  const damageSimulant = (hitObject: THREE.Object3D, damage: number): void => {
-    if (
-      simulantMarker === null ||
-      !simulantMarker.visible ||
-      getSimulantHitObject(hitObject) === null
-    ) {
+  const getCombatHitZone = (hitObject: THREE.Object3D): CombatHitZone | undefined => {
+    let current: THREE.Object3D | null = hitObject;
+    while (current !== null) {
+      const hitZone = current.userData.combatHitZone;
+      if (hitZone === "head" || hitZone === "body") {
+        return hitZone;
+      }
+      current = current.parent;
+    }
+    return undefined;
+  };
+  const applyDamageToHitObject = (
+    hitObject: THREE.Object3D,
+    damage: number,
+    source: CombatDamageSource,
+    attackerId: CombatActorId = LOCAL_PLAYER_COMBAT_ACTOR_ID,
+    hitZone?: CombatHitZone,
+  ): CombatDamageApplicationResult | null => {
+    const target = getCombatActorHitTarget(hitObject);
+    if (target === null) {
+      return null;
+    }
+    return combatDamageRouter.apply({
+      targetId: target.actorId,
+      amount: damage,
+      source,
+      attackerId,
+      ...(hitZone === undefined ? {} : { hitZone }),
+    });
+  };
+  const applySimulantStoppingPower = (direction: PhysicsVector, stoppingPower: number): void => {
+    const safeStoppingPower = Number.isFinite(stoppingPower) ? Math.max(0, stoppingPower) : 0;
+    if (safeStoppingPower <= 0) {
       return;
     }
-    const nextVitals = applyPlayerDamage(simulantVitals, Math.max(0, damage));
-    if (nextVitals.damage <= 0) {
+    const horizontalLength = Math.hypot(direction.x, direction.z);
+    if (horizontalLength <= Number.EPSILON) {
       return;
     }
-    simulantVitals = nextVitals.state;
+    simulantDeathImpulse = {
+      direction: {
+        x: direction.x / horizontalLength,
+        y: 0,
+        z: direction.z / horizontalLength,
+      },
+      force: safeStoppingPower,
+    };
+    simulantKnockbackVelocity.x += (direction.x / horizontalLength) * safeStoppingPower;
+    simulantKnockbackVelocity.z += (direction.z / horizontalLength) * safeStoppingPower;
+    simulantStaggerSeconds = Math.min(
+      SIMULANT_MAX_STAGGER_SECONDS,
+      Math.max(
+        simulantStaggerSeconds,
+        safeStoppingPower * SIMULANT_STAGGER_SECONDS_PER_STOPPING_POWER,
+      ),
+    );
     syncSimulantMarkerVitals();
-    if (nextVitals.killed) {
-      scheduleSimulantRespawn();
-    }
   };
 
   const setDebugCameraPreset = (preset: VisualCameraPreset): void => {
     if (!debugEnabled) {
       return;
     }
-    const presetArea: VisualSceneAreaId | null =
-      preset === "focusCalibration"
+    if (
+      isCleanSlateMap &&
+      (preset === "focusCalibration" ||
+        preset === "climbingGym" ||
+        preset === "parametricBarracks" ||
+        preset === "targetRange")
+    ) {
+      activeDebugPreset = null;
+      setView("seat");
+      return;
+    }
+    const presetArea: VisualSceneAreaId | null = isCleanSlateMap
+      ? null
+      : preset === "focusCalibration"
         ? "focusCalibration"
         : preset === "climbingGym"
           ? "climbingGym"
@@ -12627,7 +14968,7 @@ export const createMahjongTableScene = (
       lastMovementTapAtByKey.clear();
       resetCameraMotion();
       physicsCharacterPosition = null;
-      const cameraPreset = visualCameraPresets[preset];
+      const cameraPreset = activeVisualCameraPresets[preset];
       camera.position.copy(cameraPreset.position);
       camera.lookAt(cameraPreset.target);
       debugFovOverride = DEBUG_STANDING_FOV;
@@ -12649,7 +14990,7 @@ export const createMahjongTableScene = (
     onWindowBlur();
     physicsCharacterPosition = null;
     orbitControls.enabled = true;
-    const cameraPreset = visualCameraPresets[preset];
+    const cameraPreset = activeVisualCameraPresets[preset];
     camera.position.copy(cameraPreset.position);
     orbitControls.target.copy(cameraPreset.target);
     orbitControls.update();
@@ -12755,20 +15096,22 @@ export const createMahjongTableScene = (
     isCrouched = state.isCrouched;
     isWalkingMode = isCrouched;
     eyeHeight = !debugEnabled
-      ? TABLE_CAMERA_STANDING_EYE_HEIGHT
+      ? isCleanSlateMap
+        ? cleanSlateSeatPreset.position.y
+        : TABLE_CAMERA_STANDING_EYE_HEIGHT
       : isCrouched
         ? SEATED_EYE_HEIGHT
         : STANDING_EYE_HEIGHT;
     camera.position.x = THREE.MathUtils.clamp(
       state.cameraPosition[0],
-      WORLD_BOUNDS.minX,
-      WORLD_BOUNDS.maxX,
+      activeWorldBounds.minX,
+      activeWorldBounds.maxX,
     );
     camera.position.y = eyeHeight;
     camera.position.z = THREE.MathUtils.clamp(
       state.cameraPosition[2],
-      WORLD_BOUNDS.minZ,
-      WORLD_BOUNDS.maxZ,
+      activeWorldBounds.minZ,
+      activeWorldBounds.maxZ,
     );
     camera.quaternion.fromArray(state.cameraQuaternion).normalize();
     camera.fov = debugEnabled ? THREE.MathUtils.clamp(state.cameraFov, 30, 100) : SEAT_STANDING_FOV;
@@ -12809,8 +15152,11 @@ export const createMahjongTableScene = (
   };
 
   const setDebugFogDensity = (_density: number): void => {
+    void _density;
     debugFogDensity = 0;
-    scene.fog = null;
+    // Fog is intentionally not a general debug effect. The warehouse owns a
+    // fixed dark-room haze; the authored penthouse remains clear.
+    scene.fog = isCleanSlateMap ? createWarehouseFog() : null;
     persistDebugPreferences();
   };
 
@@ -13003,7 +15349,7 @@ export const createMahjongTableScene = (
   };
 
   const setDebugAreaEnabled = (area: VisualSceneAreaId, enabled: boolean): void => {
-    if (!debugEnabled || enabledAreas[area] === enabled) {
+    if (isCleanSlateMap || !debugEnabled || enabledAreas[area] === enabled) {
       return;
     }
     enabledAreas[area] = enabled;
@@ -13138,7 +15484,9 @@ export const createMahjongTableScene = (
   });
   setView(initialView);
 
-  const architectureResources = addFloor(scene, quality);
+  const architectureResources = isCleanSlateMap
+    ? createCleanSlateArchitectureResources()
+    : addFloor(scene, quality);
   glassSurfaces = architectureResources.glassSurfaces;
   simpleGlassMaterial = architectureResources.simpleGlassMaterial;
   physicalGlassMaterial = architectureResources.physicalGlassMaterial;
@@ -13148,84 +15496,127 @@ export const createMahjongTableScene = (
   const parametricBarracksEnabled = isAreaEnabled("parametricBarracks");
   const targetRangeEnabled = isAreaEnabled("targetRange");
 
-  // `addArchitecture` owns the shared surface textures as well as the
-  // penthouse meshes. Detach the optional gym first so it can remain loaded
-  // when the penthouse is disabled, then release the unused authored shell.
-  const climbingGymObject = scene.getObjectByName("ClimbingGym") ?? null;
-  if (climbingGymObject !== null && climbingGymEnabled && !penthouseEnabled) {
-    scene.add(climbingGymObject);
-  }
   const environmentRoot = scene.getObjectByName("EnvironmentRoot") ?? null;
-  if (!climbingGymEnabled && climbingGymObject !== null) {
-    climbingGymObject.removeFromParent();
-    disposeObject(climbingGymObject);
-  }
-  if (!penthouseEnabled && environmentRoot !== null) {
-    environmentRoot.removeFromParent();
-    disposeObject(environmentRoot);
-  }
-
-  if (penthouseEnabled) {
-    const generatedRoom = createGeneratedRoom(
+  if (isCleanSlateMap) {
+    // No penthouse, focus room, gym, barracks, target range, gateway, or city
+    // exploration chunks are constructed for Debugging 02. Its isolated
+    // warehouse world only contributes the deterministic melee props.
+    if (environmentRoot !== null) {
+      environmentRoot.removeFromParent();
+      disposeObject(environmentRoot);
+    }
+    glassSurfaces = [];
+    debuggingTwoMap = createDebuggingTwoMap(scene, roomSeed);
+    generatedRoomVariant = debuggingTwoMap.variant;
+    explorationArea = debuggingTwoMap.explorationArea;
+    explorationWorld = createExplorationWorld(
       scene,
       roomSeed,
-      authoredRoomMap,
-      architectureResources.surfaceTextures,
+      undefined,
+      (area) => {
+        explorationArea = area;
+        options.onExplorationAreaChange?.(area);
+      },
+      debuggingTwoMap,
     );
-    generatedRoomVariant = generatedRoom.variant;
-  }
-  if (focusCalibrationEnabled) {
-    const focusCalibration = createFocusCalibrationHallway(
+    loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
+  } else {
+    // `addArchitecture` owns the shared surface textures as well as the
+    // penthouse meshes. Detach the optional gym first so it can remain loaded
+    // when the penthouse is disabled, then release the unused authored shell.
+    const climbingGymObject = scene.getObjectByName("ClimbingGym") ?? null;
+    if (climbingGymObject !== null && climbingGymEnabled && !penthouseEnabled) {
+      scene.add(climbingGymObject);
+    }
+    if (!climbingGymEnabled && climbingGymObject !== null) {
+      climbingGymObject.removeFromParent();
+      disposeObject(climbingGymObject);
+    }
+    if (!penthouseEnabled && environmentRoot !== null) {
+      environmentRoot.removeFromParent();
+      disposeObject(environmentRoot);
+    }
+
+    if (penthouseEnabled && authoredRoomMap !== null) {
+      const generatedRoom = createGeneratedRoom(
+        scene,
+        roomSeed,
+        authoredRoomMap,
+        architectureResources.surfaceTextures,
+      );
+      generatedRoomVariant = generatedRoom.variant;
+    }
+    if (focusCalibrationEnabled) {
+      const focusCalibration = createFocusCalibrationHallway(
+        scene,
+        architectureResources.surfaceTextures,
+      );
+      focusCalibrationRoot = focusCalibration.root;
+      focusCalibrationLabels = focusCalibration.labels;
+    }
+    const parametricCampus = createParametricGunCampus(
       scene,
       architectureResources.surfaceTextures,
     );
-    focusCalibrationRoot = focusCalibration.root;
-    focusCalibrationLabels = focusCalibration.labels;
-  }
-  const parametricCampus = createParametricGunCampus(scene, architectureResources.surfaceTextures);
-  parametricCampusLabels = parametricCampus.labels;
-  if (!parametricBarracksEnabled) {
-    const barracksRoot = scene.getObjectByName("ParametricGunBarracksRoot") ?? null;
-    if (barracksRoot !== null) {
-      barracksRoot.removeFromParent();
-      disposeObject(barracksRoot);
+    parametricCampusLabels = parametricCampus.labels;
+    if (!parametricBarracksEnabled) {
+      const barracksRoot = scene.getObjectByName("ParametricGunBarracksRoot") ?? null;
+      if (barracksRoot !== null) {
+        barracksRoot.removeFromParent();
+        disposeObject(barracksRoot);
+      }
     }
-  }
-  if (!targetRangeEnabled) {
-    const targetRangeRoot = scene.getObjectByName("ParametricTargetRangeRoot") ?? null;
-    if (targetRangeRoot !== null) {
-      targetRangeRoot.removeFromParent();
-      disposeObject(targetRangeRoot);
+    if (!targetRangeEnabled) {
+      const targetRangeRoot = scene.getObjectByName("ParametricTargetRangeRoot") ?? null;
+      if (targetRangeRoot !== null) {
+        targetRangeRoot.removeFromParent();
+        disposeObject(targetRangeRoot);
+      }
     }
+    // Keep the penthouse clean and uncluttered; intentionally suppress the framed
+    // gateway marker that is useful for debug layouting but reads as a door frame.
+    if (INCLUDE_EXPLORATION_GATEWAY) {
+      addExplorationGateway(scene);
+    }
+    explorationWorld = createExplorationWorld(
+      scene,
+      roomSeed,
+      architectureResources.surfaceTextures,
+      (area) => {
+        explorationArea = area;
+        options.onExplorationAreaChange?.(area);
+      },
+    );
+    loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
+    addLighting(scene);
   }
-  // Keep the penthouse clean and uncluttered; intentionally suppress the framed
-  // gateway marker that is useful for debug layouting but reads as a door frame.
-  if (INCLUDE_EXPLORATION_GATEWAY) {
-    addExplorationGateway(scene);
-  }
-  explorationWorld = createExplorationWorld(
-    scene,
-    roomSeed,
-    architectureResources.surfaceTextures,
-    (area) => {
-      explorationArea = area;
-      options.onExplorationAreaChange?.(area);
-    },
-  );
-  loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
-  addLighting(scene);
   simulantMarker = new THREE.Group();
   simulantMarker.name = "SimulantSpawnMarker";
   simulantMarker.userData = {
+    combatActorId: SIMULANT_COMBAT_ACTOR_ID,
+    combatActorKind: "bot",
     simulantCombatMarker: true,
     simulantHealth: simulantVitals.health,
     simulantShield: simulantVitals.shield,
     simulantO2: simulantVitals.o2,
+    simulantStoppingPower: 0,
+    simulantStaggerSeconds: 0,
   };
   simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
   simulantBody.name = "SimulantCombatBody";
+  simulantBodyParts = resolveRagdollBodyParts(simulantBody);
+  simulantShieldFlareMaterial = createShieldFlareMaterial();
+  simulantShieldShell = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.36, 0.42, 8, 16),
+    simulantShieldFlareMaterial,
+  );
+  simulantShieldShell.name = "SimulantShieldFlare";
+  simulantShieldShell.position.y = 0.48;
+  simulantShieldShell.userData = { shieldFlare: true, weaponRaycastIgnore: false };
+  simulantShieldShell.renderOrder = 20;
+  simulantBody.add(simulantShieldShell);
   simulantMarker.add(simulantBody);
-  const simulantRing = new THREE.Mesh(
+  simulantRing = new THREE.Mesh(
     new THREE.RingGeometry(0.15, 0.27, 18),
     new THREE.MeshBasicMaterial({
       color: COLORS.red,
@@ -13240,6 +15631,18 @@ export const createMahjongTableScene = (
   simulantRing.position.y = 0.02;
   simulantMarker.add(simulantRing);
   scene.add(simulantMarker);
+
+  playerRagdollMarker = new THREE.Group();
+  playerRagdollMarker.name = "PlayerDeathRagdollMarker";
+  playerRagdollMarker.userData = {
+    playerDeathRagdoll: true,
+    weaponRaycastIgnore: true,
+  };
+  playerRagdollBody = createSimulantBody(new THREE.Color(COLORS.cyan), "PlayerDeathRagdollBody");
+  playerRagdollBodyParts = resolveRagdollBodyParts(playerRagdollBody);
+  playerRagdollMarker.add(playerRagdollBody);
+  playerRagdollMarker.visible = false;
+  scene.add(playerRagdollMarker);
   respawnSimulant();
   scene.environmentIntensity = debugEnvironmentIntensity;
   const table = penthouseEnabled
@@ -13346,8 +15749,14 @@ export const createMahjongTableScene = (
     skySunReference = skySunObject;
     updateSkySunReference();
   }
-  cyanMaterials = [...architectureResources.ambient.cyanMaterials];
-  redMaterials = [...architectureResources.ambient.redMaterials];
+  cyanMaterials = [
+    ...architectureResources.ambient.cyanMaterials,
+    ...(debuggingTwoMap?.cyanMaterials ?? []),
+  ];
+  redMaterials = [
+    ...architectureResources.ambient.redMaterials,
+    ...(debuggingTwoMap?.redMaterials ?? []),
+  ];
   scene.traverse((object) => {
     if (!("material" in object)) {
       return;
@@ -13385,9 +15794,11 @@ export const createMahjongTableScene = (
   debugBoundsRoot.name = "DebugRoot";
   debugBoundsRoot.userData.dofIgnore = true;
   debugBoundsRoot.visible = false;
-  const debugBoundTargets = penthouseEnabled
-    ? [scene.getObjectByName("EnvironmentRoot"), table, wallRoot]
-    : [];
+  const debugBoundTargets = isCleanSlateMap
+    ? [debuggingTwoMap?.root ?? null]
+    : penthouseEnabled
+      ? [scene.getObjectByName("EnvironmentRoot"), table, wallRoot]
+      : [];
   for (const target of debugBoundTargets) {
     if (target === undefined || target === null) {
       continue;
@@ -13530,20 +15941,56 @@ export const createMahjongTableScene = (
   container.dataset.wallTraversal = "none";
   container.dataset.playerWallContact = "false";
   container.dataset.playerWallBraced = "false";
-  staticPhysicsBoxes = createStaticPhysicsBoxes(scene);
-  const weaponReservedRects: readonly WeaponSpawnRect[] = PLAY_AREA_BOUNDS.map((bounds) => ({
-    minX: bounds.minX,
-    maxX: bounds.maxX,
-    minZ: bounds.minZ,
-    maxZ: bounds.maxZ,
-  }));
-  const weaponPickups = [
-    ...generateWeaponPickups(roomSeed, {
-      worldHalfSize: EXPLORATION_WORLD_HALF_SIZE,
-      reservedRects: weaponReservedRects,
-      obstacles: [...staticPhysicsBoxes, ...(explorationWorld?.getPhysicsBoxes() ?? [])],
-    }),
-  ];
+  container.dataset.playerDeathRagdoll = "false";
+  container.dataset.simulantDeathRagdoll = "false";
+  staticPhysicsBoxes = createStaticPhysicsBoxes(
+    scene,
+    activeWorldBounds,
+    debuggingTwoMap?.physicsBoxes ?? [],
+  );
+  const weaponReservedRects: readonly WeaponSpawnRect[] = isCleanSlateMap
+    ? []
+    : PLAY_AREA_BOUNDS.map((bounds) => ({
+        minX: bounds.minX,
+        maxX: bounds.maxX,
+        minZ: bounds.minZ,
+        maxZ: bounds.maxZ,
+      }));
+  const weaponPickups = isCleanSlateMap
+    ? generateWeaponPickupsOnEdges(roomSeed, DEBUGGING_TWO_WORLD_BOUNDS)
+    : generateWeaponPickups(roomSeed, {
+        worldHalfSize: EXPLORATION_WORLD_HALF_SIZE,
+        reservedRects: weaponReservedRects,
+        obstacles: [...staticPhysicsBoxes, ...(explorationWorld?.getPhysicsBoxes() ?? [])],
+      });
+  let meleeTelemetryState = createEmptyMeleeStateSnapshot();
+  const publishMeleeTelemetry = (next: MeleeStateSnapshot): void => {
+    const merged: MeleeStateSnapshot = {
+      ...next,
+      swings: Math.max(next.swings, meleeTelemetryState.swings),
+      hits: Math.max(next.hits, meleeTelemetryState.hits),
+      lastDamage: next.lastDamage > 0 ? next.lastDamage : meleeTelemetryState.lastDamage,
+    };
+    meleeTelemetryState = merged;
+    options.onMeleeStateChange?.(merged);
+  };
+  const recordGunMeleeSwing = (oxygenCost: number): void => {
+    meleeTelemetryState = {
+      ...meleeTelemetryState,
+      swinging: true,
+      swings: meleeTelemetryState.swings + 1,
+      lastOxygenCost: Number.isFinite(oxygenCost) ? Math.max(0, oxygenCost) : 0,
+    };
+    options.onMeleeStateChange?.(meleeTelemetryState);
+  };
+  const recordGunMeleeHit = (damage: number): void => {
+    meleeTelemetryState = {
+      ...meleeTelemetryState,
+      hits: meleeTelemetryState.hits + 1,
+      lastDamage: Number.isFinite(damage) ? Math.max(0, damage) : 0,
+    };
+    options.onMeleeStateChange?.(meleeTelemetryState);
+  };
   weaponRuntime = createWeaponRuntime(
     scene,
     camera,
@@ -13551,7 +15998,7 @@ export const createMahjongTableScene = (
     weaponPickups,
     options.onWeaponStateChange,
     (damage, projectileCount) => {
-      const oxygenConsumed = spendPlayerProjectileO2(damage, projectileCount);
+      const oxygenConsumed = spendPlayerProjectileO2(damage, projectileCount, aimingDownSights);
       const motion = cameraMotion.getOffsets();
       cameraMotion.applyWeaponShotImpulse({
         damage,
@@ -13563,10 +16010,84 @@ export const createMahjongTableScene = (
       });
       return oxygenConsumed;
     },
-    (hitObject, damage) => {
-      if (getSimulantHitObject(hitObject) !== null) {
-        damageSimulant(hitObject, damage);
+    (damage) => {
+      const oxygenConsumed = spendPlayerProjectileO2(damage, 1, true);
+      recordGunMeleeSwing(oxygenConsumed);
+      const motion = cameraMotion.getOffsets();
+      cameraMotion.applyWeaponShotImpulse({
+        damage,
+        reticleOffset: resolveWeaponShotReticleOffset(
+          motion,
+          true,
+          aimingDownSights ? ZOOM_RECOIL_FEEDBACK_MULTIPLIER : 1,
+        ),
+      });
+      return oxygenConsumed;
+    },
+    (hitObject, damage, context) => {
+      const isMeleeHit = context.mode === "melee";
+      const combatTarget = getCombatActorHitTarget(hitObject);
+      const targetVelocity: PhysicsVector =
+        combatTarget?.actorId === SIMULANT_COMBAT_ACTOR_ID
+          ? simulantWorldVelocity
+          : { x: 0, y: 0, z: 0 };
+      const momentum = isMeleeHit
+        ? resolveMeleeDamageWithMomentum({
+            baseDamage: damage,
+            attackDirection: context.direction,
+            attackerVelocity: context.attackerVelocity ?? presentationWorldVelocity,
+            targetVelocity,
+            attackerAirborne: context.attackerAirborne ?? !grounded,
+          })
+        : null;
+      const resolvedDamage = momentum?.damage ?? damage;
+      if (isMeleeHit) {
+        recordGunMeleeHit(resolvedDamage);
       }
+      const stoppingPower = isMeleeHit
+        ? resolveMeleeStoppingPower(resolvedDamage)
+        : resolveWeaponStoppingPower(damage);
+      if (combatTarget?.actorId === SIMULANT_COMBAT_ACTOR_ID) {
+        applySimulantStoppingPower(context.direction, stoppingPower);
+      }
+      const appliedDamage = applyDamageToHitObject(
+        hitObject,
+        resolvedDamage,
+        { kind: isMeleeHit ? "melee" : "weapon" },
+        LOCAL_PLAYER_COMBAT_ACTOR_ID,
+        getCombatHitZone(hitObject),
+      );
+      const ragdollObjectId =
+        explorationWorld?.getRagdollObjectIdForHit(hitObject, context.instanceIndex) ?? null;
+      if (ragdollObjectId !== null) {
+        if (isMeleeHit) {
+          explorationWorld?.applyMeleeHit(
+            ragdollObjectId,
+            context.direction,
+            context.meleeSwingSpeedRadiansPerSecond ?? 0,
+            context.meleeStoppingPower ?? stoppingPower,
+          );
+        } else {
+          explorationWorld?.applyProjectileHit(
+            ragdollObjectId,
+            context.direction,
+            stoppingPower,
+            physicsRuntime?.applyImpulseToDynamicBody,
+          );
+        }
+      }
+      if (combatTarget?.actorId === SIMULANT_COMBAT_ACTOR_ID) {
+        return {
+          targetKind: "simulant",
+          shieldHit: appliedDamage !== null && resolveWeaponShieldHit(appliedDamage.shieldDamage),
+          bloodEligible:
+            appliedDamage !== null &&
+            resolveWeaponBloodEligibility(appliedDamage.state.shield, appliedDamage.damage),
+          targetVelocity: { ...targetVelocity },
+          ...(isMeleeHit ? { resolvedDamage } : {}),
+        };
+      }
+      return undefined;
     },
     (hasOutgoingWeapon) => {
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
@@ -13577,7 +16098,7 @@ export const createMahjongTableScene = (
       scene,
       camera,
       explorationWorld,
-      options.onMeleeStateChange,
+      publishMeleeTelemetry,
       (damage) => {
         const oxygenConsumed = spendPlayerProjectileO2(damage, 1);
         const motion = cameraMotion.getOffsets();
@@ -13591,10 +16112,62 @@ export const createMahjongTableScene = (
         });
         return oxygenConsumed;
       },
-      () => {
+      (hitObject, damage, context) => {
+        const target = getCombatActorHitTarget(hitObject);
+        if (target === null) {
+          return null;
+        }
+        const targetVelocity: PhysicsVector =
+          target.actorId === SIMULANT_COMBAT_ACTOR_ID
+            ? simulantWorldVelocity
+            : { x: 0, y: 0, z: 0 };
+        const momentum = resolveMeleeDamageWithMomentum({
+          baseDamage: damage,
+          attackDirection: context.attackDirection,
+          attackerVelocity: context.attackerVelocity,
+          targetVelocity,
+          attackerAirborne: context.attackerAirborne,
+        });
+        if (target.actorId === SIMULANT_COMBAT_ACTOR_ID) {
+          applySimulantStoppingPower(
+            context.attackDirection,
+            resolveMeleeStoppingPower(momentum.damage),
+          );
+        }
+        const applied = applyDamageToHitObject(hitObject, momentum.damage, { kind: "melee" });
+        if (applied !== null && target.actorId === SIMULANT_COMBAT_ACTOR_ID) {
+          weaponRuntime?.playMeleeHitEffects(
+            context.point,
+            context.attackDirection,
+            momentum.damage,
+            {
+              targetKind: "simulant",
+              shieldHit: resolveWeaponShieldHit(applied.shieldDamage),
+              bloodEligible: resolveWeaponBloodEligibility(applied.state.shield, applied.damage),
+              targetVelocity,
+            },
+          );
+        }
+        return applied === null ? null : momentum.damage;
+      },
+      (attributes, sourcePosition, swingDurationSeconds) => {
+        weaponRuntime?.playMeleeSwingSound(attributes, sourcePosition, swingDurationSeconds);
+      },
+      (attributes, sourcePosition) => {
+        weaponRuntime?.playMeleeImpactSound(attributes, sourcePosition);
+      },
+      (redrawingClaimedObject) => {
         // A claimed ragdoll object occupies the player's hand. Keep the gun
         // instance in its inventory, but holster its viewmodel until the
         // object is dropped or manually re-equipped.
+        cancelZoomForMelee();
+        const activeWeapon = weaponRuntime?.getSnapshot().activeWeapon ?? null;
+        if (!redrawingClaimedObject || activeWeapon !== null) {
+          meleeRearmWeapon = activeWeapon;
+          if (activeWeapon !== null) {
+            meleeDropRearmSuppressed = false;
+          }
+        }
         weaponRuntime?.holster();
       },
     );
@@ -13788,12 +16361,29 @@ export const createMahjongTableScene = (
     if (vitalsChanged || (playerVitals.shield < PLAYER_MAX_SHIELD && vitalsPublishElapsed >= 0.1)) {
       publishPlayerVitals();
     }
-    if (simulantMarker !== null && !playerVitals.isDead) {
+    if (
+      simulantMarker !== null &&
+      !playerVitals.isDead &&
+      !simulantVitals.isDead &&
+      simulantRagdollState === null
+    ) {
       const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+      simulantShieldFlareElapsedSeconds += safeDelta;
+      simulantShieldFlareRemainingSeconds = Math.max(
+        0,
+        simulantShieldFlareRemainingSeconds - safeDelta,
+      );
+      const previousSimulantPosition = simulantPosition.clone();
+      simulantStaggerSeconds = Math.max(0, simulantStaggerSeconds - safeDelta);
+      const knockbackDelta = simulantKnockbackVelocity.clone().multiplyScalar(safeDelta);
+      simulantKnockbackVelocity.multiplyScalar(
+        Math.exp(-SIMULANT_KNOCKBACK_DAMPING_PER_SECOND * safeDelta),
+      );
       const toPlayerX = camera.position.x - simulantPosition.x;
       const toPlayerZ = camera.position.z - simulantPosition.z;
       const horizontalDistance = Math.hypot(toPlayerX, toPlayerZ);
-      const simulantMoving = horizontalDistance > SIMULANT_STOP_DISTANCE_METERS;
+      const simulantMoving =
+        horizontalDistance > SIMULANT_STOP_DISTANCE_METERS && simulantStaggerSeconds <= 0;
       simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
         movementMagnitude: simulantMoving ? 1 : 0,
         locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
@@ -13817,7 +16407,7 @@ export const createMahjongTableScene = (
       });
       syncSimulantPresentation(simulantMotion);
       syncSimulantMarkerVitals();
-      if (horizontalDistance > SIMULANT_STOP_DISTANCE_METERS) {
+      if (simulantMoving) {
         const moveDistance = Math.min(
           horizontalDistance - SIMULANT_STOP_DISTANCE_METERS,
           SIMULANT_TROT_SPEED_METERS_PER_SECOND * safeDelta,
@@ -13826,15 +16416,34 @@ export const createMahjongTableScene = (
         simulantPosition.z += (toPlayerZ / horizontalDistance) * moveDistance;
         simulantPosition.x = THREE.MathUtils.clamp(
           simulantPosition.x,
-          WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN,
-          WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN,
+          activeWorldBounds.minX + WORLD_SPAWN_MARGIN,
+          activeWorldBounds.maxX - WORLD_SPAWN_MARGIN,
         );
         simulantPosition.z = THREE.MathUtils.clamp(
           simulantPosition.z,
-          WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN,
-          WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN,
+          activeWorldBounds.minZ + WORLD_SPAWN_MARGIN,
+          activeWorldBounds.maxZ - WORLD_SPAWN_MARGIN,
         );
       }
+      simulantPosition.add(knockbackDelta);
+      simulantPosition.x = THREE.MathUtils.clamp(
+        simulantPosition.x,
+        activeWorldBounds.minX + WORLD_SPAWN_MARGIN,
+        activeWorldBounds.maxX - WORLD_SPAWN_MARGIN,
+      );
+      simulantPosition.z = THREE.MathUtils.clamp(
+        simulantPosition.z,
+        activeWorldBounds.minZ + WORLD_SPAWN_MARGIN,
+        activeWorldBounds.maxZ - WORLD_SPAWN_MARGIN,
+      );
+      simulantWorldVelocity =
+        safeDelta > 0
+          ? {
+              x: (simulantPosition.x - previousSimulantPosition.x) / safeDelta,
+              y: (simulantPosition.y - previousSimulantPosition.y) / safeDelta,
+              z: (simulantPosition.z - previousSimulantPosition.z) / safeDelta,
+            }
+          : { x: 0, y: 0, z: 0 };
       simulantMarker.position.copy(simulantPosition);
       if (horizontalDistance > 0.1 && Number.isFinite(horizontalDistance)) {
         simulantMarker.rotation.y = Math.atan2(
@@ -13844,6 +16453,34 @@ export const createMahjongTableScene = (
       }
       simulantMarker.updateMatrixWorld(true);
     }
+    const ragdollDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+    if (
+      simulantRagdollState !== null &&
+      simulantMarker !== null &&
+      simulantBody !== null &&
+      simulantBodyParts !== null
+    ) {
+      simulantRagdollState = stepRagdoll(simulantRagdollState, ragdollDelta, simulantRagdollFloorY);
+      applyRagdollBodyPose(simulantMarker, simulantBody, simulantBodyParts, simulantRagdollState);
+      simulantMarker.updateMatrixWorld(true);
+    }
+    if (
+      playerRagdollState !== null &&
+      playerRagdollMarker !== null &&
+      playerRagdollBody !== null &&
+      playerRagdollBodyParts !== null
+    ) {
+      playerRagdollState = stepRagdoll(playerRagdollState, ragdollDelta, playerRagdollFloorY);
+      applyRagdollBodyPose(
+        playerRagdollMarker,
+        playerRagdollBody,
+        playerRagdollBodyParts,
+        playerRagdollState,
+      );
+      playerRagdollMarker.updateMatrixWorld(true);
+    }
+    container.dataset.playerDeathRagdoll = playerRagdollState === null ? "false" : "true";
+    container.dataset.simulantDeathRagdoll = simulantRagdollState === null ? "false" : "true";
     syncDofIntensityForZoom();
     const currentTimestamp = performance.now();
     if (previousAnimationTimestamp > 0) {
@@ -13904,6 +16541,25 @@ export const createMahjongTableScene = (
       // Rebuild the upright control matrix before PointerLockControls moves.
       camera.updateMatrix();
       camera.updateMatrixWorld(true);
+      // Cover is directional. Drop an existing stance before movement is
+      // projected or snapped so turning outside the 90° wall-facing cone
+      // cannot carry the player along the wall for one more frame.
+      cameraMotionForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      cameraMotionForward.y = 0;
+      if (cameraMotionForward.lengthSq() > 0.0001) {
+        cameraMotionForward.normalize();
+      } else {
+        // A near-vertical look has no horizontal cover direction. Keep the
+        // vector zero here; the camera-motion frame installs its own forward
+        // fallback later for presentation-only damping.
+        cameraMotionForward.set(0, 0, 0);
+      }
+      if (
+        coverMode &&
+        (coverWall === null || !isPlayerFacingWall(cameraMotionForward, coverWall))
+      ) {
+        clearCoverMode();
+      }
       const crouching = isCrouched;
       const standingEyeHeight =
         activeDebugPreset === "climbingGym"
@@ -14108,6 +16764,7 @@ export const createMahjongTableScene = (
         );
       }
       let baseCameraY: number;
+      let coverSnapDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
       if (physicsRuntime !== null) {
         camera.position.copy(movementStart);
         if (wallHangState !== null || wallClimbTransition !== null) {
@@ -14203,14 +16860,14 @@ export const createMahjongTableScene = (
                   const landedPosition: PhysicsVector = {
                     x: THREE.MathUtils.clamp(
                       landing.position.x,
-                      WORLD_BOUNDS.minX,
-                      WORLD_BOUNDS.maxX,
+                      activeWorldBounds.minX,
+                      activeWorldBounds.maxX,
                     ),
                     y: landing.position.y,
                     z: THREE.MathUtils.clamp(
                       landing.position.z,
-                      WORLD_BOUNDS.minZ,
-                      WORLD_BOUNDS.maxZ,
+                      activeWorldBounds.minZ,
+                      activeWorldBounds.maxZ,
                     ),
                   };
                   physicsCharacterPosition = landedPosition;
@@ -14235,6 +16892,22 @@ export const createMahjongTableScene = (
             y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
             z: camera.position.z,
           };
+          if (coverMode && coverWall !== null && coverSnapTarget !== null) {
+            // Cover entry is a short assisted approach. Keep the approach
+            // bounded by sprint speed, then let the physics controller settle
+            // the final capsule-to-wall gap.
+            coverSnapDelta = resolvePlayerWallSnapDelta(
+              characterPosition,
+              coverSnapTarget,
+              maxMoveSpeed,
+              delta,
+            );
+            desiredHorizontalDelta = {
+              x: desiredHorizontalDelta.x + coverSnapDelta.x,
+              y: 0,
+              z: desiredHorizontalDelta.z + coverSnapDelta.z,
+            };
+          }
           const wasGrounded = grounded;
           if (!grounded || verticalVelocity > 0) {
             verticalVelocity -= GRAVITY * delta;
@@ -14257,7 +16930,10 @@ export const createMahjongTableScene = (
               z: (movement.position.z - characterPosition.z) / velocityDeltaSeconds,
             };
             const requestedSpeed = Math.hypot(requestedVelocity.x, requestedVelocity.z);
-            if (impactDamageCooldown <= 0) {
+            if (
+              impactDamageCooldown <= 0 &&
+              Math.hypot(coverSnapDelta.x, coverSnapDelta.z) <= 0.0001
+            ) {
               const velocityDrop = Math.hypot(
                 requestedVelocity.x - resolvedVelocity.x,
                 requestedVelocity.z - resolvedVelocity.z,
@@ -14268,7 +16944,7 @@ export const createMahjongTableScene = (
               const horizontalDeceleration = Math.min(requestedSpeed, velocityDrop);
               const collisionDamage = resolveImpactDamage(horizontalDeceleration);
               if (collisionDamage > 0) {
-                damagePlayer(collisionDamage);
+                damagePlayer(collisionDamage, { kind: "impact", id: "wall-collision" });
                 impactDamageCooldown = COLLISION_DAMAGE_COOLDOWN_SECONDS;
               }
             }
@@ -14280,9 +16956,17 @@ export const createMahjongTableScene = (
           };
           knockCollisionCount = movement.collisions;
           let clampedPosition: PhysicsVector = {
-            x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
+            x: THREE.MathUtils.clamp(
+              movement.position.x,
+              activeWorldBounds.minX,
+              activeWorldBounds.maxX,
+            ),
             y: movement.position.y,
-            z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
+            z: THREE.MathUtils.clamp(
+              movement.position.z,
+              activeWorldBounds.minZ,
+              activeWorldBounds.maxZ,
+            ),
           };
           if (coverMode && coverWall !== null) {
             // The physics controller stops at the wall face but can slide past
@@ -14386,13 +17070,13 @@ export const createMahjongTableScene = (
               const climbStartZ = clampedPosition.z;
               const clampedX = THREE.MathUtils.clamp(
                 traversalTarget.x,
-                WORLD_BOUNDS.minX,
-                WORLD_BOUNDS.maxX,
+                activeWorldBounds.minX,
+                activeWorldBounds.maxX,
               );
               const clampedZ = THREE.MathUtils.clamp(
                 traversalTarget.z,
-                WORLD_BOUNDS.minZ,
-                WORLD_BOUNDS.maxZ,
+                activeWorldBounds.minZ,
+                activeWorldBounds.maxZ,
               );
               const momentum = resolveLedgeClimbMomentum(
                 desiredForward,
@@ -14612,13 +17296,13 @@ export const createMahjongTableScene = (
       } else {
         camera.position.x = THREE.MathUtils.clamp(
           camera.position.x,
-          WORLD_BOUNDS.minX,
-          WORLD_BOUNDS.maxX,
+          activeWorldBounds.minX,
+          activeWorldBounds.maxX,
         );
         camera.position.z = THREE.MathUtils.clamp(
           camera.position.z,
-          WORLD_BOUNDS.minZ,
-          WORLD_BOUNDS.maxZ,
+          activeWorldBounds.minZ,
+          activeWorldBounds.maxZ,
         );
         const wasGrounded = grounded;
         if (!grounded || jumpOffset > 0) {
@@ -14657,22 +17341,52 @@ export const createMahjongTableScene = (
         radius: PLAYER_COLLIDER_RADIUS,
         halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
       });
+      wallProximity = resolvePlayerWallContactInFacingCone(
+        wallContactPosition,
+        cameraMotionForward,
+        wallContactBoxes,
+        {
+          radius: PLAYER_COLLIDER_RADIUS,
+          halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
+        },
+        PLAYER_WALL_COVER_RANGE_METERS,
+      );
       touchingWall = wallContact !== null;
-      wallBracedAim = touchingWall && aimingDownSights;
       const wasCoverMode = coverMode;
       coverMode = resolveCoverModeFromAimTransition(
         coverMode,
         coverActivationPending,
-        aimingDownSights,
-        touchingWall,
+        aimingDownSightsRequested,
+        wallProximity !== null,
       );
       if (!coverMode) {
         coverWall = null;
+        coverSnapTarget = null;
       } else if (!wasCoverMode) {
-        coverWall = coverActivationPendingWall ?? wallContact;
+        coverWall = coverActivationPendingWall ?? wallProximity ?? wallContact;
+        coverSnapTarget =
+          coverWall === null
+            ? null
+            : resolvePlayerWallSnapTarget(wallContactPosition, coverWall, {
+                radius: PLAYER_COLLIDER_RADIUS,
+                halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
+              });
       } else if (coverWall === null) {
-        coverWall = wallContact;
+        coverWall = wallProximity ?? wallContact;
+        coverSnapTarget =
+          coverWall === null
+            ? null
+            : resolvePlayerWallSnapTarget(wallContactPosition, coverWall, {
+                radius: PLAYER_COLLIDER_RADIUS,
+                halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
+              });
       }
+      if (touchingWall) {
+        coverSnapTarget = null;
+      }
+      // Wall bracing remains the independent physical side-contact signal;
+      // the facing cone gates only cover-source selection and wall sticking.
+      wallBracedAim = aimingDownSights && (touchingWall || coverMode);
       coverActivationPending = false;
       coverActivationPendingWall = null;
       const wasGroundedBeforeHeldJump = grounded;
@@ -14855,6 +17569,9 @@ export const createMahjongTableScene = (
       activeView === "seat" && firstPersonControls.enabled,
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
+      meleeRuntime?.isActive() ?? false,
+      presentationWorldVelocity,
+      !grounded,
     );
     meleeRuntime?.update(
       delta,
@@ -14862,6 +17579,8 @@ export const createMahjongTableScene = (
       getAimRay(),
       firstPersonActive,
       activeView === "seat" && firstPersonControls.enabled,
+      presentationWorldVelocity,
+      !grounded,
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
     );
@@ -14972,12 +17691,14 @@ export const createMahjongTableScene = (
     focusDistance = THREE.MathUtils.damp(
       focusDistance,
       nextFocusDistance,
-      resolveFocusAccommodationDamping(focusDistance, nextFocusDistance),
+      resolveFocusAccommodationDamping(focusDistance, nextFocusDistance, pupilDiameterMm),
       delta,
     );
     pupilDiameterMm = THREE.MathUtils.damp(
       pupilDiameterMm,
-      resolveHumanEyePupilDiameter(estimatedLuminance),
+      resolveHumanEyePupilDiameter(
+        resolveHumanEyeAdaptationLuminance(estimatedLuminance, isCleanSlateMap),
+      ),
       BOKEH_PUPIL_ADAPTATION_DAMPING,
       delta,
     );
@@ -15039,24 +17760,40 @@ export const createMahjongTableScene = (
     jump,
     fire: () => {
       if (meleeRuntime?.isActive()) {
-        meleeRuntime.fire();
+        if (aimingDownSightsRequested || aimingDownSights) {
+          throwMeleeObjectAndRearmGun();
+        } else {
+          triggerMeleeAttack();
+        }
         return;
       }
       weaponRuntime?.fire();
     },
+    melee: () => {
+      triggerMeleeAttack();
+    },
+    setReticleEnabled: (enabled) => weaponRuntime?.setReticleEnabled(enabled),
     reload: () => weaponRuntime?.reload(),
     interact: () => {
-      if (!meleeRuntime?.interact()) {
+      const meleeActive = meleeRuntime?.isActive() ?? false;
+      const gunNearby = (weaponRuntime?.getSnapshot().nearbyPickup ?? null) !== null;
+      if (meleeActive || gunNearby) {
+        runGunActionWithMeleeHandoff(() => weaponRuntime?.interact() ?? false);
+      } else if (!meleeRuntime?.interact()) {
         weaponRuntime?.interact();
       }
     },
-    cycleWeapon: (direction = 1) => weaponRuntime?.cycleWeapon(direction),
+    cycleWeapon: (direction = 1) =>
+      runGunActionWithMeleeHandoff(() => weaponRuntime?.cycleWeapon(direction) ?? false),
     dropActiveWeapon: () => {
-      if (!meleeRuntime?.dropActiveObject(resolvePlayerWorldVelocity())) {
+      if (!meleeRuntime?.isActive()) {
         weaponRuntime?.dropActiveWeapon();
+      } else {
+        dropMeleeObjectAndRearmGun();
       }
     },
-    cycleWeaponTo: (weapon) => weaponRuntime?.cycleWeaponTo(weapon),
+    cycleWeaponTo: (weapon) =>
+      runGunActionWithMeleeHandoff(() => weaponRuntime?.cycleWeaponTo(weapon) ?? false),
     setReticlePosition: setFocusReticle,
     getReticleBobbingOffset,
     getAimRay,
@@ -15163,9 +17900,25 @@ export const createMahjongTableScene = (
         window.clearTimeout(simulantRespawnTimer);
         simulantRespawnTimer = 0;
       }
-      simulantMarker?.removeFromParent();
+      const disposedSimulantMarker = simulantMarker;
+      disposedSimulantMarker?.removeFromParent();
+      if (disposedSimulantMarker !== null) {
+        disposeObject(disposedSimulantMarker);
+      }
       simulantMarker = null;
       simulantBody = null;
+      simulantBodyParts = null;
+      simulantRing = null;
+      simulantRagdollState = null;
+      const disposedPlayerRagdollMarker = playerRagdollMarker;
+      disposedPlayerRagdollMarker?.removeFromParent();
+      if (disposedPlayerRagdollMarker !== null) {
+        disposeObject(disposedPlayerRagdollMarker);
+      }
+      playerRagdollMarker = null;
+      playerRagdollBody = null;
+      playerRagdollBodyParts = null;
+      playerRagdollState = null;
       weaponRuntime?.dispose();
       weaponRuntime = null;
       meleeRuntime?.dispose();
@@ -15173,6 +17926,9 @@ export const createMahjongTableScene = (
       explorationWorld?.dispose();
       explorationWorld = null;
       disposeObject(scene);
+      for (const texture of debuggingTwoMap?.textures ?? []) {
+        texture.dispose();
+      }
       simpleGlassMaterial.dispose();
       physicalGlassMaterial.dispose();
       environmentTexture.dispose();

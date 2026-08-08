@@ -82,12 +82,21 @@ describe("sniper scope lens projection", () => {
     expect(resolveSniperScopeCameraFov(45, 1)).toBeCloseTo(45, 8);
   });
 
-  it("keeps bullet-hole decals in the clean world feed", () => {
+  it("keeps persistent world decals and blood effects in the clean feed", () => {
     expect(shouldRenderSniperScopeObject({ weaponVisual: true }, false)).toBe(false);
     expect(shouldRenderSniperScopeObject({ weaponVisual: true, bulletHoleRoot: true }, false)).toBe(
       true,
     );
     expect(shouldRenderSniperScopeObject({ weaponVisual: true, bulletHole: true }, false)).toBe(
+      true,
+    );
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true, bloodRoot: true }, false)).toBe(
+      true,
+    );
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true, bloodCloud: true }, false)).toBe(
+      true,
+    );
+    expect(shouldRenderSniperScopeObject({ weaponVisual: true, bloodDecal: true }, false)).toBe(
       true,
     );
     expect(shouldRenderSniperScopeObject({}, true)).toBe(false);

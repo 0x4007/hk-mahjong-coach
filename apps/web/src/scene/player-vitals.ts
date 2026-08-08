@@ -279,15 +279,19 @@ export const applyPlayerO2ImpactCost = (
 };
 
 /**
- * Apply a firing fatigue charge. A shot may consume the final partial reserve;
- * firing itself is never rejected because the reserve cannot pay the full
- * charge.
+ * Apply a firing fatigue charge. Zoomed shots may consume the final partial
+ * reserve; firing itself is never rejected because the reserve cannot pay the
+ * full charge. Hip-fire is deliberately free of this discrete O₂ charge.
  */
 export const applyPlayerProjectileO2Cost = (
   state: PlayerVitalsState,
   damage: number,
   projectileCount = 1,
+  aimingDownSights = true,
 ): PlayerVitalsState => {
+  if (!aimingDownSights) {
+    return state;
+  }
   const cost = resolveProjectileO2Cost(damage, projectileCount);
   if (cost <= 0) {
     return state;

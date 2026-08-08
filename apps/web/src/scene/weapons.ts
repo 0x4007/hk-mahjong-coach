@@ -22,6 +22,26 @@ export const WEAPON_RELOAD_SECONDS_PER_DAMAGE = 0.01;
 /** A high-damage trigger pull is reloaded one bullet or shell at a time. */
 export const WEAPON_ROUND_RELOAD_DAMAGE_THRESHOLD = 100;
 
+/** Linear per-projectile stopping power derived from the damage payload. */
+export const WEAPON_STOPPING_POWER_METERS_PER_SECOND_PER_DAMAGE = 0.065;
+/** Prevent malformed or future high-damage profiles from creating unbounded throws. */
+export const WEAPON_STOPPING_POWER_MAX_METERS_PER_SECOND = 8;
+
+/**
+ * Resolve the impact velocity contributed by one projectile.
+ *
+ * This is deliberately per bullet, not per trigger pull: a shotgun's eight
+ * pellets each submit their own stopping-power impulse and therefore add up
+ * when they strike the same target or ragdoll object.
+ */
+export const resolveWeaponStoppingPower = (damage: number): number => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : 0;
+  return Math.min(
+    WEAPON_STOPPING_POWER_MAX_METERS_PER_SECOND,
+    safeDamage * WEAPON_STOPPING_POWER_METERS_PER_SECOND_PER_DAMAGE,
+  );
+};
+
 /** Resolve a number-row weapon key; `Digit0` is the explicit empty-hand slot. */
 export const resolveWeaponHotkey = (code: string): WeaponId | null | undefined => {
   if (code === "Digit0") {
@@ -37,10 +57,46 @@ export const resolveWeaponHotkey = (code: string): WeaponId | null | undefined =
 /** Presentation lifetimes for the deterministic shot effects. */
 export const WEAPON_TRACER_LIFETIME_SECONDS = 0.14;
 export const WEAPON_IMPACT_LIFETIME_SECONDS = 0.18;
+/** Shield hits flash briefly at the actor before the shield absorbs the shot. */
+export const WEAPON_SHIELD_SPARK_LIFETIME_SECONDS = 0.22;
+export const WEAPON_SHIELD_SPARK_COLOR = 0x9df7ff;
+export const WEAPON_SHIELD_SPARK_OPACITY = 0.92;
+/** Gunshot gas clears quickly instead of accumulating during rapid fire. */
+export const WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS = 1;
+/** Keep one compact two-particle puff for each visible round. */
+export const WEAPON_MUZZLE_SMOKE_PARTICLE_COUNT = 2;
+/** Logarithmic gas expansion reaches its full scale at the end of the puff. */
+export const WEAPON_MUZZLE_SMOKE_LOG_STRENGTH = 24;
+/** The visible muzzle flash and its point-light pulse share one short lifetime. */
+export const WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS = 0.055;
+/** Full-energy point light mounted at the muzzle of held weapon models. */
+export const WEAPON_MUZZLE_FLASH_LIGHT_INTENSITY = 32;
+/** Keep the brief muzzle pulse local to the nearby room geometry. */
+export const WEAPON_MUZZLE_FLASH_LIGHT_DISTANCE = 7.5;
+/** Use physically plausible inverse-square attenuation for the flash. */
+export const WEAPON_MUZZLE_FLASH_LIGHT_DECAY = 2;
 export const WEAPON_BULLET_HOLE_LIFETIME_SECONDS = 5 * 60;
 export const WEAPON_BULLET_HOLE_FADE_SECONDS = 12;
 /** Keep sustained automatic fire from accumulating unbounded scene objects. */
 export const WEAPON_BULLET_HOLE_MAX_COUNT = 256;
+/** Blood bursts are independent world particles, not decals attached to actors. */
+export const WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS = 0.72;
+/** Blood stains persist long enough to read during a running engagement. */
+export const WEAPON_BLOOD_DECAL_LIFETIME_SECONDS = 180;
+export const WEAPON_BLOOD_DECAL_FADE_SECONDS = 18;
+export const WEAPON_BLOOD_DECAL_MAX_COUNT = 128;
+export const WEAPON_BLOOD_CLOUD_MIN_DAMAGE = 9;
+export const WEAPON_BLOOD_CLOUD_MAX_DAMAGE = 100;
+export const WEAPON_BLOOD_CLOUD_MIN_SCALE = 0.72;
+export const WEAPON_BLOOD_CLOUD_MAX_SCALE = 2.35;
+/** Keep each projectile's actor response to one readable sphere. */
+export const WEAPON_BLOOD_CLOUD_PARTICLE_COUNT = 1;
+export const WEAPON_BLOOD_CLOUD_OPACITY = 0.34;
+export const WEAPON_BLOOD_CLOUD_COLOR = 0x4b0610;
+export const WEAPON_BLOOD_SPLAT_OPACITY = 0.42;
+export const WEAPON_BLOOD_SPLAT_COLOR = 0x680812;
+export const WEAPON_BLOOD_SMEAR_START_SPEED_METERS_PER_SECOND = 0.75;
+export const WEAPON_BLOOD_SMEAR_FULL_SPEED_METERS_PER_SECOND = 3.2;
 
 /** Fixed sound sources supported by the procedural shot-audio path. */
 export type WeaponShotSoundWaveform = OscillatorType | "whiteNoise";
@@ -89,6 +145,34 @@ export interface GunAudioProfile {
   readonly bulletSpeedMetersPerSecond: number;
 }
 
+/** Inputs for the procedural sound emitted when a bullet reaches a surface. */
+export interface BulletImpactAudioParameters {
+  /** Projectile damage is the continuous bullet-strength input. */
+  readonly damage: number;
+  /** Acute incidence angle: 0 is head-on and π/2 is a grazing hit. */
+  readonly impactAngleRadians: number;
+}
+
+/** Procedural controls for a bullet impact body, resonance, and grazing glint. */
+export interface BulletImpactAudioProfile {
+  /** Compressed low-pass body for the material strike. */
+  readonly impactNoisePlaybackRate: number;
+  readonly impactNoiseGain: number;
+  readonly impactNoiseCutoffFrequencyHz: number;
+  readonly impactNoiseQ: number;
+  readonly impactDurationSeconds: number;
+  /** Decaying triangle resonance for the impact body. */
+  readonly impactToneFrequencyHz: number;
+  readonly impactToneGain: number;
+  readonly impactToneEndFrequencyHz: number;
+  /** High-frequency scrape layer that grows as the hit becomes more grazing. */
+  readonly glancingNoisePlaybackRate: number;
+  readonly glancingNoiseGain: number;
+  readonly glancingNoiseCenterFrequencyHz: number;
+  readonly glancingNoiseQ: number;
+  readonly glancingDurationSeconds: number;
+}
+
 /** Damage bounds used by the continuous procedural gunshot curve. */
 export const GUN_AUDIO_MIN_DAMAGE = 12;
 export const GUN_AUDIO_MAX_DAMAGE = 100;
@@ -101,7 +185,65 @@ export const GUN_AUDIO_MAX_BULLET_SPEED_METERS_PER_SECOND = 900;
 const GUN_AUDIO_BULLET_SPEED_DAMAGE_WEIGHT = 0.72;
 const GUN_AUDIO_BULLET_SPEED_BARREL_WEIGHT = 0.28;
 
+/** A grazing hit is at most a right angle from the struck surface normal. */
+export const BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS = Math.PI / 2;
+/** Strength bounds cover the weakest and strongest fixed-roster projectiles. */
+export const BULLET_IMPACT_AUDIO_MIN_DAMAGE = 9;
+export const BULLET_IMPACT_AUDIO_MAX_DAMAGE = GUN_AUDIO_MAX_DAMAGE;
+
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+/** Resolve a readable, monotonic blood-burst size from projectile damage. */
+export const resolveWeaponBloodCloudScale = (damage: number): number => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : WEAPON_BLOOD_CLOUD_MIN_DAMAGE;
+  const damageRatio = clamp01(
+    (safeDamage - WEAPON_BLOOD_CLOUD_MIN_DAMAGE) /
+      (WEAPON_BLOOD_CLOUD_MAX_DAMAGE - WEAPON_BLOOD_CLOUD_MIN_DAMAGE),
+  );
+  return (
+    WEAPON_BLOOD_CLOUD_MIN_SCALE +
+    Math.sqrt(damageRatio) * (WEAPON_BLOOD_CLOUD_MAX_SCALE - WEAPON_BLOOD_CLOUD_MIN_SCALE)
+  );
+};
+
+/** Resolve the velocity-driven elongation used by a projected blood stain. */
+export const resolveWeaponBloodSmearRatio = (speedMetersPerSecond: number): number => {
+  const safeSpeed = Number.isFinite(speedMetersPerSecond) ? Math.max(0, speedMetersPerSecond) : 0;
+  return clamp01(
+    (safeSpeed - WEAPON_BLOOD_SMEAR_START_SPEED_METERS_PER_SECOND) /
+      (WEAPON_BLOOD_SMEAR_FULL_SPEED_METERS_PER_SECOND -
+        WEAPON_BLOOD_SMEAR_START_SPEED_METERS_PER_SECOND),
+  );
+};
+
+/** Resolve the eased point-light strength for the remaining muzzle-flash time. */
+export const resolveWeaponMuzzleFlashLightRatio = (remainingSeconds: number): number => {
+  const safeRemaining = Number.isFinite(remainingSeconds) ? Math.max(0, remainingSeconds) : 0;
+  const progress = clamp01(safeRemaining / WEAPON_MUZZLE_FLASH_LIFETIME_SECONDS);
+  return progress * progress;
+};
+
+/** Blood starts only after the hit leaves the victim with no shield. */
+export const resolveWeaponBloodEligibility = (shield: number, damage: number): boolean =>
+  Number.isFinite(shield) && shield <= 0 && Number.isFinite(damage) && damage > 0;
+
+/** A shield spark is emitted only for damage actually absorbed by shields. */
+export const resolveWeaponShieldHit = (shieldDamage: number): boolean =>
+  Number.isFinite(shieldDamage) && shieldDamage > 0;
+
+/** Resolve the normalized logarithmic expansion progress for one muzzle puff. */
+export const resolveWeaponMuzzleSmokeLogProgress = (elapsedSeconds: number): number => {
+  const safeElapsed = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const progress = clamp01(safeElapsed / WEAPON_MUZZLE_SMOKE_LIFETIME_SECONDS);
+  return (
+    Math.log1p(WEAPON_MUZZLE_SMOKE_LOG_STRENGTH * progress) /
+    Math.log1p(WEAPON_MUZZLE_SMOKE_LOG_STRENGTH)
+  );
+};
+
+/** Resolve the inverse logarithmic opacity of one muzzle puff as it disperses. */
+export const resolveWeaponMuzzleSmokeOpacity = (elapsedSeconds: number): number =>
+  1 - resolveWeaponMuzzleSmokeLogProgress(elapsedSeconds);
 
 /** Resolve gunshot and projectile controls from damage and barrel length only. */
 export const resolveGunAudioProfile = ({
@@ -138,6 +280,56 @@ export const resolveGunAudioProfile = ({
         (GUN_AUDIO_MAX_BULLET_SPEED_METERS_PER_SECOND -
           GUN_AUDIO_MIN_BULLET_SPEED_METERS_PER_SECOND),
   };
+};
+
+/**
+ * Resolve a finite, deterministic bullet-impact mix from projectile strength
+ * and the acute angle between the projectile path and struck surface normal.
+ * Strong, square hits are lower, louder, and longer; grazing hits add a short
+ * bright scrape so a shallow strike does not sound like a direct thump.
+ */
+export const resolveBulletImpactAudioProfile = ({
+  damage,
+  impactAngleRadians,
+}: BulletImpactAudioParameters): BulletImpactAudioProfile => {
+  const safeDamage = Number.isFinite(damage) ? Math.max(0, damage) : BULLET_IMPACT_AUDIO_MIN_DAMAGE;
+  const strengthRatio = clamp01(
+    (safeDamage - BULLET_IMPACT_AUDIO_MIN_DAMAGE) /
+      (BULLET_IMPACT_AUDIO_MAX_DAMAGE - BULLET_IMPACT_AUDIO_MIN_DAMAGE),
+  );
+  const strengthCurve = Math.sqrt(strengthRatio);
+  const safeAngle = Number.isFinite(impactAngleRadians)
+    ? Math.max(0, Math.min(BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS, impactAngleRadians))
+    : 0;
+  const angleRatio = safeAngle / BULLET_IMPACT_AUDIO_MAX_ANGLE_RADIANS;
+  return {
+    impactNoisePlaybackRate: 0.68 + (1 - strengthCurve) * 0.14 + angleRatio * 0.46,
+    impactNoiseGain: 0.3 + strengthCurve * 0.62 - angleRatio * 0.12,
+    impactNoiseCutoffFrequencyHz: 900 + (1 - strengthCurve) * 2_100 + angleRatio * 3_900,
+    impactNoiseQ: 0.75 + strengthCurve * 1.6 + angleRatio * 2.2,
+    impactDurationSeconds: 0.05 + strengthCurve * 0.11 + (1 - angleRatio) * 0.035,
+    impactToneFrequencyHz: 85 + (1 - strengthCurve) * 260 + angleRatio * 480,
+    impactToneGain: 0.04 + strengthCurve * 0.14 + angleRatio * 0.11,
+    impactToneEndFrequencyHz:
+      (85 + (1 - strengthCurve) * 260 + angleRatio * 480) *
+      (0.54 + strengthCurve * 0.08 + (1 - angleRatio) * 0.12),
+    glancingNoisePlaybackRate: 0.8 + strengthCurve * 0.15 + angleRatio * 0.65,
+    glancingNoiseGain: angleRatio * (0.025 + strengthCurve * 0.19),
+    glancingNoiseCenterFrequencyHz: 1_800 + (1 - strengthCurve) * 600 + angleRatio * 5_200,
+    glancingNoiseQ: 1.4 + angleRatio * 5,
+    glancingDurationSeconds: 0.018 + angleRatio * 0.055,
+  };
+};
+
+/**
+ * Convert a normalized projectile/normal dot product to an acute impact
+ * angle. The absolute value makes front- and back-face winding equivalent.
+ */
+export const resolveBulletImpactAngleRadians = (directionDotSurfaceNormal: number): number => {
+  const alignment = Number.isFinite(directionDotSurfaceNormal)
+    ? Math.abs(Math.max(-1, Math.min(1, directionDotSurfaceNormal)))
+    : 1;
+  return Math.acos(alignment);
 };
 
 /** Surrounding temperature used as the lower bound for every weapon barrel. */
@@ -232,7 +424,8 @@ export const resolveWeaponBarrelSmokeRatio = (glowRatio: number): number => {
   return normalized * normalized * (3 - 2 * normalized);
 };
 
-export type WeaponEffectKind = "tracer" | "impact" | "bulletHole";
+export type WeaponEffectKind =
+  "tracer" | "impact" | "shieldSpark" | "bulletHole" | "bloodCloud" | "bloodDecal";
 
 /** Resolve the normalized opacity for a shot effect as it ages. */
 export const resolveWeaponEffectOpacity = (
@@ -250,8 +443,21 @@ export const resolveWeaponEffectOpacity = (
     }
     return Math.min(1, remaining / WEAPON_BULLET_HOLE_FADE_SECONDS);
   }
+  if (kind === "bloodDecal") {
+    const fadeStart = WEAPON_BLOOD_DECAL_LIFETIME_SECONDS - WEAPON_BLOOD_DECAL_FADE_SECONDS;
+    if (remaining >= fadeStart) {
+      return 1;
+    }
+    return Math.min(1, remaining / WEAPON_BLOOD_DECAL_FADE_SECONDS);
+  }
   const lifetime =
-    kind === "tracer" ? WEAPON_TRACER_LIFETIME_SECONDS : WEAPON_IMPACT_LIFETIME_SECONDS;
+    kind === "tracer"
+      ? WEAPON_TRACER_LIFETIME_SECONDS
+      : kind === "shieldSpark"
+        ? WEAPON_SHIELD_SPARK_LIFETIME_SECONDS
+        : kind === "bloodCloud"
+          ? WEAPON_BLOOD_CLOUD_LIFETIME_SECONDS
+          : WEAPON_IMPACT_LIFETIME_SECONDS;
   return Math.min(1, remaining / lifetime);
 };
 
@@ -293,6 +499,10 @@ interface WeaponDefinitionInput {
   readonly label: string;
   readonly shortLabel: string;
   readonly damage: number;
+  /** Physical occupied volume used by the shared size-based gun melee resolver. */
+  readonly meleeVolumeM3: number;
+  /** Longest occupied gun dimension used as melee reach. */
+  readonly meleeLengthMeters: number;
   readonly pellets: number;
   readonly magazineSize: number;
   readonly reserveAmmo: number;
@@ -321,6 +531,8 @@ export interface WeaponDefinition extends Omit<
   readonly fireMode: WeaponFireMode;
   /** Damage represented by one reload operation, derived from the weapon profile. */
   readonly totalDamagePerShot: number;
+  /** Impact velocity contributed by one projectile, derived from its damage. */
+  readonly stoppingPowerPerBullet: number;
   /** Full-clip duration for clip weapons, or one round/shell duration for round weapons. */
   readonly reloadSeconds: number;
 }
@@ -339,6 +551,49 @@ export const resolveWeaponBurstCooldownSeconds = (
 ): number => {
   const cooldown = definition.burstCooldownSeconds ?? definition.fireIntervalSeconds;
   return Number.isFinite(cooldown) ? Math.max(0, cooldown) : 0;
+};
+
+export interface WeaponTriggerProfile {
+  readonly burstSize: number;
+  readonly burstCooldownSeconds: number;
+  readonly fireMode: WeaponFireMode;
+  /** A new shot is not allowed until the trigger input is released. */
+  readonly requiresTriggerRelease: boolean;
+}
+
+/**
+ * Resolve the trigger behavior for the current reticle state.
+ *
+ * The pistol is continuous while the reticle dot is hidden. Caps Lock changes
+ * it to one shot per trigger press. The submachine gun is continuous while
+ * the reticle dot is hidden and uses a deliberate three-round control burst
+ * with Caps Lock enabled. Other weapons retain their fixed definition
+ * profile.
+ */
+export const resolveWeaponTriggerProfile = (
+  definition: Pick<
+    WeaponDefinition,
+    "id" | "fireIntervalSeconds" | "burstSize" | "burstCooldownSeconds" | "fireMode"
+  >,
+  reticleEnabled: boolean,
+): WeaponTriggerProfile => {
+  const requiresTriggerRelease = definition.id === "pistol" && reticleEnabled;
+  if (definition.id === "submachineGun" && !reticleEnabled) {
+    return {
+      burstSize: 1,
+      burstCooldownSeconds: resolveWeaponBurstCooldownSeconds({
+        fireIntervalSeconds: definition.fireIntervalSeconds,
+      }),
+      fireMode: "automatic",
+      requiresTriggerRelease: false,
+    };
+  }
+  return {
+    burstSize: resolveWeaponBurstSize(definition),
+    burstCooldownSeconds: resolveWeaponBurstCooldownSeconds(definition),
+    fireMode: definition.fireMode,
+    requiresTriggerRelease,
+  };
 };
 
 /** Resolve whether a weapon reloads as a full clip or as individual rounds. */
@@ -390,6 +645,7 @@ const defineWeapon = (input: WeaponDefinitionInput): WeaponDefinition => {
     ...definition,
     fireMode: burstSize > 1 ? "burst" : "automatic",
     totalDamagePerShot: input.damage * input.pellets,
+    stoppingPowerPerBullet: resolveWeaponStoppingPower(input.damage),
     reloadSeconds: resolveWeaponReloadSeconds(definition),
   };
 };
@@ -400,10 +656,14 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     label: "Pistol",
     shortLabel: "SIDEARM",
     damage: 28,
+    meleeVolumeM3: 0.06,
+    meleeLengthMeters: 0.7,
     pellets: 1,
     magazineSize: 12,
     reserveAmmo: 72,
-    fireIntervalSeconds: 0.28,
+    // Glock 19-like cyclic cadence: an empty 12-round magazine dumps in
+    // roughly half a second when the trigger is held.
+    fireIntervalSeconds: 0.045,
     spreadRadians: 0,
     color: 0xe95b4d,
     ironSight: {
@@ -428,6 +688,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     label: "Shotgun",
     shortLabel: "BREACH",
     damage: 16,
+    meleeVolumeM3: 0.205,
+    meleeLengthMeters: 2.02,
     pellets: 8,
     magazineSize: 6,
     reserveAmmo: 36,
@@ -456,6 +718,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     label: "Machine gun",
     shortLabel: "SUPPRESS",
     damage: 12,
+    meleeVolumeM3: 0.145,
+    meleeLengthMeters: 1.28,
     pellets: 1,
     magazineSize: 30,
     reserveAmmo: 150,
@@ -484,6 +748,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     label: "Sniper",
     shortLabel: "LONGSHOT",
     damage: 100,
+    meleeVolumeM3: 0.19,
+    meleeLengthMeters: 2.6,
     pellets: 1,
     magazineSize: 5,
     reserveAmmo: 25,
@@ -522,6 +788,8 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
     label: "Scoped carbine",
     shortLabel: "CARBINE",
     damage: 36,
+    meleeVolumeM3: 0.215,
+    meleeLengthMeters: 2.12,
     pellets: 1,
     magazineSize: 18,
     reserveAmmo: 90,
@@ -558,13 +826,15 @@ export const WEAPON_DEFINITIONS: Readonly<Record<WeaponId, WeaponDefinition>> = 
   submachineGun: defineWeapon({
     id: "submachineGun",
     label: "Submachine gun",
-    shortLabel: "BURST",
+    shortLabel: "SMG",
     damage: 9,
+    meleeVolumeM3: 0.12,
+    meleeLengthMeters: 1.2,
     pellets: 1,
     magazineSize: 36,
     reserveAmmo: 180,
     fireIntervalSeconds: 0.045,
-    burstSize: 4,
+    burstSize: 3,
     burstCooldownSeconds: 0.24,
     spreadRadians: 0,
     color: 0xf28aaf,
@@ -597,6 +867,7 @@ export interface WeaponChartEntry {
   readonly damagePerBullet: number;
   readonly pelletsPerShot: number;
   readonly totalDamagePerShot: number;
+  readonly stoppingPowerPerBullet: number;
   readonly magazineSize: number;
   readonly reserveAmmo: number;
   readonly totalAmmo: number;
@@ -616,6 +887,7 @@ export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map(
     damagePerBullet: definition.damage,
     pelletsPerShot: definition.pellets,
     totalDamagePerShot: definition.totalDamagePerShot,
+    stoppingPowerPerBullet: definition.stoppingPowerPerBullet,
     magazineSize: definition.magazineSize,
     reserveAmmo: definition.reserveAmmo,
     totalAmmo: definition.magazineSize + definition.reserveAmmo,
@@ -822,6 +1094,7 @@ const DEFAULT_PICKUP_COUNT_PER_WEAPON = 24;
 /** Keep at most one generated gun inside any 75 m radius. */
 export const WEAPON_MINIMUM_SPAWN_DISTANCE_METERS = 75;
 const PICKUP_HEIGHT = 0.72;
+const DEFAULT_EDGE_PICKUP_MARGIN = 4;
 const OBSTACLE_CLEARANCE = 0.9;
 const MAX_CANDIDATE_ATTEMPTS_PER_PICKUP = 240;
 const PROCEDURAL_SPAWN_REGION_COUNT = 4;
@@ -1104,6 +1377,62 @@ export const generateWeaponPickups = (
     });
   }
   return placements;
+};
+
+/**
+ * Place one copy of every weapon at equal distances around a rectangular map
+ * perimeter. The inset keeps pickups on the platform instead of directly on
+ * the world boundary; rotations remain seed-derived for reproducibility.
+ */
+export const generateWeaponPickupsOnEdges = (
+  roomSeed: string,
+  bounds: WeaponSpawnRect,
+  options: { readonly edgeMargin?: number } = {},
+): readonly WeaponPickupSpawn[] => {
+  const width = bounds.maxX - bounds.minX;
+  const depth = bounds.maxZ - bounds.minZ;
+  if (!(width > 0) || !(depth > 0)) {
+    return [];
+  }
+
+  const requestedMargin = Math.max(0, options.edgeMargin ?? DEFAULT_EDGE_PICKUP_MARGIN);
+  const maximumInset = Math.max(0, Math.min(width, depth) / 2 - 0.5);
+  const edgeMargin = Math.min(requestedMargin, maximumInset);
+  const minX = bounds.minX + edgeMargin;
+  const maxX = bounds.maxX - edgeMargin;
+  const minZ = bounds.minZ + edgeMargin;
+  const maxZ = bounds.maxZ - edgeMargin;
+  const insetWidth = maxX - minX;
+  const insetDepth = maxZ - minZ;
+  const perimeter = 2 * (insetWidth + insetDepth);
+  const spacing = perimeter / WEAPON_IDS.length;
+  const normalizedSeed = roomSeed.trim() || "room-01";
+  const random = createSeededRandom(`${normalizedSeed}|weapons|edge-placements|v1`);
+
+  const samplePerimeter = (distance: number): readonly [number, number] => {
+    const wrappedDistance = ((distance % perimeter) + perimeter) % perimeter;
+    if (wrappedDistance < insetWidth) {
+      return [minX + wrappedDistance, minZ];
+    }
+    if (wrappedDistance < insetWidth + insetDepth) {
+      return [maxX, minZ + wrappedDistance - insetWidth];
+    }
+    if (wrappedDistance < insetWidth * 2 + insetDepth) {
+      return [maxX - wrappedDistance + insetWidth + insetDepth, maxZ];
+    }
+    return [minX, maxZ - wrappedDistance + insetWidth * 2 + insetDepth];
+  };
+
+  return WEAPON_IDS.map((weapon, index) => {
+    const [x, z] = samplePerimeter((index + 0.5) * spacing);
+    return {
+      id: `weapon-${weapon}-01`,
+      weapon,
+      position: [x, PICKUP_HEIGHT, z],
+      rotation: random.nextFloat() * Math.PI * 2,
+      ...(weapon === "pistol" ? { starter: true } : {}),
+    };
+  });
 };
 
 export interface WeaponInventorySnapshot {

@@ -12,9 +12,11 @@ import {
   type WeaponStateSnapshot,
   type MeleeStateSnapshot,
 } from "./mahjong-table.js";
+import type { VisualMapId } from "./map-catalog.js";
 
 interface MahjongTableSceneProps {
   readonly debug?: boolean;
+  readonly mapId?: VisualMapId;
   readonly onExplorationAreaChange?: (area: string) => void;
   readonly onVisualAreaChange?: (area: VisualSceneAreaId, enabled: boolean) => void;
   readonly enabledAreas?: readonly VisualSceneAreaId[];
@@ -32,6 +34,7 @@ interface MahjongTableSceneProps {
 
 export const MahjongTableScene = ({
   debug = false,
+  mapId,
   onExplorationAreaChange,
   onVisualAreaChange,
   enabledAreas,
@@ -94,6 +97,7 @@ export const MahjongTableScene = ({
       try {
         const mount = createMahjongTableScene(container, viewRef.current, {
           debug: debugRef.current,
+          ...(mapId === undefined ? {} : { mapId }),
           onExplorationAreaChange: (area) => onExplorationAreaChangeRef.current?.(area),
           ...(onVisualAreaChange === undefined ? {} : { onVisualAreaChange }),
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
@@ -121,7 +125,7 @@ export const MahjongTableScene = ({
     return () => {
       disposeScene();
     };
-  }, [roomSeed, enabledAreas]);
+  }, [mapId, roomSeed, enabledAreas]);
 
   useEffect(() => {
     if (appliedViewRef.current === view) {
@@ -145,7 +149,7 @@ export const MahjongTableScene = ({
           <span className="scene-loading-eyebrow">Mahjong AI Teacher</span>
           <strong>Preparing the table</strong>
           <span className="scene-loading-line" aria-hidden="true" />
-          <span>Loading the penthouse view…</span>
+          <span>Loading the selected map…</span>
         </div>
       ) : null}
       {error === null ? null : (

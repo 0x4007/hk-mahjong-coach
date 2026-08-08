@@ -21,11 +21,15 @@ import {
   PLAYER_MAX_HEALTH,
   PLAYER_MAX_O2,
   PLAYER_MAX_SHIELD,
-  SHIELD_RECHARGE_DELAY_SECONDS,
   createPlayerVitals,
 } from "./scene/player-vitals.js";
 import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
-import { createEmptyMeleeStateSnapshot, type MeleeStateSnapshot } from "./scene/melee.js";
+import {
+  createEmptyMeleeStateSnapshot,
+  resolveMeleeRangeMeters,
+  resolveMeleeSwing,
+  type MeleeStateSnapshot,
+} from "./scene/melee.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
@@ -44,6 +48,12 @@ import {
   DEFAULT_ENABLED_VISUAL_SCENE_AREAS,
   VISUAL_SCENE_AREA_IDS,
 } from "./scene/mahjong-table.js";
+import {
+  DEFAULT_VISUAL_MAP_ID,
+  normalizeVisualMapId,
+  VISUAL_MAP_CATALOG,
+  type VisualMapId,
+} from "./scene/map-catalog.js";
 
 // The checkpoint server serves a production bundle on a local port. Keep the
 // explicit query opt-in usable there as well as in Vite development mode.
@@ -112,6 +122,7 @@ const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
 const VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS = 5000;
 const HMR_TEST_NOTE_EVENT = "codex:hmr-test-note";
 const HMR_TEST_MESSAGE_STORAGE_KEY = "hk-mahjong-coach:hmr-test-message:v1";
+const VISUAL_MAP_STORAGE_KEY = "hk-mahjong-coach:visual-map:v1";
 
 interface PersistedVisualDebugScene {
   readonly roomSeed: string;
@@ -156,6 +167,7 @@ interface HmrTestMessagePayload {
 
 const INITIAL_ROOM_QUERY_VALUE = new URLSearchParams(window.location.search).get("room");
 const HAS_EXPLICIT_ROOM_QUERY = INITIAL_ROOM_QUERY_VALUE !== null;
+const INITIAL_MAP_QUERY_VALUE = new URLSearchParams(window.location.search).get("map");
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -411,7 +423,10 @@ const writeMotionLookPreference = (enabled: boolean): void => {
 };
 
 const getVisualDebugPanelStateStorage = (): Storage | null => {
-  if (!import.meta.env.DEV || typeof window === "undefined") {
+  // The checkpoint server serves a production bundle, but `?debug=1` still
+  // intentionally exposes the development panel for local inspection. Keep
+  // its local preferences available in that explicit debug mode as well.
+  if ((!import.meta.env.DEV && !DEBUG_PANEL_ENABLED) || typeof window === "undefined") {
     return null;
   }
   try {
@@ -431,6 +446,9 @@ const readInitialEnabledAreas = (): Record<VisualSceneAreaId, boolean> => {
 interface VisualDebugPanelProps {
   readonly mount: MahjongTableMount;
   readonly isMobile: boolean;
+  readonly meleeState: MeleeStateSnapshot;
+  readonly weaponState: WeaponStateSnapshot;
+  readonly mapId: VisualMapId;
   readonly onNextRoom: () => void;
   readonly onRoomSeedSubmit: (seed: string) => void;
 }
@@ -440,9 +458,31 @@ const formatMetric = (value: number, digits = 0): string => value.toFixed(digits
 const VisualDebugPanel = ({
   mount,
   isMobile,
+  meleeState,
+  weaponState,
+  mapId,
   onNextRoom,
   onRoomSeedSubmit,
 }: VisualDebugPanelProps): React.JSX.Element => {
+  const isCleanSlateMap = mapId === "debugging-02";
+  const activeGunDefinition =
+    weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
+  const activeGunMelee =
+    activeGunDefinition === null ? null : resolveMeleeSwing(activeGunDefinition.meleeVolumeM3);
+  const activeGunMeleeRange =
+    activeGunDefinition === null
+      ? 0
+      : resolveMeleeRangeMeters(activeGunDefinition.meleeLengthMeters);
+  const availableCameraPresets: readonly {
+    readonly value: VisualCameraPreset;
+    readonly label: string;
+  }[] = isCleanSlateMap
+    ? [
+        { value: "table", label: "Warehouse start" },
+        { value: "roomReveal", label: "Warehouse reveal" },
+        { value: "assetReview", label: "Warehouse overhead" },
+      ]
+    : debugCameraPresets;
   const [snapshot, setSnapshot] = React.useState<SceneDebugSnapshot>(() =>
     mount.debug.getSnapshot(),
   );
@@ -698,62 +738,66 @@ const VisualDebugPanel = ({
         </button>
       </div>
       <div hidden={!isExpanded} id="scene-debug-controls">
-        <button
-          className="scene-debug-focus-quick-action"
-          disabled={!snapshot.enabledAreas.focusCalibration}
-          onClick={openFocusCalibration}
-          type="button"
-        >
-          Open focus test zone
-        </button>
-        <button
-          className="scene-debug-focus-quick-action"
-          disabled={!snapshot.enabledAreas.climbingGym}
-          onClick={openClimbingGym}
-          type="button"
-        >
-          Open climbing gym
-        </button>
-        <button
-          className="scene-debug-focus-quick-action"
-          disabled={!snapshot.enabledAreas.parametricBarracks}
-          onClick={openParametricBarracks}
-          type="button"
-        >
-          Open parametric barracks
-        </button>
-        <button
-          className="scene-debug-focus-quick-action"
-          disabled={!snapshot.enabledAreas.targetRange}
-          onClick={openTargetRange}
-          type="button"
-        >
-          Open target range
-        </button>
-        <fieldset className="scene-debug-area-toggles">
-          <legend>Loaded areas</legend>
-          <small>
-            Turn off unused spaces to unload their meshes and physics. The selection is saved in
-            debug settings and restored after reload.
-          </small>
-          {debugSceneAreas.map((area) => {
-            const enabled = snapshot.enabledAreas[area.id];
-            return (
-              <label className="scene-debug-check" key={area.id}>
-                <input
-                  checked={enabled}
-                  onChange={(event) =>
-                    applyDebugChange(() =>
-                      mount.debug.setAreaEnabled(area.id, event.currentTarget.checked),
-                    )
-                  }
-                  type="checkbox"
-                />
-                {area.label} <span>{enabled ? "loaded" : "unloaded"}</span>
-              </label>
-            );
-          })}
-        </fieldset>
+        {!isCleanSlateMap ? (
+          <>
+            <button
+              className="scene-debug-focus-quick-action"
+              disabled={!snapshot.enabledAreas.focusCalibration}
+              onClick={openFocusCalibration}
+              type="button"
+            >
+              Open focus test zone
+            </button>
+            <button
+              className="scene-debug-focus-quick-action"
+              disabled={!snapshot.enabledAreas.climbingGym}
+              onClick={openClimbingGym}
+              type="button"
+            >
+              Open climbing gym
+            </button>
+            <button
+              className="scene-debug-focus-quick-action"
+              disabled={!snapshot.enabledAreas.parametricBarracks}
+              onClick={openParametricBarracks}
+              type="button"
+            >
+              Open parametric barracks
+            </button>
+            <button
+              className="scene-debug-focus-quick-action"
+              disabled={!snapshot.enabledAreas.targetRange}
+              onClick={openTargetRange}
+              type="button"
+            >
+              Open target range
+            </button>
+            <fieldset className="scene-debug-area-toggles">
+              <legend>Loaded areas</legend>
+              <small>
+                Turn off unused spaces to unload their meshes and physics. The selection is saved in
+                debug settings and restored after reload.
+              </small>
+              {debugSceneAreas.map((area) => {
+                const enabled = snapshot.enabledAreas[area.id];
+                return (
+                  <label className="scene-debug-check" key={area.id}>
+                    <input
+                      checked={enabled}
+                      onChange={(event) =>
+                        applyDebugChange(() =>
+                          mount.debug.setAreaEnabled(area.id, event.currentTarget.checked),
+                        )
+                      }
+                      type="checkbox"
+                    />
+                    {area.label} <span>{enabled ? "loaded" : "unloaded"}</span>
+                  </label>
+                );
+              })}
+            </fieldset>
+          </>
+        ) : null}
         <fieldset className="scene-debug-room">
           <legend>Generated room</legend>
           <div className="scene-debug-room-meta">
@@ -797,6 +841,53 @@ const VisualDebugPanel = ({
             Reset vitals
           </button>
           <small>High-speed wall impacts and hard landings also deal damage.</small>
+        </fieldset>
+        <fieldset className="scene-debug-melee" data-debug-melee-telemetry="true">
+          <legend>Melee telemetry</legend>
+          <dl className="scene-debug-metrics">
+            <div>
+              <dt>Previous hit</dt>
+              <dd>
+                {meleeState.lastDamage > 0
+                  ? `${formatMetric(meleeState.lastDamage, 1)} damage`
+                  : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt>Swings / hits</dt>
+              <dd>
+                {meleeState.swings} / {meleeState.hits}
+              </dd>
+            </div>
+            <div>
+              <dt>Current base</dt>
+              <dd>
+                {meleeState.active === null
+                  ? "—"
+                  : `${formatMetric(meleeState.active.damage, 1)} damage · ${formatMetric(meleeState.active.stoppingPower, 1)} stop`}
+              </dd>
+            </div>
+            <div>
+              <dt>Gun melee</dt>
+              <dd>
+                {activeGunDefinition === null
+                  ? "—"
+                  : `${activeGunDefinition.label} · ${formatMetric(activeGunDefinition.meleeVolumeM3, 3)} m³ · ${formatMetric(activeGunMeleeRange, 2)} m reach`}
+              </dd>
+            </div>
+            <div>
+              <dt>Gun hit</dt>
+              <dd>
+                {activeGunMelee === null
+                  ? "—"
+                  : `${formatMetric(activeGunMelee.damage, 1)} damage · ${formatMetric(activeGunMelee.swingSpeedRadiansPerSecond, 1)} rad/s · ${formatMetric(activeGunMelee.stoppingPower, 1)} stop`}
+              </dd>
+            </div>
+          </dl>
+          <small>
+            Gun values use size-based volume, reach, damage, and swing speed; actor hits include
+            momentum.
+          </small>
         </fieldset>
         <label>
           Quality mode
@@ -895,9 +986,11 @@ const VisualDebugPanel = ({
             value={snapshot.cameraPreset ?? "table"}
             onChange={(event) => setCameraPreset(event.currentTarget.value as VisualCameraPreset)}
           >
-            {debugCameraPresets.map((preset) => (
+            {availableCameraPresets.map((preset) => (
               <option
-                disabled={!snapshot.enabledAreas[debugCameraPresetArea(preset.value)]}
+                disabled={
+                  !isCleanSlateMap && !snapshot.enabledAreas[debugCameraPresetArea(preset.value)]
+                }
                 key={preset.value}
                 value={preset.value}
               >
@@ -1123,13 +1216,32 @@ const JOYSTICK_DEAD_ZONE = 0.08;
 const getInitialRoomSeed = (): string =>
   normalizeVisualRoomSeed(INITIAL_ROOM_QUERY_VALUE ?? DEFAULT_ROOM_SEED);
 
+const getStoredVisualMapId = (): VisualMapId | null => {
+  try {
+    const stored = window.localStorage.getItem(VISUAL_MAP_STORAGE_KEY);
+    return stored === null ? null : normalizeVisualMapId(stored);
+  } catch {
+    return null;
+  }
+};
+
+const getInitialVisualMapId = (): VisualMapId =>
+  normalizeVisualMapId(INITIAL_MAP_QUERY_VALUE ?? getStoredVisualMapId() ?? DEFAULT_VISUAL_MAP_ID);
+
+const writeVisualMapId = (mapId: VisualMapId): void => {
+  try {
+    window.localStorage.setItem(VISUAL_MAP_STORAGE_KEY, mapId);
+  } catch {
+    // Map selection remains active for this session when storage is blocked.
+  }
+};
+
 const App = (): React.JSX.Element => {
-  const [view, setView] = React.useState<SceneView>("seat");
+  const view: SceneView = "seat";
+  const [mapId, setMapId] = React.useState<VisualMapId>(getInitialVisualMapId);
   const [roomSeed, setRoomSeed] = React.useState(getInitialRoomSeed);
   const [enabledAreas, setEnabledAreas] =
     React.useState<Readonly<Record<VisualSceneAreaId, boolean>>>(readInitialEnabledAreas);
-  const [roomVariant, setRoomVariant] = React.useState("Northlight");
-  const [explorationArea, setExplorationArea] = React.useState("Penthouse");
   const [hmrSceneEpoch, setHmrSceneEpoch] = React.useState(0);
   const [hmrTestMessage, setHmrTestMessage] = React.useState(readStoredHmrTestMessage);
   const [isMobile, setIsMobile] = React.useState(isMobileDevice);
@@ -1190,7 +1302,9 @@ const App = (): React.JSX.Element => {
 
   React.useEffect(() => {
     const updateCapsLockState = (event: KeyboardEvent): void => {
-      setIsCapsLockOn(event.getModifierState("CapsLock"));
+      const enabled = event.getModifierState("CapsLock");
+      setIsCapsLockOn(enabled);
+      mountRef.current?.setReticleEnabled(enabled);
     };
     window.addEventListener("keydown", updateCapsLockState);
     window.addEventListener("keyup", updateCapsLockState);
@@ -1199,6 +1313,10 @@ const App = (): React.JSX.Element => {
       window.removeEventListener("keyup", updateCapsLockState);
     };
   }, []);
+
+  React.useEffect(() => {
+    mountRef.current?.setReticleEnabled(isCapsLockOn);
+  }, [isCapsLockOn]);
 
   const applyPersistedVisualDebugState = React.useCallback((mount: MahjongTableMount): void => {
     const persisted = persistedVisualDebugStateRef.current;
@@ -1276,7 +1394,6 @@ const App = (): React.JSX.Element => {
         setPlayerSpeed(0);
         setWeaponState(createEmptyWeaponStateSnapshot());
         setMeleeState(createEmptyMeleeStateSnapshot());
-        setExplorationArea("Penthouse");
         hasAttemptedMotionReenable.current = false;
         hasAppliedPersistedVisualStateRef.current = false;
         if (reticleBobbingFrame.current !== 0) {
@@ -1292,9 +1409,6 @@ const App = (): React.JSX.Element => {
         }
         return;
       }
-      const snapshot = mount.debug.getSnapshot();
-      setRoomVariant(snapshot.roomVariant);
-      setExplorationArea(snapshot.explorationArea);
       hasAttemptedMotionReenable.current = false;
       try {
         mount.debug.setQualityMode(visualQualityMode);
@@ -1312,6 +1426,7 @@ const App = (): React.JSX.Element => {
         // Use the latest state of `isMotionLookEnabled` – the callback now
         // depends on that state, ensuring the current value is used.
         mount.setMotionLookEnabled(isMotionLookEnabled);
+        mount.setReticleEnabled(isCapsLockOn);
       } catch {
         // The scene may be disposed during a concurrent HMR remount.
         return;
@@ -1352,7 +1467,7 @@ const App = (): React.JSX.Element => {
     },
     // Adding `isMotionLookEnabled` as a dependency makes sure the latest UI
     // state is reflected when the mount is recreated (e.g., after a hot reload).
-    [isMotionLookEnabled, visualQualityMode],
+    [isCapsLockOn, isMotionLookEnabled, visualQualityMode],
   );
 
   React.useEffect(() => {
@@ -1398,9 +1513,6 @@ const App = (): React.JSX.Element => {
     if (status === "ready") {
       writeMotionLookPreference(true);
     }
-  }, []);
-  const handleExplorationAreaChange = React.useCallback((area: string): void => {
-    setExplorationArea(area);
   }, []);
   const requestMotionLook = (): void => {
     void (async (): Promise<void> => {
@@ -1550,13 +1662,19 @@ const App = (): React.JSX.Element => {
   const nextRoom = (): void => {
     hasUserRoomOverrideRef.current = true;
     roomSequenceRef.current += 1;
-    setExplorationArea("Penthouse");
     setRoomSeed(`room-${String(roomSequenceRef.current).padStart(2, "0")}`);
   };
   const loadRoomSeed = (seed: string): void => {
     hasUserRoomOverrideRef.current = true;
-    setExplorationArea("Penthouse");
     setRoomSeed(normalizeVisualRoomSeed(seed));
+  };
+  const selectMap = (nextMapId: VisualMapId): void => {
+    const normalizedMapId = normalizeVisualMapId(nextMapId);
+    if (normalizedMapId === mapId) {
+      return;
+    }
+    writeVisualMapId(normalizedMapId);
+    setMapId(normalizedMapId);
   };
   const handleVisualAreaChange = (area: VisualSceneAreaId, enabled: boolean): void => {
     setEnabledAreas((previous) => {
@@ -1651,31 +1769,6 @@ const App = (): React.JSX.Element => {
   const shieldPercent = Math.round((playerVitals.shield / PLAYER_MAX_SHIELD) * 100);
   const healthPercent = Math.round((playerVitals.health / PLAYER_MAX_HEALTH) * 100);
   const o2Percent = Math.round((playerVitals.o2 / PLAYER_MAX_O2) * 100);
-  const shieldStatus =
-    playerVitals.shield >= PLAYER_MAX_SHIELD
-      ? "Full charge"
-      : playerVitals.timeSinceDamage >= SHIELD_RECHARGE_DELAY_SECONDS
-        ? "Recharging"
-        : `Recharge in ${(SHIELD_RECHARGE_DELAY_SECONDS - playerVitals.timeSinceDamage).toFixed(1)}s`;
-  const o2Status = playerVitals.holdingBreath
-    ? "Holding breath"
-    : playerVitals.holdBreathLocked
-      ? "Recover above 25% to hold"
-      : playerVitals.o2 >= PLAYER_MAX_O2
-        ? "Ready"
-        : "Recovering";
-  const hudStatus: {
-    readonly label: string;
-    readonly tone: "ready" | "crouched" | "sprinting" | "focused" | "reloading";
-  } = weaponState.reloading
-    ? { label: "Reloading", tone: "reloading" }
-    : playerVitals.holdingBreath
-      ? { label: "Steady aim", tone: "focused" }
-      : isSprinting
-        ? { label: "Sprint", tone: "sprinting" }
-        : isCrouched
-          ? { label: "Crouched", tone: "crouched" }
-          : { label: "Ready", tone: "ready" };
   const activeWeaponDefinition =
     weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
   const activeWeaponSlot =
@@ -1687,6 +1780,14 @@ const App = (): React.JSX.Element => {
   const hasOwnedWeapon = weaponState.inventory.some((slot) => slot.owned);
   const activeMelee = meleeState.active;
   const nearbyMelee = meleeState.nearby;
+  const activeGunMelee =
+    activeWeaponDefinition === null
+      ? null
+      : resolveMeleeSwing(activeWeaponDefinition.meleeVolumeM3);
+  const activeGunMeleeRange =
+    activeWeaponDefinition === null
+      ? 0
+      : resolveMeleeRangeMeters(activeWeaponDefinition.meleeLengthMeters);
 
   return (
     <main id="main" className="immersive-shell">
@@ -1701,11 +1802,11 @@ const App = (): React.JSX.Element => {
         >
           {persistedVisualStateReady ? (
             <MahjongTableScene
-              key={`scene-${hmrSceneEpoch}-${roomSeed}-${enabledAreaKey}`}
+              key={`scene-${hmrSceneEpoch}-${mapId}-${roomSeed}-${enabledAreaKey}`}
               debug={DEBUG_PANEL_ENABLED}
               enabledAreas={enabledAreaIds}
+              mapId={mapId}
               reticlePosition={RETICLE_POSITION}
-              onExplorationAreaChange={handleExplorationAreaChange}
               onVisualAreaChange={handleVisualAreaChange}
               roomSeed={roomSeed}
               view={view}
@@ -1730,9 +1831,12 @@ const App = (): React.JSX.Element => {
           {DEBUG_PANEL_ENABLED && debugMount !== null ? (
             <VisualDebugPanel
               isMobile={isMobile}
+              meleeState={meleeState}
+              mapId={mapId}
               mount={debugMount}
               onNextRoom={nextRoom}
               onRoomSeedSubmit={loadRoomSeed}
+              weaponState={weaponState}
             />
           ) : null}
           <div
@@ -1754,10 +1858,7 @@ const App = (): React.JSX.Element => {
             <h1 id="table-heading">Stay in the hand.</h1>
             {isMobile ? (
               <>
-                <p>
-                  iPhone mode: turn your phone sideways into landscape for the best composed view.
-                  {` ${motionInstruction}`}
-                </p>
+                <p>Landscape recommended. {motionInstruction}</p>
                 {motionStatus !== "unsupported" && (
                   <button
                     className="motion-button"
@@ -1777,19 +1878,15 @@ const App = (): React.JSX.Element => {
               </>
             ) : (
               <p>
-                Click to look around. WASD moves through the room; double-tap any movement key to
-                sprint. Walk through the cyan arch to leave the room and explore streamed play
-                areas. Hold left Command to aim and hold your breath; right-click toggles aim
-                without holding your breath. Engage cover by toggling zoom on while touching a wall;
-                arriving at a wall while already zoomed does not engage it. Use A/D strafe input to
-                lean while cover is active. Double-tap a movement key to sprint and leave aim.
+                Click to look · WASD move · double-tap sprint · Command/right-click zoom · E equip ·
+                R reload · Shift crouch · Space jump.
               </p>
             )}
           </header>
           <div
             className="scene-overlay scene-overlay-controls"
             style={{
-              top: "max(0.7rem, env(safe-area-inset-top))",
+              top: "max(3.2rem, calc(env(safe-area-inset-top) + 2.45rem))",
               left: "max(0.7rem, env(safe-area-inset-left))",
               right: "auto",
               bottom: "auto",
@@ -1797,23 +1894,21 @@ const App = (): React.JSX.Element => {
               alignSelf: "flex-start",
             }}
           >
-            <div className="scene-actions" role="group" aria-label="Camera view">
-              <button aria-pressed={view === "seat"} onClick={() => setView("seat")} type="button">
-                Seat view
-              </button>
-              <button onClick={nextRoom} type="button">
-                New room
-              </button>
-              {DEBUG_PANEL_ENABLED ? (
-                <button
-                  aria-pressed={view === "overhead"}
-                  onClick={() => setView("overhead")}
-                  type="button"
-                >
-                  Overhead
-                </button>
-              ) : null}
-            </div>
+            <label className="scene-map-picker" htmlFor="scene-map-select">
+              <span>Map</span>
+              <select
+                aria-label="Choose map"
+                id="scene-map-select"
+                onChange={(event) => selectMap(event.currentTarget.value as VisualMapId)}
+                value={mapId}
+              >
+                {VISUAL_MAP_CATALOG.map((map) => (
+                  <option key={map.id} title={map.description} value={map.id}>
+                    {map.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             {!DEBUG_PANEL_ENABLED ? (
               <label className="scene-video-quality" htmlFor="visual-quality-mode">
                 Video quality
@@ -1832,32 +1927,6 @@ const App = (): React.JSX.Element => {
                 </select>
               </label>
             ) : null}
-          </div>
-          <div className="scene-hud" aria-label="Session status">
-            <span className="scene-hud-item scene-hud-live">
-              <i aria-hidden="true" />
-              <span className="scene-hud-label">Live</span>
-              <strong>3D preview</strong>
-            </span>
-            <span aria-hidden="true" className="scene-hud-divider" />
-            <span className="scene-hud-item scene-hud-round">
-              <span className="scene-hud-label">Round</span>
-              <strong>1 · East</strong>
-            </span>
-            <span className="scene-hud-item scene-hud-location">
-              <span className="scene-hud-label">Area</span>
-              <strong>{explorationArea}</strong>
-              <em>
-                {roomVariant} · {roomSeed}
-              </em>
-            </span>
-            <span
-              className={`scene-hud-status scene-hud-status-${hudStatus.tone}`}
-              data-status={hudStatus.tone}
-            >
-              <i aria-hidden="true" />
-              <strong>{hudStatus.label}</strong>
-            </span>
           </div>
           {DEBUG_PANEL_ENABLED ? (
             <output
@@ -1878,17 +1947,9 @@ const App = (): React.JSX.Element => {
               }
               data-o2-state={o2Percent <= 25 ? "low" : "stable"}
             >
-              <div className="scene-panel-heading">
-                <span>Player systems</span>
-                <small>Live telemetry</small>
-              </div>
               <div className="scene-vitals-row scene-vitals-shield">
-                <div className="scene-vitals-heading">
-                  <span>Shield</span>
-                  <strong>{shieldPercent}%</strong>
-                </div>
                 <div
-                  aria-label={`Shield ${shieldPercent}%`}
+                  aria-label="Shield"
                   aria-valuemax={PLAYER_MAX_SHIELD}
                   aria-valuemin={0}
                   aria-valuenow={playerVitals.shield}
@@ -1897,15 +1958,10 @@ const App = (): React.JSX.Element => {
                 >
                   <span style={{ width: `${shieldPercent}%` }} />
                 </div>
-                <small>{shieldStatus}</small>
               </div>
               <div className="scene-vitals-row scene-vitals-health">
-                <div className="scene-vitals-heading">
-                  <span>Health</span>
-                  <strong>{healthPercent}%</strong>
-                </div>
                 <div
-                  aria-label={`Health ${healthPercent}%`}
+                  aria-label="Health"
                   aria-valuemax={PLAYER_MAX_HEALTH}
                   aria-valuemin={0}
                   aria-valuenow={playerVitals.health}
@@ -1914,17 +1970,10 @@ const App = (): React.JSX.Element => {
                 >
                   <span style={{ width: `${healthPercent}%` }} />
                 </div>
-                <small>
-                  {playerVitals.isDead ? "Down" : healthPercent <= 25 ? "Critical" : "Stable"}
-                </small>
               </div>
               <div className="scene-vitals-row scene-vitals-o2">
-                <div className="scene-vitals-heading">
-                  <span>O2</span>
-                  <strong>{o2Percent}%</strong>
-                </div>
                 <div
-                  aria-label={`O2 ${o2Percent}%`}
+                  aria-label="O2"
                   aria-valuemax={PLAYER_MAX_O2}
                   aria-valuemin={0}
                   aria-valuenow={playerVitals.o2}
@@ -1933,7 +1982,6 @@ const App = (): React.JSX.Element => {
                 >
                   <span style={{ width: `${o2Percent}%` }} />
                 </div>
-                <small>{o2Status}</small>
               </div>
             </div>
             {hmrTestMessage !== null ? (
@@ -1956,6 +2004,14 @@ const App = (): React.JSX.Element => {
             data-reloading={weaponState.reloading ? "true" : "false"}
             data-shots-fired={weaponState.shotsFired}
             data-shots-hit={weaponState.shotsHit}
+            data-melee-damage={activeGunMelee?.damage.toFixed(2) ?? "0"}
+            data-melee-speed={activeGunMelee?.swingSpeedRadiansPerSecond.toFixed(2) ?? "0"}
+            data-melee-range={activeGunMeleeRange.toFixed(2)}
+            data-stopping-power={
+              activeWeaponDefinition === null
+                ? "0"
+                : activeWeaponDefinition.stoppingPowerPerBullet.toFixed(2)
+            }
           >
             <div className="scene-panel-heading">
               <span>Loadout</span>
@@ -1975,16 +2031,17 @@ const App = (): React.JSX.Element => {
               </span>
               <strong>
                 {activeMelee !== null
-                  ? `${activeMelee.damage.toFixed(0)} dmg · ${activeMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s`
+                  ? `${activeMelee.damage.toFixed(0)} dmg · ${activeMelee.stoppingPower.toFixed(1)} stop · ${activeMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s`
                   : activeWeaponSlot === null
                     ? "—"
-                    : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)}`}
+                    : `${String(activeWeaponSlot.ammoInMagazine)} / ${String(activeWeaponSlot.reserveAmmo)} · ${activeWeaponDefinition?.damage ?? 0} dmg · ${activeWeaponDefinition?.stoppingPowerPerBullet.toFixed(2) ?? "0.00"} stop`}
               </strong>
             </div>
             {nearbyMelee !== null ? (
               <p className="scene-weapons-pickup">
                 Press E to equip {nearbyMelee.displayName} · {nearbyMelee.rangeMeters.toFixed(2)} m
-                reach · {nearbyMelee.damage.toFixed(0)} damage
+                reach · {nearbyMelee.damage.toFixed(0)} damage ·{" "}
+                {nearbyMelee.stoppingPower.toFixed(1)} stop
               </p>
             ) : null}
             {nearbyWeaponDefinition !== null ? (
@@ -2013,13 +2070,22 @@ const App = (): React.JSX.Element => {
               {weaponState.reloading
                 ? "Reloading…"
                 : activeMelee !== null
-                  ? "Click swing · Q drop · 0 holster"
+                  ? "Click or F swing · zoom + click throw · Q drop · 0 holster"
                   : activeWeaponSlot === null
                     ? hasOwnedWeapon
-                      ? "1–6 equip · Q throw"
+                      ? "1–6 equip · F melee · Q throw"
                       : "Find a glowing pickup"
-                    : "Click fire · R reload · 0 holster · 1–6 switch · Q throw"}
+                    : "Click fire · F melee · R reload · 0 holster · 1–6 switch · Q throw"}
             </small>
+            {activeMelee === null && activeGunMelee !== null ? (
+              <small>
+                F melee · Reach {activeGunMeleeRange.toFixed(2)} m · Volume{" "}
+                {activeWeaponDefinition?.meleeVolumeM3.toFixed(3)} m³ ·{" "}
+                {activeGunMelee.damage.toFixed(0)} damage ·{" "}
+                {activeGunMelee.swingSpeedRadiansPerSecond.toFixed(1)} rad/s ·{" "}
+                {activeGunMelee.oxygenCost.toFixed(1)} O₂ per swing
+              </small>
+            ) : null}
             {activeMelee !== null ? (
               <small>
                 Reach {activeMelee.rangeMeters.toFixed(2)} m · Volume{" "}
@@ -2093,8 +2159,8 @@ const App = (): React.JSX.Element => {
           <footer className="scene-card-footer scene-overlay scene-overlay-footer">
             <p>
               {isMobile
-                ? "Drag joystick: move · Swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap any movement key to sprint and leave aim · walk over to store / E equip or swap · click fire · right-click toggle aim · engage cover while touching a wall · A/D lean in cover · R reload · 0 holster · 1–6 equip · Q throw · Shift crouch · Space jump · Esc releases pointer"}
+                ? "Joystick move · swipe look · Equip · Fire · Reload · Crouch · Jump"
+                : "Mouse look · WASD move · double-tap sprint · Command/right-click zoom · E equip · click fire · R reload · Q throw · 0 holster · 1–6 switch · Shift crouch · Space jump · Esc release"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>
