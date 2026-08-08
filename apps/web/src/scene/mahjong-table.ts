@@ -4477,7 +4477,6 @@ interface WeaponSmokeParticle {
   readonly material: THREE.SpriteMaterial;
   readonly velocity: THREE.Vector3;
   readonly phase: number;
-  thermal: boolean;
   age: number;
   lifetime: number;
   startScale: number;
@@ -4623,13 +4622,6 @@ const WEAPON_SMOKE_LONGEST_BARREL_LENGTH = 1.35;
 const WEAPON_SMOKE_BARREL_LENGTH_SCALE_RANGE = 0.6;
 const WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION = 0.45;
 const WEAPON_MUZZLE_SMOKE_LOG_STRENGTH = 24;
-/** The parametric-guns gunpowder plume: denser, whiter, and slower to clear than thermal wisps. */
-const WEAPON_POWDER_SMOKE_LIFETIME_MIN_SECONDS = 9.2;
-const WEAPON_POWDER_SMOKE_LIFETIME_VARIANCE_SECONDS = 1.6;
-const WEAPON_POWDER_SMOKE_MIN_PUFFS = 3;
-const WEAPON_POWDER_SMOKE_MAX_PUFFS = 8;
-const WEAPON_POWDER_SMOKE_DAMAGE_PER_PUFF = 24;
-const WEAPON_POWDER_SMOKE_OUTWARD_SPEED = 0.12;
 const WEAPON_THERMAL_SMOKE_RATE_MULTIPLIER = 2;
 const WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS = 0.05;
 const WEAPON_SHOT_SOUND_CRACK_DURATION_SECONDS = 0.006;
@@ -4819,7 +4811,7 @@ const createWeaponSmokeParticles = (
     sprite.name = "WeaponBarrelSmokeParticle";
     sprite.visible = false;
     // World particles can move outside the camera frustum before their
-    // ten-second fade completes. Keep them eligible for the explicit lifetime
+    // five-second fade completes. Keep them eligible for the explicit lifetime
     // path instead of letting frustum culling pop them.
     sprite.frustumCulled = false;
     sprite.scale.setScalar(0.01);
@@ -4830,7 +4822,6 @@ const createWeaponSmokeParticles = (
       material,
       velocity: new THREE.Vector3(),
       phase: index * 1.913,
-      thermal: false,
       age: 0,
       lifetime: 0,
       startScale: 0,
@@ -5860,25 +5851,20 @@ const createWeaponRuntime = (
     }
     smokeRightWorld.normalize();
     particle.active = true;
-    particle.thermal = thermal;
     particle.age = 0;
-    // Keep the first frame dense at the captured muzzle point. Powder uses
-    // the older parametric plume's longer white diffusion; thermal wisps keep
-    // the visual-table five-second heat response.
-    particle.lifetime = thermal
-      ? WEAPON_SMOKE_LIFETIME_SECONDS
-      : WEAPON_POWDER_SMOKE_LIFETIME_MIN_SECONDS +
-        random() * WEAPON_POWDER_SMOKE_LIFETIME_VARIANCE_SECONDS;
-    const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 1;
+    // Keep the first frame soft at the captured muzzle point, then use the
+    // shared five-second diffusion for both muzzle puffs and thermal wisps.
+    particle.lifetime = WEAPON_SMOKE_LIFETIME_SECONDS;
+    const smokeScaleMultiplier = thermal ? thermalBarrelLengthScale : 5;
     particle.startScale =
       (thermal ? 0.22 + random() * 0.12 : 0.26 + random() * 0.14) *
       powerForSmoke *
       smokeScaleMultiplier;
     particle.endScale =
       particle.startScale * (thermal ? 5.2 + random() * 1.6 : 4.8 + random() * 1.5);
-    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.86 + random() * 0.14;
+    particle.startOpacity = thermal ? 0.55 + random() * 0.15 : 0.94 + random() * 0.06;
     particle.riseAcceleration = thermal ? 0.1 + random() * 0.06 : 0.08 + random() * 0.06;
-    particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0;
+    particle.velocityDrag = thermal ? 0.32 + random() * 0.1 : 0.38 + random() * 0.12;
     particle.spin = (random() - 0.5) * (thermal ? 2.2 : 3.6);
     smokeSpawnWorld
       .copy(model.muzzleWorldPosition)
@@ -5886,19 +5872,17 @@ const createWeaponRuntime = (
       .addScaledVector(smokeWorldUp, (random() - 0.5) * concentratedSpread * 0.45)
       .addScaledVector(model.muzzleWorldForward, random() * (thermal ? 0.025 : 0.045));
     particle.sprite.position.copy(smokeSpawnWorld);
-    const outwardSpeed = thermal
-      ? 0.045 * (0.85 + powerSpread * 0.25)
-      : WEAPON_POWDER_SMOKE_OUTWARD_SPEED * (0.85 + powerSpread * 0.25);
+    const outwardSpeed = thermal ? 0.045 * (0.85 + powerSpread * 0.25) : 0.42 + powerSpread * 0.3;
     const upwardSpeed = (thermal ? 0.08 : 0.1) + random() * (thermal ? 0.08 : 0.12);
     particle.velocity
       .copy(model.muzzleWorldVelocity)
       .addScaledVector(model.muzzleWorldForward, outwardSpeed)
       .addScaledVector(smokeRightWorld, (random() - 0.5) * lateralSpread)
       .addScaledVector(smokeWorldUp, upwardSpeed);
-    // Parametric gunpowder is bright white; hot-barrel steam keeps its pale
-    // white material. Powder starts opaque so its denser burst reads on fire.
-    particle.material.color.setHex(thermal ? 0xf1f4ef : 0xffffff);
-    particle.material.opacity = thermal ? 0 : particle.startOpacity;
+    // Muzzle smoke is a soft gray; hot-barrel steam keeps its pale white
+    // material. Starting transparent prevents a visible sprite pop.
+    particle.material.color.setHex(thermal ? 0xf1f4ef : 0x7f8985);
+    particle.material.opacity = 0;
     particle.sprite.rotation.set(0, 0, random() * Math.PI * 2);
     particle.sprite.scale.set(
       particle.startScale,
@@ -5940,7 +5924,6 @@ const createWeaponRuntime = (
         continue;
       }
       particle.age += safeDelta;
-      const progress = Math.min(1, particle.age / Math.max(0.001, particle.lifetime));
       // Inherit the moving muzzle's world velocity, then damp all motion so
       // the plume gradually stops travelling forward while hot lift remains.
       particle.velocity.multiplyScalar(Math.exp(-particle.velocityDrag * safeDelta));
@@ -5951,48 +5934,32 @@ const createWeaponRuntime = (
       particle.sprite.position.z +=
         Math.cos(particle.phase + particle.age * 3.4) * 0.008 * safeDelta;
       particle.sprite.rotation.z += particle.spin * safeDelta;
-      if (particle.thermal) {
-        const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
-        const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
-        const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
-        const muzzleExpansionProgress = Math.min(
-          1,
-          Math.max(
-            0,
-            (particle.age - fadeInDuration) /
-              (Math.max(0.001, particle.lifetime - fadeInDuration) *
-                WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
-          ),
-        );
-        const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
-        const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
-        particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
-        // Visual-table thermal wisps fade after their rapid expansion and can
-        // return to the pool as soon as they are no longer visible.
-        particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
-        if (
-          shouldClearWeaponSmoke(
-            particle.material.opacity,
-            particle.age,
-            particle.lifetime,
-            fadeInDuration,
-          )
-        ) {
-          particle.active = false;
-          particle.sprite.visible = false;
-          particle.material.opacity = 0;
-        }
-        continue;
-      }
-
-      // Parametric-guns powder smoke uses a longer, eased diffusion rather
-      // than the thermal emitter's early clear-out. It stays dense at the
-      // muzzle, expands smoothly, then fades through the full lifetime.
-      const easedProgress = progress * progress * (3 - 2 * progress);
-      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, easedProgress);
-      particle.sprite.scale.set(scale, scale * (0.84 + easedProgress * 0.26), 1);
-      particle.material.opacity = particle.startOpacity * (1 - progress) ** 1.25;
-      if (progress >= 1) {
+      const fadeInDuration = Math.min(WEAPON_SMOKE_FADE_IN_SECONDS, particle.lifetime);
+      const fadeInProgress = Math.min(1, particle.age / fadeInDuration);
+      const easedFadeIn = resolveNormalizedSigmoid(fadeInProgress);
+      const muzzleExpansionProgress = Math.min(
+        1,
+        Math.max(
+          0,
+          (particle.age - fadeInDuration) /
+            (Math.max(0.001, particle.lifetime - fadeInDuration) *
+              WEAPON_MUZZLE_SMOKE_EXPANSION_FRACTION),
+        ),
+      );
+      const sizeProgress = resolveNormalizedLogExpansion(muzzleExpansionProgress);
+      const scale = THREE.MathUtils.lerp(particle.startScale, particle.endScale, sizeProgress);
+      particle.sprite.scale.set(scale, scale * (0.84 + sizeProgress * 0.26), 1);
+      // Both plumes follow the same restrained expansion: bright at source
+      // scale, then transparent while the max-size cloud lingers.
+      particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
+      if (
+        shouldClearWeaponSmoke(
+          particle.material.opacity,
+          particle.age,
+          particle.lifetime,
+          fadeInDuration,
+        )
+      ) {
         particle.active = false;
         particle.sprite.visible = false;
         particle.material.opacity = 0;
@@ -6461,11 +6428,8 @@ const createWeaponRuntime = (
       viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
       const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
       const puffCount = Math.min(
-        WEAPON_POWDER_SMOKE_MAX_PUFFS,
-        Math.max(
-          WEAPON_POWDER_SMOKE_MIN_PUFFS,
-          Math.ceil(definition.totalDamagePerShot / WEAPON_POWDER_SMOKE_DAMAGE_PER_PUFF),
-        ),
+        WEAPON_BARREL_SMOKE_POOL_SIZE,
+        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
       );
       for (let puff = 0; puff < puffCount; puff += 1) {
         spawnWeaponSmoke(viewModel, false, smokePower);

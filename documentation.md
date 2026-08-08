@@ -565,11 +565,11 @@ changes a weapon's definition. The loadout always exposes six inventory slots, w
 weapon and `0` holstering. Walk-over pickup and `E` equip the nearest fixed weapon.
 
 The combat runtime keeps the visual-table weapon meshes, shared first-person camera/viewmodel/reticule path, recoil,
-tracers, impacts, bullet holes, reload poses, sniper scope, and spatial Web Audio. It includes a longer, dense white
-muzzle gunpowder plume with world-space velocity inheritance and pooled diffusion, plus separate thermal wisps driven
-by Celsius barrel glow. Barrels use the visual-table temperature thresholds and exponential cooling curve, while the
-powder plume uses the parametric-guns eased expansion and full-lifetime fade. Shot audio includes muzzle, crack, tail,
-and listener-relative bullet pass-by layers.
+tracers, impacts, bullet holes, reload poses, sniper scope, and spatial Web Audio. It uses the restrained visual-table
+gray muzzle plume with one-to-four damage-scaled puffs, world-space velocity inheritance, and pooled five-second
+diffusion, plus separate thermal wisps driven by Celsius barrel glow. Barrels use the visual-table temperature
+thresholds and exponential cooling curve. Shot audio includes muzzle, crack, tail, and listener-relative bullet pass-by
+layers.
 
 The scene adds a deterministic red simulant target. It spawns beyond the initial player position, charges until close,
 damages the player's shield/health at contact range, accepts weapon-ray damage, hides on defeat, and respawns after a

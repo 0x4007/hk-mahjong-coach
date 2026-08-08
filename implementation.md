@@ -30,8 +30,9 @@
   settings cannot restore the effect.
 - The latest server-owned test-bus run `1786166626340-3683-ed9e9389` recorded 491/495 passing assertions. The four
   failures are the pre-existing `packages/test-fixtures` core-engine and seeded-simulation property cases; all weapon
-  and scene suites passed, including the death-tumble regression. The final powder/thermal smoke split was applied
-  after the earlier snapshot; the follow-up strict typecheck and web production build passed. The checkpoint server is on port `4174`, but the connected Chrome
+  and scene suites passed, including the death-tumble regression. The restrained visual-table-style gray gunshot smoke
+  was selected over the denser checkpoint experiment; the follow-up strict typecheck and web production build passed.
+  The checkpoint server is on port `4174`, but the connected Chrome
   extension timed out while creating a test tab, so rendered weapon, smoke, and audio acceptance still needs a live
   browser tab.
 
