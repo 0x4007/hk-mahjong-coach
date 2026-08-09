@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "name": "sprint-acceleration",
+  "description": "Accelerate from rest toward the shared sprint cap while O2 is affordable.",
+  "seed": "continuous-head-motion/sprint-acceleration/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [{ "duration": 1, "forward": 1, "sprint": true, "label": "accelerate" }],
+  "expect": {
+    "requiredStates": ["grounded"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "sprint-builds-speed",
+        "field": "speed.horizontal",
+        "at": "last",
+        "label": "accelerate",
+        "min": 9.8,
+        "max": 10.21
+      },
+      {
+        "id": "sprint-spends-o2",
+        "field": "o2",
+        "at": "last",
+        "label": "accelerate",
+        "min": 95,
+        "max": 99.9
+      },
+      {
+        "id": "sprint-gait-is-visible",
+        "field": "camera.offsets.headBobDepth",
+        "at": "min",
+        "label": "accelerate",
+        "max": -0.0001
+      }
+    ]
+  }
+}

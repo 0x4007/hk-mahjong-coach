@@ -17,7 +17,6 @@ import {
   O2_MINI_HOP_SPEED_BLEND,
   O2_TROT_SPEED_BLEND,
   O2_PROJECTILE_DAMAGE_FACTOR,
-  O2_STAND_COST,
   O2_SPRINT_DRAIN_PER_SECOND,
   O2_SPRINT_DURATION_SECONDS,
   O2_SPRINT_RECOVERY_DELAY_SECONDS,
@@ -141,16 +140,13 @@ describe("player vitals model", () => {
     expect(jogging.o2).toBeCloseTo(depleted.o2 + expectedRecovery, 8);
   });
 
-  it("spends five percent oxygen on jumps and standing up", () => {
+  it("spends five percent oxygen on jumps", () => {
     const afterJump = applyPlayerO2Cost(
       createPlayerVitals(),
       O2_JUMP_COST,
       O2_JUMP_RECOVERY_DELAY_SECONDS,
     );
-    const next = applyPlayerO2Cost(afterJump, O2_STAND_COST);
-
     expect(afterJump.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.95, 8);
-    expect(next.o2).toBeCloseTo(PLAYER_MAX_O2 * 0.9, 8);
     expect(afterJump.oxygenRecoveryDelaySeconds).toBe(O2_JUMP_RECOVERY_DELAY_SECONDS);
   });
 
@@ -316,6 +312,19 @@ describe("player vitals model", () => {
     expect(rearmed.o2).toBeGreaterThan(O2_HOLD_BREATH_REARM_THRESHOLD);
     expect(rearmed.holdBreathLocked).toBe(false);
     expect(activatedAgain.holdingBreath).toBe(true);
+  });
+
+  it("keeps breath control locked at the exact rearm boundary", () => {
+    const held = setPlayerHoldingBreath(createPlayerVitals(), true, true);
+    const exhausted = tickPlayerVitals(held, 100, { aimingDownSights: true });
+    const exactBoundary = { ...exhausted, o2: O2_HOLD_BREATH_REARM_THRESHOLD };
+    const aboveBoundary = tickPlayerVitals(exactBoundary, 0.001);
+
+    expect(exactBoundary.o2).toBeCloseTo(O2_HOLD_BREATH_REARM_THRESHOLD, 10);
+    expect(exactBoundary.holdBreathLocked).toBe(true);
+    expect(setPlayerHoldingBreath(exactBoundary, true, true).holdingBreath).toBe(false);
+    expect(aboveBoundary.o2).toBeGreaterThan(O2_HOLD_BREATH_REARM_THRESHOLD);
+    expect(aboveBoundary.holdBreathLocked).toBe(false);
   });
 
   it("depletes the reserve after approximately twenty consecutive jumps", () => {

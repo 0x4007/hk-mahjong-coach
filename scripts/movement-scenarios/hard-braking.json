@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "name": "hard-braking",
+  "description": "Resolve a sprint-speed collision against a named wall and feed the measured stop into the camera damper.",
+  "seed": "continuous-head-motion/hard-braking/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, -10], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "brake-wall", "center": [0, 1.5, -1.5], "halfExtents": [2, 1.5, 0.2] }
+  ],
+  "frames": [{ "duration": 0.5, "forward": 1, "sprint": true, "label": "impact" }],
+  "expect": {
+    "requiredContactKinds": ["wall"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "wall-stops-forward-speed",
+        "field": "speed.horizontal",
+        "at": "last",
+        "label": "impact",
+        "max": 0.01
+      },
+      {
+        "id": "capsule-stays-before-wall",
+        "field": "position.z",
+        "at": "min",
+        "label": "impact",
+        "min": -1.05
+      },
+      {
+        "id": "hard-stop-acceleration-sign",
+        "field": "camera.input.acceleration.forward",
+        "at": "min",
+        "label": "impact",
+        "max": -100
+      },
+      {
+        "id": "collision-is-recorded",
+        "field": "collisions",
+        "at": "max",
+        "label": "impact",
+        "min": 1
+      }
+    ]
+  }
+}

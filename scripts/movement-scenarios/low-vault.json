@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "name": "low-vault",
+  "description": "Jump toward a half-metre named box and complete a continuous low vault onto support.",
+  "seed": "continuous-head-motion/low-vault/v2",
+  "physics": { "runtime": "rapier" },
+  "start": { "position": [0, 0.86, -0.1], "velocity": [0, 0, -2], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "low-vault-box", "center": [0, 0.15, -1], "halfExtents": [0.7, 0.15, 0.6] }
+  ],
+  "frames": [
+    { "duration": 0.12, "forward": 1, "jump": true, "label": "vault" },
+    { "duration": 0.5, "label": "settle" }
+  ],
+  "expect": {
+    "requiredEvents": [
+      { "kind": "vault-start" },
+      { "kind": "traversal-complete", "traversal": "vault" }
+    ],
+    "forbiddenEvents": [{ "kind": "traversal-cancel", "traversal": "vault" }],
+    "requiredStates": ["vault", "landing-recovery"],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "vault-has-interior-progress",
+        "field": "movement.progress",
+        "at": "max",
+        "label": "vault",
+        "min": 0.1,
+        "max": 1
+      },
+      {
+        "id": "vault-lands-on-box-height",
+        "field": "position.y",
+        "at": "last",
+        "label": "settle",
+        "equals": 1.16,
+        "tolerance": 0.05
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "name": "invalid-vault",
+  "description": "Reject traversal against a five-metre obstacle outside the vault, ledge, and wall-reach windows.",
+  "seed": "continuous-head-motion/invalid-vault/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0.4], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "too-high-wall", "center": [0, 2.5, -1], "halfExtents": [0.7, 2.5, 0.6] }
+  ],
+  "frames": [
+    { "duration": 0.45, "forward": 1, "jump": true, "label": "rejected-approach" },
+    { "duration": 0.5, "label": "fall" }
+  ],
+  "expect": {
+    "forbiddenEvents": [
+      { "kind": "vault-start" },
+      { "kind": "ledge-grab" },
+      { "kind": "wall-contact" }
+    ],
+    "forbiddenStates": ["vault", "ledge-grab", "wall-contact", "wall-climb"],
+    "ranges": [
+      {
+        "id": "invalid-vault-stays-before-face",
+        "field": "position.z",
+        "at": "min",
+        "label": "rejected-approach",
+        "min": -0.15
+      },
+      { "id": "invalid-vault-never-reaches-top", "field": "position.y", "at": "max", "max": 3 }
+    ]
+  }
+}

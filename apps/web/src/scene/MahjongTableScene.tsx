@@ -26,6 +26,7 @@ interface MahjongTableSceneProps {
   readonly reticlePosition?: ReticlePosition;
   readonly onMount?: (mount: MahjongTableMount | null) => void;
   readonly onMotionLookStatusChange?: (status: MotionLookStatus) => void;
+  readonly onCrouchingChange?: (crouching: boolean) => void;
   readonly onSprintingChange?: (sprinting: boolean) => void;
   readonly onSpeedChange?: (speed: number) => void;
   readonly onVitalsChange?: (vitals: PlayerVitalsState) => void;
@@ -45,6 +46,7 @@ export const MahjongTableScene = ({
   reticlePosition,
   onMount,
   onMotionLookStatusChange,
+  onCrouchingChange,
   onSprintingChange,
   onSpeedChange,
   onVitalsChange,
@@ -58,6 +60,7 @@ export const MahjongTableScene = ({
   const [sceneReady, setSceneReady] = useState(false);
   const onMountRef = useRef(onMount);
   const onMotionLookStatusChangeRef = useRef(onMotionLookStatusChange);
+  const onCrouchingChangeRef = useRef(onCrouchingChange);
   const onSprintingChangeRef = useRef(onSprintingChange);
   const onSpeedChangeRef = useRef(onSpeedChange);
   const onVitalsChangeRef = useRef(onVitalsChange);
@@ -71,6 +74,7 @@ export const MahjongTableScene = ({
   const appliedViewRef = useRef<SceneView | null>(null);
   onMountRef.current = onMount;
   onMotionLookStatusChangeRef.current = onMotionLookStatusChange;
+  onCrouchingChangeRef.current = onCrouchingChange;
   onSprintingChangeRef.current = onSprintingChange;
   onSpeedChangeRef.current = onSpeedChange;
   onVitalsChangeRef.current = onVitalsChange;
@@ -106,6 +110,7 @@ export const MahjongTableScene = ({
           onExplorationAreaChange: (area) => onExplorationAreaChangeRef.current?.(area),
           ...(onVisualAreaChange === undefined ? {} : { onVisualAreaChange }),
           onMotionLookStatusChange: (status) => onMotionLookStatusChangeRef.current?.(status),
+          onCrouchingChange: (crouching) => onCrouchingChangeRef.current?.(crouching),
           onSprintingChange: (sprinting) => onSprintingChangeRef.current?.(sprinting),
           onSpeedChange: (speed) => onSpeedChangeRef.current?.(speed),
           onVitalsChange: (vitals) => onVitalsChangeRef.current?.(vitals),

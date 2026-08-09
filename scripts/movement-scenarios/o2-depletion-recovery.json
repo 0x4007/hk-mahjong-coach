@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "name": "o2-depletion-recovery",
+  "description": "Deplete O2 through sprinting, perform a zero-reserve fallback jump, and recover while resting.",
+  "seed": "continuous-head-motion/o2-depletion-recovery/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 5 },
+  "frames": [
+    { "duration": 2, "forward": 1, "sprint": true, "label": "deplete" },
+    { "duration": 0.08, "jump": true, "label": "fallback-jump" },
+    { "duration": 3.2, "label": "recover" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "jump", "result": "fallback" }, { "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery", "grounded"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "o2-reaches-exhaustion",
+        "field": "o2",
+        "at": "min",
+        "label": "deplete",
+        "min": 0,
+        "max": 0.1
+      },
+      {
+        "id": "fallback-jump-is-smaller",
+        "field": "velocity.y",
+        "at": "max",
+        "label": "fallback-jump",
+        "min": 8.8,
+        "max": 9.5
+      },
+      { "id": "rest-recovers-o2", "field": "o2", "at": "last", "label": "recover", "min": 15 },
+      {
+        "id": "exhaustion-adds-sway",
+        "field": "camera.offsets.aimSwayX",
+        "at": "max",
+        "label": "deplete",
+        "min": 0.0001
+      }
+    ]
+  }
+}

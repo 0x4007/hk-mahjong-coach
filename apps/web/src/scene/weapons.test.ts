@@ -14,7 +14,6 @@ import {
   resolveWeaponReloadInsertionImpulse,
   resolveWeaponRoundReloadPose,
   resolveWeaponReloadSeconds,
-  resolveWeaponRecoilAmount,
   resolveWeaponStoppingPower,
   WEAPON_STOPPING_POWER_MAX_METERS_PER_SECOND,
   WEAPON_STOPPING_POWER_METERS_PER_SECOND_PER_DAMAGE,
@@ -248,16 +247,6 @@ describe("weapon definitions", () => {
     expect(canInterruptWeaponReload(WEAPON_DEFINITIONS.sniper, 1)).toBe(true);
     expect(canInterruptWeaponReload(WEAPON_DEFINITIONS.sniper, 0)).toBe(false);
     expect(canInterruptWeaponReload(WEAPON_DEFINITIONS.pistol, 1)).toBe(false);
-  });
-
-  it("scales the local weapon kick from each projectile's damage", () => {
-    const recoil = WEAPON_IDS.map((weapon) =>
-      resolveWeaponRecoilAmount(WEAPON_DEFINITIONS[weapon].damage),
-    );
-    expect(recoil[0]!).toBeGreaterThan(recoil[2]!);
-    expect(recoil[2]!).toBeGreaterThan(0);
-    expect(recoil[1]!).toBeGreaterThan(recoil[2]!);
-    expect(recoil[3]!).toBeGreaterThan(recoil[0]!);
   });
 
   it("gives every weapon a separated front post and open rear notch", () => {

@@ -2211,3 +2211,36 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Added pure score reducer coverage for zero state, immutable updates, and both actors. Strict typecheck, targeted
   ESLint, targeted Prettier, and `git diff --check` pass. The server-owned test bus must publish a post-change snapshot;
   no Vite client is connected in this worktree, so HMR and rendered browser acceptance remain pending.
+
+## 2026-08-09 — Continuous head-motion movement prototype
+
+- Added one pure typed movement controller for grounded, airborne, crouch/slide, vault, wall-contact, wall-climb,
+  ledge-grab, and landing-recovery behavior. It accelerates toward bounded ground or air targets, preserves release
+  momentum, brakes reversals more strongly, latches Jump input, and produces deterministic full or fallback jumps.
+  Standing and crouching are free at zero O₂; only a full jump spends the 5-point jump cost.
+- Split contextual top traversal into low vaults through 0.9 m and ledge grab/pull-up through 2.0 m. Wall contact now
+  requires an airborne validated contact; release Jump after attachment and make a fresh Jump press to request a climb.
+  Active traversal cancels on released input, lost contact, invalid destination clearance, or a source collider whose
+  stable ID now refers to changed centre, extent, or rotation geometry.
+- Kept the physics capsule authoritative through every traversal arc and supported landing query. Source-only ascent
+  contact is accepted, while unrelated blocking contact cancels the arc. Camera gait, acceleration, take-off, landing,
+  breathing, recoil, and traversal response remain render-only outputs of the central damper. The acceleration
+  target-and-response cascade is integrated exactly for held input, so sustained roll and pitch agree at 60 and 120 Hz
+  and decay through the same two stages after acceleration stops.
+- Unified the visible ring, centre dot, aim ray, focus ray, and held viewmodel through the moving
+  `ReticlePresentation`. A projectile or melee query keeps its pre-action ray; the rendered camera, held item, reticle,
+  and later focus consumers immediately recompose one post-action damper snapshot without a second time step. The final
+  vertical presentation offset is clamped to physics-derived support and ceiling clearance. Full-O₂ stationary
+  breathing and reserve-driven aim motion are exactly zero.
+- Replaced the legacy movement fixtures with 21 unique-seed schema-v2 scenarios. The simulator runs controller → O₂ →
+  physics → contact feedback → vitals → camera damper and records full position, velocity, contact, traversal, event,
+  O₂, camera, and visible/aim/focus traces. On the final source candidate, all 21 scenarios pass their embedded
+  assertions twice with byte-identical JSON. Repository formatting, full lint, strict typecheck, the production build,
+  and `git diff --check` pass; the production web build reports only its existing large-chunk warning. Server-owned
+  test-bus run `1786257773809-36855-1053f1f4` matched dirty fingerprint
+  `5eea0031b5d8fcac2de239bdba906404678767fa4c7547187991c2d7cb143d18` and passed all 629 tests across 134 suites.
+  Browser, HMR, Playwright, and computer-use validation were intentionally not run; browser acceptance remains with
+  the user in one existing window.
+- The v2 hard cut retires the old wall-hang and vault fixture filenames. The required scenario matrix now covers the
+  live catch/re-arm/climb-release flow, while focused scene regressions retain skinny-wall and rotated generated-wall
+  geometry coverage.

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "name": "airborne-wall-contact",
+  "description": "Jump into a reachable named wall and retain wall contact after Jump is released.",
+  "seed": "continuous-head-motion/airborne-wall-contact/v2",
+  "physics": { "runtime": "rapier" },
+  "start": { "position": [0, 0.86, -2], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "reachable-wall", "center": [0, 2, -4], "halfExtents": [0.7, 2, 0.5] }
+  ],
+  "frames": [
+    { "duration": 0.35, "forward": 1, "sprint": true, "jump": true, "label": "catch" },
+    { "duration": 0.25, "label": "release-on-wall" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "wall-contact" }],
+    "forbiddenEvents": [{ "kind": "wall-climb-request" }],
+    "requiredStates": ["wall-contact"],
+    "finalGrounded": false,
+    "finalState": "wall-contact",
+    "ranges": [
+      {
+        "id": "wall-contact-holds-vertical-position",
+        "field": "velocity.y",
+        "at": "last",
+        "label": "release-on-wall",
+        "equals": 0,
+        "tolerance": 0.05
+      },
+      {
+        "id": "wall-contact-is-stabilized",
+        "field": "camera.offsets.aimSwayX",
+        "at": "max",
+        "label": "release-on-wall",
+        "max": 0.001
+      }
+    ]
+  }
+}

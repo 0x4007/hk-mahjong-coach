@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 2,
+  "name": "low-ledge-landing",
+  "description": "Drop from a fixed low ledge height and resolve one small landing on floor support.",
+  "seed": "continuous-head-motion/low-ledge-landing/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 1.66, 0.4], "velocity": [0, 0, -2], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "low-drop-source", "center": [0, 0.4, 0.8], "halfExtents": [1, 0.4, 0.5] }
+  ],
+  "frames": [{ "duration": 0.8, "label": "drop-and-land" }],
+  "expect": {
+    "requiredEvents": [{ "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery", "grounded"],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "low-drop-impact",
+        "field": "velocity.y",
+        "at": "min",
+        "label": "drop-and-land",
+        "min": -10,
+        "max": -4
+      },
+      {
+        "id": "low-drop-camera-compression",
+        "field": "camera.offsets.verticalOffset",
+        "at": "min",
+        "label": "drop-and-land",
+        "max": -0.001
+      }
+    ]
+  }
+}

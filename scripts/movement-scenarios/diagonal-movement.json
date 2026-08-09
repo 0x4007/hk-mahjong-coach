@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "name": "diagonal-movement",
+  "description": "Accelerate on equal forward and right axes without exceeding the active cap.",
+  "seed": "continuous-head-motion/diagonal-movement/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [{ "duration": 1, "forward": 1, "right": 1, "label": "diagonal" }],
+  "expect": {
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "diagonal-right-component",
+        "field": "velocity.x",
+        "at": "last",
+        "label": "diagonal",
+        "min": 3.4,
+        "max": 3.7
+      },
+      {
+        "id": "diagonal-forward-component",
+        "field": "velocity.z",
+        "at": "last",
+        "label": "diagonal",
+        "min": -3.7,
+        "max": -3.4
+      },
+      {
+        "id": "diagonal-cap",
+        "field": "speed.horizontal",
+        "at": "max",
+        "label": "diagonal",
+        "max": 5.11
+      }
+    ]
+  }
+}

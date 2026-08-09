@@ -19,6 +19,7 @@ import {
   resolveLedgeClimbTargetCameraY,
   resolveLedgeGrabTarget,
   resolveLedgeClimbMomentum,
+  resolveCameraVerticalOffsetBounds,
   resolveVaultTarget,
   resolveVaultTraversalArcHeight,
   resolveVaultTraversalDuration,
@@ -46,10 +47,8 @@ import {
   resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
   shouldInterruptReloadForMelee,
-  resolveJumpLaunchSpeed,
+  resolveReticlePresentation,
   resolveReticleZoomViewOffset,
-  resolveWeaponShotReticleOffset,
-  ZOOM_RECOIL_FEEDBACK_MULTIPLIER,
   resolveDesktopAimInput,
   resolveCoverLeanInput,
   resolveCoverModeFromAimTransition,
@@ -87,6 +86,7 @@ import {
   PLAYER_TROT_SPEED_KILOMETERS_PER_HOUR,
   PLAYER_TROT_SPEED_METERS_PER_SECOND,
   PLAYER_WALK_MULTIPLIER,
+  WORLD_EPSILON,
 } from "./world-scale.js";
 
 describe("melee and gun handoff", () => {
@@ -514,15 +514,6 @@ describe("jump posture", () => {
     expect(resolveWalkingModeAfterJump(false, true)).toBe(false);
     expect(resolveWalkingModeAfterJump(true, false)).toBe(true);
   });
-
-  it("uses a reduced free launch when the full O₂ jump charge is unavailable", () => {
-    const fullJump = resolveJumpLaunchSpeed(true);
-    const miniHop = resolveJumpLaunchSpeed(false);
-
-    expect(miniHop).toBeGreaterThan(0);
-    expect(miniHop).toBeLessThan(fullJump);
-    expect(miniHop / fullJump).toBeCloseTo(12 / 17, 8);
-  });
 });
 
 describe("sprint posture", () => {
@@ -577,38 +568,42 @@ describe("reticule-anchored seat zoom", () => {
   });
 });
 
-describe("shot direction reticule", () => {
-  it("does not turn cover roll into an optical reticle shift", () => {
-    const motion = {
-      roll: 0.2,
-      coverLeanRoll: 0.2,
-      verticalOffset: 0,
-      aimSwayX: 0,
-      aimSwayY: 0,
-      recoilYaw: 0,
-      recoilPitch: 0,
-    };
+describe("shared reticle presentation", () => {
+  const motion = {
+    roll: 0.01,
+    coverLeanRoll: 0.002,
+    headBobLateral: 0.015,
+    verticalOffset: -0.02,
+    headBobPitch: 0.004,
+    aimSwayX: 0.003,
+    aimSwayY: -0.002,
+    recoilYaw: 0.006,
+    recoilPitch: -0.005,
+  } as const;
 
-    expect(resolveWeaponShotReticleOffset(motion, false)).toEqual({ x: 0, y: 0 });
+  it("uses one immutable dot offset for visible CSS and aim NDC", () => {
+    const presentation = resolveReticlePresentation({ x: 0.5, y: 0.6 }, motion, 800, 600);
+
+    expect(Object.isFrozen(presentation)).toBe(true);
+    expect(Object.isFrozen(presentation.basePosition)).toBe(true);
+    expect(Object.isFrozen(presentation.ringOffsetCssPixels)).toBe(true);
+    expect(Object.isFrozen(presentation.dotOffsetCssPixels)).toBe(true);
+    expect(Object.isFrozen(presentation.aimNdc)).toBe(true);
+    expect(presentation.aimNdc.x).toBeCloseTo((presentation.dotOffsetCssPixels.x * 2) / 800, 12);
+    expect(presentation.aimNdc.y).toBeCloseTo(
+      -0.2 - (presentation.dotOffsetCssPixels.y * 2) / 600,
+      12,
+    );
   });
 
-  it("keeps full hip-fire recoil feedback and damps it for zoom direction selection", () => {
-    const motion = {
-      roll: 0.01,
-      verticalOffset: 0.02,
-      aimSwayX: 0.003,
-      aimSwayY: -0.002,
-      recoilYaw: 0.04,
-      recoilPitch: -0.03,
-    };
-    const base = resolveWeaponShotReticleOffset(motion, false);
-    const hip = resolveWeaponShotReticleOffset(motion, true);
-    const zoom = resolveWeaponShotReticleOffset(motion, true, ZOOM_RECOIL_FEEDBACK_MULTIPLIER);
+  it("updates only the base component when the configured position changes", () => {
+    const first = resolveReticlePresentation({ x: 0.5, y: 0.6 }, motion, 800, 600);
+    const moved = resolveReticlePresentation({ x: 0.25, y: 0.4 }, motion, 800, 600);
 
-    expect(hip.x - base.x).toBeCloseTo(0.04 * 180 * 5, 8);
-    expect(hip.y - base.y).toBeCloseTo(-0.03 * 180 * 5, 8);
-    expect(zoom.x - base.x).toBeCloseTo(0.04 * 180 * 5 * ZOOM_RECOIL_FEEDBACK_MULTIPLIER, 8);
-    expect(zoom.y - base.y).toBeCloseTo(-0.03 * 180 * 5 * ZOOM_RECOIL_FEEDBACK_MULTIPLIER, 8);
+    expect(moved.ringOffsetCssPixels).toEqual(first.ringOffsetCssPixels);
+    expect(moved.dotOffsetCssPixels).toEqual(first.dotOffsetCssPixels);
+    expect(moved.aimNdc.x - first.aimNdc.x).toBeCloseTo(-0.5, 12);
+    expect(moved.aimNdc.y - first.aimNdc.y).toBeCloseTo(0.4, 12);
   });
 });
 
@@ -1319,6 +1314,41 @@ describe("ledge vaulting helpers", () => {
     expect(target?.y).toBeCloseTo(1.86);
   });
 
+  it("keeps a rotated ledge target in the collider's local landing footprint", () => {
+    const fromPosition: PhysicsVector = { x: 0.8, y: 0.86, z: -0.6 };
+    const target = resolveLedgeGrabTarget(
+      fromPosition,
+      { x: 0, y: 0, z: 0.6 },
+      0,
+      [
+        {
+          center: { x: 0, y: 0.75, z: 0 },
+          halfExtents: { x: 0.5, y: 0.75, z: 2 },
+          rotationY: Math.PI / 2,
+        },
+      ],
+      [],
+    );
+
+    expect(target).not.toBeNull();
+    expect(target?.x).toBeCloseTo(0.8, 6);
+    expect(target?.z).toBeCloseTo(0.16, 6);
+    expect(target?.y).toBeCloseTo(2.36, 6);
+  });
+
+  it("bounds composed head motion between support and a rotated ceiling", () => {
+    const bounds = resolveCameraVerticalOffsetBounds({ x: 0, y: 0.86, z: 0 }, 1.75, [
+      {
+        center: { x: 0, y: 2.15, z: 0 },
+        halfExtents: { x: 1, y: 0.25, z: 0.2 },
+        rotationY: Math.PI / 4,
+      },
+    ]);
+
+    expect(bounds.min).toBeCloseTo(-1.75, 8);
+    expect(bounds.max).toBeCloseTo(0.15 - WORLD_EPSILON, 8);
+  });
+
   it("locks ledge transition camera to a 1.75m eye height", () => {
     expect(resolveLedgeClimbTargetCameraY(1.86)).toBeCloseTo(2.75);
     expect(LEDGE_CLIMB_EYE_HEIGHT_METERS).toBe(1.75);
@@ -1390,7 +1420,7 @@ describe("wall hanging helper", () => {
       halfExtents: { x: 0.5, y: 0.4, z: 0.5 },
     };
 
-    expect(WALL_HANG_MIN_TOP).toBeCloseTo(1.6 + 0.05);
+    expect(WALL_HANG_MIN_TOP).toBe(2);
     expect(
       resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [shortWall]),
     ).toBeNull();
@@ -1417,7 +1447,7 @@ describe("wall hanging helper", () => {
 
   it("catches a higher platform during an airborne approach before the apex", () => {
     const platformFace: PhysicsBox = {
-      center: { x: 0, y: 2.24, z: -4 },
+      center: { x: 0, y: 2.64, z: -4 },
       halfExtents: { x: 0.5, y: 0.08, z: 0.5 },
     };
 
@@ -1436,13 +1466,13 @@ describe("wall hanging helper", () => {
       halfExtents: { x: 0.75, y: 0.08, z: 0.5 },
     };
 
-    const target = resolveWallHangTarget({ x: 0, y: 2.17, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
+    const target = resolveWallHangTarget({ x: 0, y: 2.05, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
       thinPlatform,
     ]);
 
     expect(target).not.toBeNull();
     expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-    expect(target?.y).toBeCloseTo(2.17, 6);
+    expect(target?.y).toBeCloseTo(2.05, 6);
   });
 
   it("rejects walls outside lateral overlap or beyond reach", () => {
@@ -1497,10 +1527,11 @@ describe("wall hanging helper", () => {
       center: { x: 0, y: 1.6, z: -4 },
       halfExtents: { x: 0.5, y: 1.6, z: 0.5 },
     };
-    const target = resolveWallHangTarget({ x: 0, y: 2.17, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
+    const target = resolveWallHangTarget({ x: 0, y: 2.05, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
       wall,
     ]);
 
+    expect(target).not.toBeNull();
     expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
   });
 
@@ -1580,7 +1611,7 @@ describe("wall hanging helper", () => {
 
   it("resolves a valid hang from the safe position just before a contact response", () => {
     const wall: PhysicsBox = {
-      center: { x: -70, y: 1.9, z: -12 },
+      center: { x: -70, y: 1.95, z: -12 },
       halfExtents: { x: 0.25, y: 1.9, z: 3 },
     };
     const resolution = resolveWallHangTargetDetails(
@@ -1589,6 +1620,7 @@ describe("wall hanging helper", () => {
       [wall],
     );
 
+    expect(resolution).not.toBeNull();
     expect(resolution?.target.x).toBeCloseTo(-70.52, 6);
     expect(resolution?.target.y).toBeCloseTo(2.7, 6);
     expect(resolution?.target.z).toBeCloseTo(-12, 6);

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "name": "sprint-release",
+  "description": "Release input from sprint velocity and retain bounded forward momentum before stopping.",
+  "seed": "continuous-head-motion/sprint-release/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, -10], "grounded": true, "o2": 100 },
+  "frames": [{ "duration": 1.5, "label": "release" }],
+  "expect": {
+    "requiredStates": ["grounded"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "release-keeps-first-frame-momentum",
+        "field": "speed.horizontal",
+        "at": "first",
+        "label": "release",
+        "min": 8.5,
+        "max": 10
+      },
+      {
+        "id": "release-decays-near-rest",
+        "field": "speed.horizontal",
+        "at": "last",
+        "label": "release",
+        "min": 0,
+        "max": 0.06
+      }
+    ]
+  }
+}

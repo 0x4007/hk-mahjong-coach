@@ -81,8 +81,8 @@ describe("continuous O₂ stability response", () => {
 
     expect(controlled.reticleSwayRadians).toBeGreaterThan(0);
     expect(controlled.weaponSwayRadians).toBeGreaterThan(0);
-    expect(controlled.reticleSwayRadians).toBeCloseTo(restedControlled.reticleSwayRadians, 12);
-    expect(controlled.weaponSwayRadians).toBeCloseTo(restedControlled.weaponSwayRadians, 12);
+    expect(restedControlled.reticleSwayRadians).toBe(0);
+    expect(restedControlled.weaponSwayRadians).toBe(0);
     expect(controlled.reticleSwayRadians).toBeLessThan(strained.reticleSwayRadians);
     expect(controlled.weaponSwayRadians).toBeLessThan(strained.weaponSwayRadians);
     expect(controlled.accuracyMultiplier).toBeLessThan(strained.accuracyMultiplier);

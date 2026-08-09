@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "name": "crouch-movement",
+  "description": "Crouch-walk and return to standing when starting at zero O2.",
+  "seed": "continuous-head-motion/crouch-movement/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 0 },
+  "frames": [
+    { "duration": 0.8, "forward": 1, "crouch": true, "label": "crouch-walk" },
+    { "duration": 0.8, "label": "stand" }
+  ],
+  "expect": {
+    "finalGrounded": true,
+    "finalState": "grounded",
+    "ranges": [
+      {
+        "id": "crouch-speed-cap",
+        "field": "speed.horizontal",
+        "at": "max",
+        "label": "crouch-walk",
+        "max": 1.71
+      },
+      {
+        "id": "zero-o2-crouch-start",
+        "field": "o2",
+        "at": "first",
+        "label": "crouch-walk",
+        "equals": 0,
+        "tolerance": 0
+      },
+      { "id": "standing-recovers-o2", "field": "o2", "at": "last", "label": "stand", "min": 3.5 }
+    ]
+  }
+}

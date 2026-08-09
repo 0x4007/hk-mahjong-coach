@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "name": "ledge-contact-loss",
+  "description": "Remove a named ledge during pull-up and cancel into ordinary airborne physics.",
+  "seed": "continuous-head-motion/ledge-contact-loss/v2",
+  "physics": { "runtime": "rapier" },
+  "start": { "position": [0, 0.86, -0.1], "velocity": [0, 0, -2], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "loss-ledge", "center": [0, 0.65, -1], "halfExtents": [0.8, 0.65, 0.6] }
+  ],
+  "frames": [
+    { "duration": 0.15, "forward": 1, "jump": true, "label": "grab" },
+    {
+      "duration": 0.12,
+      "jump": true,
+      "disabledObstacleIds": ["loss-ledge"],
+      "label": "contact-loss"
+    },
+    { "duration": 0.8, "disabledObstacleIds": ["loss-ledge"], "label": "fall" }
+  ],
+  "expect": {
+    "requiredEvents": [
+      { "kind": "ledge-grab" },
+      { "kind": "traversal-cancel", "traversal": "ledge-grab" }
+    ],
+    "forbiddenEvents": [{ "kind": "traversal-complete", "traversal": "ledge-grab" }],
+    "requiredStates": ["ledge-grab", "airborne"],
+    "finalGrounded": true,
+    "ranges": [
+      { "id": "contact-loss-falls", "field": "velocity.y", "at": "min", "label": "fall", "max": -1 }
+    ]
+  }
+}

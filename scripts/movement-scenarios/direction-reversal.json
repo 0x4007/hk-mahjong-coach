@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "name": "direction-reversal",
+  "description": "Apply the stronger reversal brake before accelerating backward.",
+  "seed": "continuous-head-motion/direction-reversal/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, -8], "grounded": true, "o2": 100 },
+  "frames": [{ "duration": 0.7, "forward": -1, "label": "reverse" }],
+  "expect": {
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "reversal-starts-with-forward-momentum",
+        "field": "velocity.z",
+        "at": "first",
+        "label": "reverse",
+        "max": -1
+      },
+      {
+        "id": "reversal-crosses-into-backward-motion",
+        "field": "velocity.z",
+        "at": "last",
+        "label": "reverse",
+        "min": 4.8,
+        "max": 5.11
+      },
+      {
+        "id": "reversal-acceleration-is-negative-forward",
+        "field": "camera.input.acceleration.forward",
+        "at": "min",
+        "label": "reverse",
+        "max": -100
+      }
+    ]
+  }
+}

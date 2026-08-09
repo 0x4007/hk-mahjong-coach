@@ -18,6 +18,8 @@ export interface PhysicsVector {
 }
 
 export interface PhysicsBox {
+  /** Stable obstacle identity used by movement contacts and simulation traces. */
+  readonly obstacleId?: string;
   readonly center: PhysicsVector;
   readonly halfExtents: PhysicsVector;
   readonly rotationX?: number;
@@ -33,10 +35,23 @@ export interface PhysicsBox {
   readonly angularDamping?: number;
 }
 
+export type PhysicsContactKind = "support" | "wall" | "ceiling";
+
+export interface PhysicsContact {
+  readonly kind: PhysicsContactKind;
+  /** World-space outward normal on the obstacle. */
+  readonly normal: PhysicsVector;
+  /** World-space point on the obstacle. */
+  readonly point: PhysicsVector;
+  readonly obstacleId: string;
+  readonly dynamicId?: number;
+}
+
 export interface PhysicsMovement {
   readonly position: PhysicsVector;
   readonly grounded: boolean;
   readonly collisions: number;
+  readonly contacts: readonly PhysicsContact[];
 }
 
 export interface PhysicsBodyState {
@@ -72,6 +87,51 @@ const FALLBACK_CAPSULE_RADIUS = PLAYER_CAPSULE_RADIUS;
 const FALLBACK_CAPSULE_CENTER_HEIGHT = PLAYER_CAPSULE_CENTER_HEIGHT;
 const FALLBACK_AUTOSTEP_HEIGHT = PLAYER_AUTOSTEP_HEIGHT;
 const FALLBACK_EPSILON = WORLD_EPSILON;
+
+const finiteIdentityNumber = (value: number | undefined): string =>
+  Number.isFinite(value) ? String(value) : "0";
+
+/** Capture collider geometry separately from a stable authored obstacle ID. */
+export const resolvePhysicsBoxGeometrySignature = (box: PhysicsBox): string =>
+  [
+    finiteIdentityNumber(box.center.x),
+    finiteIdentityNumber(box.center.y),
+    finiteIdentityNumber(box.center.z),
+    finiteIdentityNumber(box.halfExtents.x),
+    finiteIdentityNumber(box.halfExtents.y),
+    finiteIdentityNumber(box.halfExtents.z),
+    finiteIdentityNumber(box.rotationX),
+    finiteIdentityNumber(box.rotationY),
+    finiteIdentityNumber(box.rotationZ),
+  ].join(":");
+
+/** Resolve a deterministic identity when authored geometry does not supply one. */
+export const resolvePhysicsBoxObstacleId = (box: PhysicsBox): string =>
+  box.obstacleId ??
+  (box.dynamicId === undefined
+    ? [
+        "box",
+        finiteIdentityNumber(box.center.x),
+        finiteIdentityNumber(box.center.y),
+        finiteIdentityNumber(box.center.z),
+        finiteIdentityNumber(box.halfExtents.x),
+        finiteIdentityNumber(box.halfExtents.y),
+        finiteIdentityNumber(box.halfExtents.z),
+        finiteIdentityNumber(box.rotationX),
+        finiteIdentityNumber(box.rotationY),
+        finiteIdentityNumber(box.rotationZ),
+      ].join(":")
+    : `dynamic:${String(box.dynamicId)}`);
+
+export const classifyPhysicsContact = (normal: PhysicsVector): PhysicsContactKind => {
+  if (normal.y >= 0.5) {
+    return "support";
+  }
+  if (normal.y <= -0.5) {
+    return "ceiling";
+  }
+  return "wall";
+};
 
 const fallbackVerticalOverlap = (centerY: number, box: PhysicsBox): boolean => {
   const bottom = centerY - FALLBACK_CAPSULE_CENTER_HEIGHT;
@@ -132,6 +192,21 @@ export const createFallbackMahjongPhysics = (
   const move = (position: PhysicsVector, desiredDelta: PhysicsVector): PhysicsMovement => {
     let next: PhysicsVector = { ...position };
     const collisionBoxes = new Set<PhysicsBox>();
+    const contactByBox = new Map<PhysicsBox, PhysicsContact>();
+    const registerContact = (
+      box: PhysicsBox,
+      normal: PhysicsVector,
+      point: PhysicsVector,
+    ): void => {
+      collisionBoxes.add(box);
+      contactByBox.set(box, {
+        kind: classifyPhysicsContact(normal),
+        normal,
+        point,
+        obstacleId: resolvePhysicsBoxObstacleId(box),
+        ...(box.dynamicId === undefined ? {} : { dynamicId: box.dynamicId }),
+      });
+    };
 
     // Resolve vertical motion first. This lets a jump clear a short obstacle
     // before horizontal movement is tested, while a falling capsule still
@@ -148,7 +223,7 @@ export const createFallbackMahjongPhysics = (
         const nextFeet = desiredY - FALLBACK_CAPSULE_CENTER_HEIGHT;
         if (startFeet >= boxTop - FALLBACK_EPSILON && nextFeet <= boxTop + FALLBACK_EPSILON) {
           next = { ...next, y: boxTop + FALLBACK_CAPSULE_CENTER_HEIGHT };
-          collisionBoxes.add(box);
+          registerContact(box, { x: 0, y: 1, z: 0 }, { x: position.x, y: boxTop, z: position.z });
           verticalResolved = true;
           break;
         }
@@ -167,8 +242,11 @@ export const createFallbackMahjongPhysics = (
         const nextHead = desiredY + FALLBACK_CAPSULE_CENTER_HEIGHT;
         if (startHead <= boxBottom + FALLBACK_EPSILON && nextHead >= boxBottom - FALLBACK_EPSILON) {
           next = { ...next, y: boxBottom - FALLBACK_CAPSULE_CENTER_HEIGHT };
-          collisionBoxes.add(box);
-          verticalResolved = true;
+          registerContact(
+            box,
+            { x: 0, y: -1, z: 0 },
+            { x: position.x, y: boxBottom, z: position.z },
+          );
           break;
         }
       }
@@ -201,7 +279,15 @@ export const createFallbackMahjongPhysics = (
           const steppedY = topY + FALLBACK_CAPSULE_CENTER_HEIGHT;
           if (!fallbackVerticalOverlap(steppedY, box)) {
             next = { ...next, y: steppedY, [axis]: candidate };
-            collisionBoxes.add(box);
+            registerContact(
+              box,
+              { x: 0, y: 1, z: 0 },
+              {
+                x: axis === "x" ? candidate : next.x,
+                y: topY,
+                z: axis === "z" ? candidate : next.z,
+              },
+            );
             return;
           }
         }
@@ -215,7 +301,15 @@ export const createFallbackMahjongPhysics = (
             ? minAxis - FALLBACK_CAPSULE_RADIUS - FALLBACK_EPSILON
             : maxAxis + FALLBACK_CAPSULE_RADIUS + FALLBACK_EPSILON;
         next = { ...next, [axis]: safeAxis };
-        collisionBoxes.add(box);
+        const normal: PhysicsVector =
+          axis === "x"
+            ? { x: amount > 0 ? -1 : 1, y: 0, z: 0 }
+            : { x: 0, y: 0, z: amount > 0 ? -1 : 1 };
+        registerContact(box, normal, {
+          x: axis === "x" ? (amount > 0 ? minAxis : maxAxis) : next.x,
+          y: next.y,
+          z: axis === "z" ? (amount > 0 ? minAxis : maxAxis) : next.z,
+        });
         return;
       }
       next = { ...next, [axis]: candidate };
@@ -235,7 +329,11 @@ export const createFallbackMahjongPhysics = (
         if (next.y <= supportedY + PLAYER_SUPPORT_SNAP_HEIGHT + FALLBACK_EPSILON) {
           next = { ...next, y: supportedY };
           grounded = true;
-          collisionBoxes.add(support.box);
+          registerContact(
+            support.box,
+            { x: 0, y: 1, z: 0 },
+            { x: next.x, y: support.topY, z: next.z },
+          );
         }
       }
     }
@@ -244,6 +342,7 @@ export const createFallbackMahjongPhysics = (
       position: next,
       grounded,
       collisions: collisionBoxes.size,
+      contacts: [...contactByBox.values()],
     };
   };
 
@@ -358,6 +457,17 @@ export const createMahjongPhysics = async (
   const dynamicColliders: RAPIER.Collider[] = [];
   const streamedStaticColliders: RAPIER.Collider[] = [];
   const dynamicBodies = new Map<number, RAPIER.RigidBody>();
+  const colliderMetadata = new Map<number, Readonly<{ obstacleId: string; dynamicId?: number }>>();
+  for (let index = 0; index < staticColliders.length; index += 1) {
+    const collider = staticColliders[index];
+    const box = staticBoxes[index];
+    if (collider !== undefined && box !== undefined) {
+      colliderMetadata.set(collider.handle, {
+        obstacleId: resolvePhysicsBoxObstacleId(box),
+        ...(box.dynamicId === undefined ? {} : { dynamicId: box.dynamicId }),
+      });
+    }
+  }
   // Build Rapier's broad phase before the first character query. Static
   // colliders added after a world step otherwise are not visible to the
   // controller until the next simulation update.
@@ -392,25 +502,63 @@ export const createMahjongPhysics = async (
       if (dynamicsEnabled) {
         world.step();
       }
+      const collisionCount = characterController.numComputedCollisions();
+      const contacts: PhysicsContact[] = [];
+      for (let index = 0; index < collisionCount; index += 1) {
+        const collision = characterController.computedCollision(index);
+        if (collision === null) {
+          continue;
+        }
+        const normal: PhysicsVector = {
+          x: collision.normal1.x,
+          y: collision.normal1.y,
+          z: collision.normal1.z,
+        };
+        const metadata =
+          collision.collider === null ? undefined : colliderMetadata.get(collision.collider.handle);
+        contacts.push({
+          kind: classifyPhysicsContact(normal),
+          normal,
+          point: {
+            x: collision.witness1.x,
+            y: collision.witness1.y,
+            z: collision.witness1.z,
+          },
+          obstacleId:
+            metadata?.obstacleId ??
+            (collision.collider === null
+              ? `collision:${String(index)}`
+              : `collider:${String(collision.collider.handle)}`),
+          ...(metadata?.dynamicId === undefined ? {} : { dynamicId: metadata.dynamicId }),
+        });
+      }
       return {
         position: nextPosition,
         grounded: characterController.computedGrounded(),
-        collisions: characterController.numComputedCollisions(),
+        collisions: collisionCount,
+        contacts,
       };
     },
     setDynamicBoxes: (boxes) => {
       for (const collider of streamedStaticColliders) {
+        colliderMetadata.delete(collider.handle);
         world.removeCollider(collider, true);
       }
       streamedStaticColliders.length = 0;
       for (const collider of dynamicColliders) {
+        colliderMetadata.delete(collider.handle);
         world.removeCollider(collider, true);
       }
       dynamicColliders.length = 0;
       dynamicBodies.clear();
       for (const box of boxes) {
         if (box.dynamic !== true) {
-          streamedStaticColliders.push(addStaticBox(world, box));
+          const collider = addStaticBox(world, box);
+          streamedStaticColliders.push(collider);
+          colliderMetadata.set(collider.handle, {
+            obstacleId: resolvePhysicsBoxObstacleId(box),
+            ...(box.dynamicId === undefined ? {} : { dynamicId: box.dynamicId }),
+          });
           continue;
         }
         if (box.dynamicId === undefined) {
@@ -419,6 +567,10 @@ export const createMahjongPhysics = async (
         const { body, collider } = addDynamicBox(world, { ...box, dynamicId: box.dynamicId });
         dynamicBodies.set(box.dynamicId, body);
         dynamicColliders.push(collider);
+        colliderMetadata.set(collider.handle, {
+          obstacleId: resolvePhysicsBoxObstacleId(box),
+          dynamicId: box.dynamicId,
+        });
       }
       dynamicsEnabled = dynamicColliders.length > 0 || streamedStaticColliders.length > 0;
       // Rebuild the broad phase immediately so a newly streamed chunk is
@@ -480,6 +632,7 @@ export const createMahjongPhysics = async (
         ...streamedStaticColliders,
         ...dynamicColliders,
       ]) {
+        colliderMetadata.delete(collider.handle);
         world.removeCollider(collider, true);
       }
       world.free();

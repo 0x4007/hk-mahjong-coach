@@ -10,12 +10,9 @@ import {
 import {
   DEBUG_BOKEH_STRENGTH_MAX,
   DEFAULT_ROOM_SEED,
-  DEFAULT_RETICLE_POSITION,
   MAHJONG_TABLE_HMR_EVENT,
   normalizeVisualRoomSeed,
   readVisualDebugPreferences,
-  RETICLE_DOT_MOTION_MULTIPLIER,
-  RETICLE_RING_MOTION_MULTIPLIER,
 } from "./scene/mahjong-table.js";
 import {
   PLAYER_MAX_HEALTH,
@@ -116,8 +113,6 @@ const debugQualityModes: readonly { readonly value: VisualQualityMode; readonly 
     { value: "medium", label: "Medium" },
     { value: "low", label: "Low" },
   ];
-const RETICLE_POSITION = DEFAULT_RETICLE_POSITION;
-
 const MOTION_LOOK_PREFERENCE_STORAGE_KEY = "hk-mahjong-coach:mobile-motion-look:v1";
 const VISUAL_DEBUG_STATE_ENDPOINT = "/__codex/visual-debug-state";
 const VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS = 5000;
@@ -173,6 +168,24 @@ const INITIAL_MAP_QUERY_VALUE = new URLSearchParams(window.location.search).get(
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const HMR_SCENE_MODULE_PATH_PATTERN = /\/scene\/(?:mahjong-table|MahjongTableScene)/;
+
+const hasHmrSceneModuleUpdate = (payload: unknown): boolean => {
+  if (!isRecord(payload)) {
+    return false;
+  }
+  const updates = payload.updates;
+  return (
+    Array.isArray(updates) &&
+    updates.some(
+      (update: unknown) =>
+        isRecord(update) &&
+        typeof update.path === "string" &&
+        HMR_SCENE_MODULE_PATH_PATTERN.test(update.path),
+    )
+  );
+};
+
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
@@ -225,7 +238,7 @@ const getStoredVisualQualityMode = (): VisualQualityMode | null => {
 
 const getInitialVisualQualityMode = (): VisualQualityMode => {
   const stored = getStoredVisualQualityMode();
-  return stored === null ? "adaptive" : stored;
+  return stored ?? "adaptive";
 };
 
 const writeVisualQualityMode = (mode: VisualQualityMode): void => {
@@ -310,7 +323,7 @@ const loadPersistedVisualDebugState = async (): Promise<PersistedVisualDebugScen
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), VISUAL_DEBUG_STATE_LOAD_TIMEOUT_MS);
   try {
-    const response = await fetch(`${VISUAL_DEBUG_STATE_ENDPOINT}?r=${Date.now()}`, {
+    const response = await fetch(`${VISUAL_DEBUG_STATE_ENDPOINT}?r=${String(Date.now())}`, {
       cache: "no-store",
       signal: controller.signal,
     });
@@ -1366,9 +1379,10 @@ const App = (): React.JSX.Element => {
       return;
     }
     let aborted = false;
+    const isAborted = (): boolean => aborted;
     void (async (): Promise<void> => {
       const persisted = await loadPersistedVisualDebugState();
-      if (aborted) {
+      if (isAborted()) {
         return;
       }
       if (persisted !== null) {
@@ -1446,22 +1460,20 @@ const App = (): React.JSX.Element => {
           return;
         }
         try {
-          const { x, y } = mount.getReticleBobbingOffset();
-          reticleElement.style.setProperty(
-            "--scene-reticule-bob-x",
-            `${x * RETICLE_RING_MOTION_MULTIPLIER}px`,
-          );
-          reticleElement.style.setProperty(
-            "--scene-reticule-bob-y",
-            `${y * RETICLE_RING_MOTION_MULTIPLIER}px`,
-          );
+          const presentation = mount.getReticlePresentation();
+          const ringOffset = presentation.ringOffsetCssPixels;
+          const dotOffset = presentation.dotOffsetCssPixels;
+          reticleElement.style.left = `${String(presentation.basePosition.x * 100)}%`;
+          reticleElement.style.top = `${String(presentation.basePosition.y * 100)}%`;
+          reticleElement.style.setProperty("--scene-reticule-bob-x", `${String(ringOffset.x)}px`);
+          reticleElement.style.setProperty("--scene-reticule-bob-y", `${String(ringOffset.y)}px`);
           reticleElement.style.setProperty(
             "--scene-reticule-dot-bob-x",
-            `${x * (RETICLE_DOT_MOTION_MULTIPLIER - RETICLE_RING_MOTION_MULTIPLIER)}px`,
+            `${String(dotOffset.x - ringOffset.x)}px`,
           );
           reticleElement.style.setProperty(
             "--scene-reticule-dot-bob-y",
-            `${y * (RETICLE_DOT_MOTION_MULTIPLIER - RETICLE_RING_MOTION_MULTIPLIER)}px`,
+            `${String(dotOffset.y - ringOffset.y)}px`,
           );
           reticleBobbingFrame.current = window.requestAnimationFrame(applyReticleBobbing);
         } catch {
@@ -1649,11 +1661,31 @@ const App = (): React.JSX.Element => {
       setIsCrouched(nextCrouched);
     }
   };
-  const jump = (): void => {
-    const nextCrouched = mountRef.current?.jump();
+  const setJumpInput = (pressed: boolean): void => {
+    const nextCrouched = mountRef.current?.setJumpInput(pressed);
     if (nextCrouched !== undefined) {
       setIsCrouched(nextCrouched);
     }
+  };
+  const handleJumpPointerDown = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setJumpInput(true);
+  };
+  const handleJumpPointerEnd = (event: React.PointerEvent<HTMLButtonElement>): void => {
+    event.preventDefault();
+    setJumpInput(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+  const handleJumpKeyboardClick = (event: React.MouseEvent<HTMLButtonElement>): void => {
+    if (event.detail !== 0) {
+      return;
+    }
+    setJumpInput(true);
+    window.queueMicrotask(() => setJumpInput(false));
   };
   const fire = (): void => {
     mountRef.current?.fire();
@@ -1725,34 +1757,13 @@ const App = (): React.JSX.Element => {
     window.addEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
     import.meta.hot?.on(HMR_TEST_NOTE_EVENT, onHmrTestNote);
 
+    const onAfterUpdate = (payload: unknown): void => {
+      if (hasHmrSceneModuleUpdate(payload)) {
+        onSceneHotReload();
+      }
+    };
     const disposeAfterUpdate =
-      import.meta.hot?.on(
-        "vite:afterUpdate",
-        (
-          payload:
-            | {
-                readonly updates?: readonly {
-                  readonly path?: string;
-                }[];
-              }
-            | undefined,
-        ): void => {
-          const updates = payload?.updates;
-          if (!Array.isArray(updates)) {
-            return;
-          }
-          if (
-            updates.some(
-              (update) =>
-                typeof update?.path === "string" &&
-                (update.path.includes("/scene/mahjong-table") ||
-                  update.path.includes("/scene/MahjongTableScene")),
-            )
-          ) {
-            onSceneHotReload();
-          }
-        },
-      ) ?? (() => {});
+      import.meta.hot?.on("vite:afterUpdate", onAfterUpdate) ?? (() => undefined);
 
     return () => {
       window.removeEventListener(MAHJONG_TABLE_HMR_EVENT, onSceneHotReload);
@@ -1807,16 +1818,16 @@ const App = (): React.JSX.Element => {
         >
           {persistedVisualStateReady ? (
             <MahjongTableScene
-              key={`scene-${hmrSceneEpoch}-${mapId}-${roomSeed}-${enabledAreaKey}`}
+              key={`scene-${String(hmrSceneEpoch)}-${mapId}-${roomSeed}-${enabledAreaKey}`}
               debug={DEBUG_PANEL_ENABLED}
               enabledAreas={enabledAreaIds}
               mapId={mapId}
-              reticlePosition={RETICLE_POSITION}
               onVisualAreaChange={handleVisualAreaChange}
               roomSeed={roomSeed}
               view={view}
               onMount={handleMount}
               onMotionLookStatusChange={handleMotionLookStatusChange}
+              onCrouchingChange={setIsCrouched}
               onSprintingChange={setIsSprinting}
               onSpeedChange={setPlayerSpeed}
               onVitalsChange={setPlayerVitals}
@@ -1851,7 +1862,6 @@ const App = (): React.JSX.Element => {
               isSprinting ? " is-sprinting" : ""
             }${weaponState.reloading ? " is-reloading" : ""}`}
             aria-hidden="true"
-            style={{ left: `${RETICLE_POSITION.x * 100}%`, top: `${RETICLE_POSITION.y * 100}%` }}
           >
             <span />
           </div>
@@ -1983,7 +1993,7 @@ const App = (): React.JSX.Element => {
                   className="scene-vitals-track"
                   role="progressbar"
                 >
-                  <span style={{ width: `${shieldPercent}%` }} />
+                  <span style={{ width: `${String(shieldPercent)}%` }} />
                 </div>
               </div>
               <div className="scene-vitals-row scene-vitals-health">
@@ -1995,7 +2005,7 @@ const App = (): React.JSX.Element => {
                   className="scene-vitals-track"
                   role="progressbar"
                 >
-                  <span style={{ width: `${healthPercent}%` }} />
+                  <span style={{ width: `${String(healthPercent)}%` }} />
                 </div>
               </div>
               <div className="scene-vitals-row scene-vitals-o2">
@@ -2007,7 +2017,7 @@ const App = (): React.JSX.Element => {
                   className="scene-vitals-track"
                   role="progressbar"
                 >
-                  <span style={{ width: `${o2Percent}%` }} />
+                  <span style={{ width: `${String(o2Percent)}%` }} />
                 </div>
               </div>
             </div>
@@ -2118,7 +2128,7 @@ const App = (): React.JSX.Element => {
                 swing ·{" "}
                 {meleeState.swinging
                   ? "Swinging"
-                  : `${meleeState.swings} swings · ${meleeState.hits} ragdoll hits`}
+                  : `${String(meleeState.swings)} swings · ${String(meleeState.hits)} ragdoll hits`}
               </small>
             ) : null}
           </div>
@@ -2148,8 +2158,11 @@ const App = (): React.JSX.Element => {
                 </button>
                 <button
                   className="mobile-action-button"
-                  onClick={() => handleMobileActionClick(jump)}
-                  onPointerDown={(event) => handleMobileActionPointerDown(jump, event)}
+                  onClick={handleJumpKeyboardClick}
+                  onPointerCancel={handleJumpPointerEnd}
+                  onPointerDown={handleJumpPointerDown}
+                  onPointerLeave={handleJumpPointerEnd}
+                  onPointerUp={handleJumpPointerEnd}
                   type="button"
                 >
                   Jump

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "name": "jump",
+  "description": "Spend the full jump cost, enter airborne movement, and land once on floor support.",
+  "seed": "continuous-head-motion/jump/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [
+    { "duration": 0.08, "jump": true, "label": "takeoff" },
+    { "duration": 1, "label": "flight-and-land" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "jump", "result": "full" }, { "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery"],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "ranges": [
+      { "id": "jump-launch-speed", "field": "velocity.y", "at": "max", "min": 12.5, "max": 13.3 },
+      { "id": "jump-spends-five-o2", "field": "o2", "at": "min", "min": 84, "max": 95 },
+      { "id": "jump-has-downward-flight", "field": "velocity.y", "at": "min", "max": -5 }
+    ]
+  }
+}

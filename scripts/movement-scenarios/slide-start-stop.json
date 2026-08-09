@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "name": "slide-start-stop",
+  "description": "Enter a slide from sprint speed, decay without reversing, and stop on crouch release.",
+  "seed": "continuous-head-motion/slide-start-stop/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [
+    { "duration": 0.8, "forward": 1, "sprint": true, "label": "sprint" },
+    { "duration": 0.35, "forward": 1, "sprint": true, "crouch": true, "label": "slide" },
+    { "duration": 0.2, "label": "release" },
+    { "duration": 0.3, "label": "settle" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "slide-start" }, { "kind": "slide-end" }],
+    "requiredStates": ["slide", "grounded"],
+    "finalGrounded": true,
+    "finalState": "grounded",
+    "ranges": [
+      {
+        "id": "slide-retains-entry-speed",
+        "field": "speed.horizontal",
+        "at": "first",
+        "label": "slide",
+        "min": 8
+      },
+      {
+        "id": "slide-decelerates",
+        "field": "speed.horizontal",
+        "at": "last",
+        "label": "slide",
+        "min": 1,
+        "max": 8.5
+      },
+      {
+        "id": "slide-does-not-reverse",
+        "field": "velocity.z",
+        "at": "max",
+        "label": "slide",
+        "max": 0
+      }
+    ]
+  }
+}

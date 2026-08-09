@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "name": "top-support",
+  "description": "Complete a low vault and retain named top support without capsule penetration.",
+  "seed": "continuous-head-motion/top-support/v2",
+  "physics": { "runtime": "rapier" },
+  "start": { "position": [0, 0.86, -0.1], "velocity": [0, 0, -2], "grounded": true, "o2": 100 },
+  "staticBoxes": [
+    { "obstacleId": "support-box", "center": [0, 0.15, -1], "halfExtents": [0.9, 0.15, 0.7] }
+  ],
+  "frames": [
+    { "duration": 0.12, "forward": 1, "jump": true, "label": "traverse" },
+    { "duration": 0.5, "label": "supported" }
+  ],
+  "expect": {
+    "requiredEvents": [
+      { "kind": "vault-start" },
+      { "kind": "traversal-complete", "traversal": "vault" }
+    ],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "capsule-bottom-matches-top",
+        "field": "position.y",
+        "at": "last",
+        "label": "supported",
+        "equals": 1.16,
+        "tolerance": 0.05
+      },
+      {
+        "id": "support-has-no-vertical-drift",
+        "field": "velocity.y",
+        "at": "last",
+        "label": "supported",
+        "equals": 0,
+        "tolerance": 0.05
+      }
+    ]
+  }
+}

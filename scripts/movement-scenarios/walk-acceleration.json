@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "name": "walk-acceleration",
+  "description": "Accelerate from rest to the shared walking target on level support.",
+  "seed": "continuous-head-motion/walk-acceleration/v2",
+  "frameDurationSec": 0.016666666666666666,
+  "physics": { "runtime": "fallback" },
+  "start": {
+    "position": [0, 0.86, 0],
+    "velocity": [0, 0, 0],
+    "yaw": 0,
+    "grounded": true,
+    "o2": 100
+  },
+  "frames": [
+    {
+      "duration": 1,
+      "forward": 1,
+      "walking": true,
+      "label": "accelerate"
+    }
+  ],
+  "expect": {
+    "requiredStates": ["grounded"],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "finalState": "grounded",
+    "ranges": [
+      {
+        "id": "walk-starts-below-target",
+        "field": "speed.horizontal",
+        "at": "first",
+        "label": "accelerate",
+        "min": 0.1,
+        "max": 1
+      },
+      {
+        "id": "walk-reaches-target",
+        "field": "speed.horizontal",
+        "at": "last",
+        "label": "accelerate",
+        "min": 3.2,
+        "max": 3.41
+      },
+      {
+        "id": "walk-gait-is-visible",
+        "field": "camera.offsets.headBobLateral",
+        "at": "max",
+        "label": "accelerate",
+        "min": 0.0001
+      }
+    ]
+  }
+}

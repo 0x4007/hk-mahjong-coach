@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createFallbackMahjongPhysics,
   createMahjongPhysics,
+  resolvePhysicsBoxGeometrySignature,
   type PhysicsBox,
 } from "./mahjong-physics.js";
 
@@ -18,8 +19,36 @@ const TEST_COLLIDERS: readonly PhysicsBox[] = [
 ];
 
 describe("mahjong physics", () => {
+  it("keeps a stable obstacle ID separate from mutable collider geometry", () => {
+    const original: PhysicsBox = {
+      obstacleId: "streamed-wall",
+      center: { x: 1, y: 2, z: 3 },
+      halfExtents: { x: 4, y: 5, z: 6 },
+      rotationY: Math.PI / 4,
+    };
+    const moved: PhysicsBox = {
+      ...original,
+      center: { ...original.center, x: 1.25 },
+    };
+    const rotated: PhysicsBox = {
+      ...original,
+      rotationY: Math.PI / 2,
+    };
+
+    expect(resolvePhysicsBoxGeometrySignature({ ...original })).toBe(
+      resolvePhysicsBoxGeometrySignature(original),
+    );
+    expect(resolvePhysicsBoxGeometrySignature(moved)).not.toBe(
+      resolvePhysicsBoxGeometrySignature(original),
+    );
+    expect(resolvePhysicsBoxGeometrySignature(rotated)).not.toBe(
+      resolvePhysicsBoxGeometrySignature(original),
+    );
+  });
+
   it("keeps traversal collisions available in the fallback controller", () => {
     const wall: PhysicsBox = {
+      obstacleId: "fallback-wall",
       center: { x: 0, y: 2, z: -4 },
       halfExtents: { x: 0.5, y: 2, z: 0.5 },
     };
@@ -30,6 +59,38 @@ describe("mahjong physics", () => {
       expect(movement.position.z).toBeGreaterThan(-3.77);
       expect(movement.position.z).toBeLessThan(-3.2);
       expect(movement.grounded).toBe(true);
+      expect(movement.contacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "wall",
+            obstacleId: "fallback-wall",
+            normal: { x: 0, y: 0, z: 1 },
+          }),
+          expect.objectContaining({ kind: "support" }),
+        ]),
+      );
+    } finally {
+      physics.dispose();
+    }
+  });
+
+  it("reports ceiling contacts with a normal, point, and obstacle identity", () => {
+    const physics = createFallbackMahjongPhysics([
+      {
+        obstacleId: "ceiling",
+        center: { x: 0, y: 2.1, z: 0 },
+        halfExtents: { x: 2, y: 0.1, z: 2 },
+      },
+    ]);
+    try {
+      const movement = physics.move({ x: 0, y: 1, z: 0 }, { x: 0, y: 0.5, z: 0 });
+
+      expect(movement.contacts).toContainEqual({
+        kind: "ceiling",
+        normal: { x: 0, y: -1, z: 0 },
+        point: { x: 0, y: 2, z: 0 },
+        obstacleId: "ceiling",
+      });
     } finally {
       physics.dispose();
     }

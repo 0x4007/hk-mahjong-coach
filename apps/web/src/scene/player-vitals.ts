@@ -45,9 +45,6 @@ export const O2_JUMP_COST = PLAYER_MAX_O2 * 0.05;
 export const O2_MINI_HOP_SPEED_BLEND =
   O2_IDLE_RECOVERY_PER_SECOND / (O2_IDLE_RECOVERY_PER_SECOND + O2_JUMP_COST);
 
-/** Oxygen spent by standing up from a crouch. */
-export const O2_STAND_COST = PLAYER_MAX_O2 * 0.05;
-
 /** Delay before recovery starts after sprinting stops. */
 export const O2_SPRINT_RECOVERY_DELAY_SECONDS = 1.5;
 

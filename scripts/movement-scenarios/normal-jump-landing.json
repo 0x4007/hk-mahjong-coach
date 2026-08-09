@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 2,
+  "name": "normal-jump-landing",
+  "description": "Resolve a standard full jump and its landing recovery on floor support.",
+  "seed": "continuous-head-motion/normal-jump-landing/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [
+    { "duration": 0.08, "jump": true, "label": "takeoff" },
+    { "duration": 1.2, "label": "land-and-recover" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "jump", "result": "full" }, { "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery", "grounded"],
+    "finalGrounded": true,
+    "finalState": "grounded",
+    "ranges": [
+      {
+        "id": "normal-impact-speed",
+        "field": "velocity.y",
+        "at": "min",
+        "label": "land-and-recover",
+        "min": -14,
+        "max": -10
+      },
+      {
+        "id": "normal-landing-compression",
+        "field": "camera.offsets.verticalOffset",
+        "at": "min",
+        "label": "land-and-recover",
+        "max": -0.005
+      }
+    ]
+  }
+}

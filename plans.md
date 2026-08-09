@@ -126,6 +126,21 @@ Evidence recorded 2026-08-03:
   legal-action controls, save/resume, responsive layout, and keyboard operation.
 - Acceptance: seeded hand in browser, observation parity, and keyboard smoke test.
 
+Experimental continuous head-motion prototype evidence recorded 2026-08-09 (does not complete Milestone 7):
+
+- A typed shared controller now covers momentum locomotion, full/fallback jumping, slide, low vault, ledge grab,
+  wall contact/climb, traversal cancellation/completion, and landing recovery while physics retains capsule authority.
+- The central camera damper consumes resolved velocity and clearance, then drives the camera, held viewmodel, moving
+  reticle, aim ray, and focus ray. Full-O₂ stationary presentation is zero, standing/crouching remain free, and local
+  action impulses publish one coherent post-action render snapshot.
+- The hard-cut schema-v2 simulator contains the required 21 unique-seed scenarios. On the final source candidate, each
+  scenario passed twice with byte-identical JSON and no failed embedded assertion.
+- Repository formatting, full lint, strict typecheck, the production build, and `git diff --check` pass. Server-owned
+  test-bus run `1786257773809-36855-1053f1f4` matched dirty fingerprint
+  `5eea0031b5d8fcac2de239bdba906404678767fa4c7547187991c2d7cb143d18` and passed all 629 tests across 134 suites.
+  Browser, HMR, Playwright, and computer-use validation are excluded from this implementation run. The user must still
+  complete the real one-window browser acceptance, so the visual-table milestone remains pending.
+
 ## Milestone 8 — Teacher, learner model, curriculum, and drills (`pending`)
 
 - Implement analysis facts, calibrated templates, modes/hints, post-hand review, mastery/evidence

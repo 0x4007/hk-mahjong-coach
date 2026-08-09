@@ -35,6 +35,12 @@ export interface CameraLocalFrame {
   readonly up: CameraMotionVector;
 }
 
+/** Physics-derived clearance for the final composed vertical presentation offset. */
+export interface CameraVerticalOffsetBounds {
+  readonly min: number;
+  readonly max: number;
+}
+
 export interface CameraMotionUpdateInput {
   readonly deltaSeconds: number;
   /** Actual acceleration in the player's local frame. */
@@ -63,6 +69,8 @@ export interface CameraMotionUpdateInput {
   readonly traversalActive?: boolean;
   /** The resolved movement duration for the active vault or wall climb. */
   readonly traversalDurationSeconds?: number;
+  /** Support and ceiling clearance measured from the post-physics base camera pose. */
+  readonly verticalOffsetBounds?: CameraVerticalOffsetBounds;
 }
 
 export interface CameraWeaponShotInput {
@@ -111,6 +119,8 @@ export interface CameraMotionOffsets {
   readonly recoilYaw: number;
   /** Short-lived local pitch impulse in radians; positive follows screen-down. */
   readonly recoilPitch: number;
+  /** Normalized camera-owned weapon kick depth used by every held gun. */
+  readonly viewmodelRecoilDepth: number;
   /** Composed local pose for the camera-attached first-person viewmodel. */
   readonly viewmodelOffset: CameraViewmodelOffset;
   /** Short discard/equip transition for the camera-attached viewmodel. */
@@ -154,8 +164,8 @@ export interface CameraViewmodelTransition {
 
 export interface CameraMotionDamper {
   readonly update: (input: CameraMotionUpdateInput) => CameraMotionOffsets;
-  readonly applyWeaponShotImpulse: (shot: CameraWeaponShotInput) => void;
-  readonly applyMeleeImpactImpulse: (impact: CameraMeleeImpactInput) => void;
+  readonly applyWeaponShotImpulse: (shot: CameraWeaponShotInput) => CameraMotionOffsets;
+  readonly applyMeleeImpactImpulse: (impact: CameraMeleeImpactInput) => CameraMotionOffsets;
   /** Start the short first-person fall/tumble used when the player dies. */
   readonly applyDeathTumble: () => void;
   readonly applyWeaponSwitchImpulse: (input: CameraWeaponSwitchInput) => void;
@@ -346,6 +356,18 @@ export const CAMERA_RECOIL_SPRING = 1200;
  * firing speed only determines how often new impulses enter this state.
  */
 export const CAMERA_RECOIL_DAMPING = 34;
+/** Maximum one-shot contribution to the normalized held-weapon depth kick. */
+export const CAMERA_VIEWMODEL_RECOIL_MAX_AMOUNT = 0.52;
+/** Shared recovery rate for the held-weapon depth kick. */
+export const CAMERA_VIEWMODEL_RECOIL_DAMPING = 18;
+
+/** Resolve damage into the camera-owned normalized held-weapon depth kick. */
+export const resolveCameraViewmodelRecoilAmount = (damage: number): number =>
+  Math.min(
+    CAMERA_VIEWMODEL_RECOIL_MAX_AMOUNT,
+    (Math.max(0, Number.isFinite(damage) ? damage : 0) / CAMERA_RECOIL_REFERENCE_DAMAGE) *
+      CAMERA_VIEWMODEL_RECOIL_MAX_AMOUNT,
+  );
 
 /** Shared melee stopping-power scale used to bound a view impact. */
 export const CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND = 18;
@@ -362,6 +384,25 @@ const clamp = (value: number, min: number, max: number): number =>
 
 const damp = (current: number, target: number, damping: number, deltaSeconds: number): number =>
   current + (target - current) * (1 - Math.exp(-damping * deltaSeconds));
+
+/** Integrate the target-and-response acceleration filter exactly over one held input step. */
+const integrateAccelerationCascade = (
+  target: number,
+  response: number,
+  source: number,
+  deltaSeconds: number,
+): readonly [target: number, response: number] => {
+  const targetDecay = Math.exp(-CAMERA_ACCELERATION_TARGET_DAMPING * deltaSeconds);
+  const responseDecay = Math.exp(-CAMERA_ACCELERATION_DAMPING * deltaSeconds);
+  const targetDelta = target - source;
+  const coupling =
+    (CAMERA_ACCELERATION_DAMPING * (targetDecay - responseDecay)) /
+    (CAMERA_ACCELERATION_DAMPING - CAMERA_ACCELERATION_TARGET_DAMPING);
+  return [
+    source + targetDelta * targetDecay,
+    response * responseDecay + source * (1 - responseDecay) + targetDelta * coupling,
+  ];
+};
 
 const resolveFiniteMotionVector = (vector: CameraMotionVector): CameraMotionVector => ({
   x: Number.isFinite(vector.x) ? vector.x : 0,
@@ -810,6 +851,7 @@ const createDefaultOffsets = (): CameraMotionOffsets => ({
   verticalOffset: 0,
   recoilYaw: 0,
   recoilPitch: 0,
+  viewmodelRecoilDepth: 0,
   viewmodelOffset: { ...CAMERA_VIEWMODEL_STANDING_OFFSET },
   viewmodelTransition: createIdleViewmodelTransition(),
   aimSwayX: 0,
@@ -835,6 +877,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let recoilYawVelocity = 0;
   let recoilPitch = 0;
   let recoilPitchVelocity = 0;
+  let viewmodelRecoilDepth = 0;
   const pendingRecoilRecoveries: PendingRecoilRecovery[] = [];
   let crouchAmount = 0;
   let aimAmount = 0;
@@ -907,6 +950,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     recoilYawVelocity = 0;
     recoilPitch = 0;
     recoilPitchVelocity = 0;
+    viewmodelRecoilDepth = 0;
     pendingRecoilRecoveries.length = 0;
     crouchAmount = 0;
     aimAmount = 0;
@@ -924,26 +968,31 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     offsets = createDefaultOffsets();
   };
 
-  const applyWeaponShotImpulse = (shot: CameraWeaponShotInput): void => {
+  const applyWeaponShotImpulse = (shot: CameraWeaponShotInput): CameraMotionOffsets => {
+    viewmodelRecoilDepth = Math.min(
+      1,
+      viewmodelRecoilDepth + resolveCameraViewmodelRecoilAmount(shot.damage),
+    );
     const impulse = resolveCameraWeaponShotImpulse(shot);
-    if (impulse.yaw === 0 && impulse.pitch === 0) {
-      return;
+    if (impulse.yaw !== 0 || impulse.pitch !== 0) {
+      recoilYaw += impulse.yaw;
+      recoilPitch += impulse.pitch;
+      const recoveryVelocity =
+        CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
+      pendingRecoilRecoveries.push({
+        remainingSeconds: CAMERA_RECOIL_RECOVERY_DELAY_SECONDS,
+        yawVelocity: -impulse.yaw * recoveryVelocity,
+        pitchVelocity: -impulse.pitch * recoveryVelocity,
+      });
     }
-    recoilYaw += impulse.yaw;
-    recoilPitch += impulse.pitch;
-    const recoveryVelocity =
-      CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
-    pendingRecoilRecoveries.push({
-      remainingSeconds: CAMERA_RECOIL_RECOVERY_DELAY_SECONDS,
-      yawVelocity: -impulse.yaw * recoveryVelocity,
-      pitchVelocity: -impulse.pitch * recoveryVelocity,
-    });
+    offsets = { ...offsets, recoilYaw, recoilPitch, viewmodelRecoilDepth };
+    return offsets;
   };
 
-  const applyMeleeImpactImpulse = (impact: CameraMeleeImpactInput): void => {
+  const applyMeleeImpactImpulse = (impact: CameraMeleeImpactInput): CameraMotionOffsets => {
     const impulse = resolveCameraMeleeImpactImpulse(impact);
     if (impulse.yaw === 0 && impulse.pitch === 0) {
-      return;
+      return offsets;
     }
     recoilYaw += impulse.yaw;
     recoilPitch += impulse.pitch;
@@ -954,6 +1003,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       yawVelocity: -impulse.yaw * recoveryVelocity,
       pitchVelocity: -impulse.pitch * recoveryVelocity,
     });
+    offsets = { ...offsets, recoilYaw, recoilPitch };
+    return offsets;
   };
 
   const applyWeaponSwitchImpulse = (input: CameraWeaponSwitchInput): void => {
@@ -1039,8 +1090,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       deltaSeconds,
     );
 
-    if (input.shiftEnabled && Math.abs(localAcceleration.right) > Number.EPSILON) {
-      accelerationRollTarget = resolveCameraAccelerationRoll(localAcceleration.right);
+    const hasLateralAcceleration =
+      input.shiftEnabled && Math.abs(localAcceleration.right) > Number.EPSILON;
+    const accelerationRollSource = hasLateralAcceleration
+      ? resolveCameraAccelerationRoll(localAcceleration.right)
+      : 0;
+    if (hasLateralAcceleration) {
       // A hard stop is a one-frame delta-v impulse. Add only the overload to
       // the current damper state so ordinary sprint response stays unchanged,
       // while a wall or prop stop is visible immediately instead of waiting
@@ -1057,21 +1112,19 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         );
       }
     }
-    accelerationRollTarget = damp(
+    [accelerationRollTarget, accelerationRoll] = integrateAccelerationCascade(
       accelerationRollTarget,
-      0,
-      CAMERA_ACCELERATION_TARGET_DAMPING,
-      deltaSeconds,
-    );
-    accelerationRoll = damp(
       accelerationRoll,
-      accelerationRollTarget,
-      CAMERA_ACCELERATION_DAMPING,
+      accelerationRollSource,
       deltaSeconds,
     );
 
-    if (input.shiftEnabled && Math.abs(localAcceleration.forward) > Number.EPSILON) {
-      accelerationPitchTarget = resolveCameraAccelerationPitch(localAcceleration.forward);
+    const hasForwardAcceleration =
+      input.shiftEnabled && Math.abs(localAcceleration.forward) > Number.EPSILON;
+    const accelerationPitchSource = hasForwardAcceleration
+      ? resolveCameraAccelerationPitch(localAcceleration.forward)
+      : 0;
+    if (hasForwardAcceleration) {
       const overload = -resolveCameraAccelerationOverload(
         localAcceleration.forward,
         CAMERA_ACCELERATION_PITCH_MAX,
@@ -1084,16 +1137,10 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         );
       }
     }
-    accelerationPitchTarget = damp(
+    [accelerationPitchTarget, accelerationPitch] = integrateAccelerationCascade(
       accelerationPitchTarget,
-      0,
-      CAMERA_ACCELERATION_TARGET_DAMPING,
-      deltaSeconds,
-    );
-    accelerationPitch = damp(
       accelerationPitch,
-      accelerationPitchTarget,
-      CAMERA_ACCELERATION_DAMPING,
+      accelerationPitchSource,
       deltaSeconds,
     );
 
@@ -1122,7 +1169,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       (input.crouching ? O2_CROUCH_STABILITY_FACTOR : 1) *
       (input.stabilizedByWall === true ? O2_BRACED_STABILITY_FACTOR : 1);
     const breathingAmplitude = input.bobEnabled
-      ? (CAMERA_BREATHING_BASE_AMPLITUDE +
+      ? (CAMERA_BREATHING_BASE_AMPLITUDE * breathlessness +
           CAMERA_BREATHING_MAX_AMPLITUDE * effectiveBreathlessness) *
         bracedBreathingFactor
       : 0;
@@ -1142,10 +1189,14 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       stabilizedByWall: input.stabilizedByWall === true,
     });
     aimSwayPhase += deltaSeconds * CAMERA_AIM_SWAY_FREQUENCY;
-    const aimSwayX = input.bobEnabled ? Math.sin(aimSwayPhase) * stability.reticleSwayRadians : 0;
-    const aimSwayY = input.bobEnabled
-      ? Math.cos(aimSwayPhase * 0.83) * stability.reticleSwayRadians * 0.78
-      : 0;
+    const aimSwayX =
+      input.bobEnabled && stability.reticleSwayRadians !== 0
+        ? Math.sin(aimSwayPhase) * stability.reticleSwayRadians
+        : 0;
+    const aimSwayY =
+      input.bobEnabled && stability.reticleSwayRadians !== 0
+        ? Math.cos(aimSwayPhase * 0.83) * stability.reticleSwayRadians * 0.78
+        : 0;
 
     weightVelocity += resolveCameraVerticalWeightImpulse(localAcceleration.up, deltaSeconds);
     weightVelocity += -weightShift * CAMERA_WEIGHT_SPRING * deltaSeconds;
@@ -1190,6 +1241,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     [recoilPitch, recoilPitchVelocity] = integrateRecoilAxis(
       recoilPitch,
       recoilPitchVelocity,
+      deltaSeconds,
+    );
+    viewmodelRecoilDepth = damp(
+      viewmodelRecoilDepth,
+      0,
+      CAMERA_VIEWMODEL_RECOIL_DAMPING,
       deltaSeconds,
     );
 
@@ -1239,6 +1296,16 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     }
     const viewmodelTransition = traversalTransition ?? switchTransition;
 
+    const rawVerticalOffset = headBob + weightShift + deathDrop;
+    const verticalOffsetBounds = input.verticalOffsetBounds;
+    const verticalOffset =
+      verticalOffsetBounds === undefined
+        ? rawVerticalOffset
+        : clamp(
+            rawVerticalOffset,
+            Math.min(verticalOffsetBounds.min, verticalOffsetBounds.max),
+            Math.max(verticalOffsetBounds.min, verticalOffsetBounds.max),
+          );
     offsets = {
       roll: accelerationRoll + coverLeanRoll + deathRoll,
       coverLeanRoll,
@@ -1248,9 +1315,10 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       headBobDepth: gait.headBobDepth,
       headBobPitch,
       weightShift,
-      verticalOffset: headBob + weightShift + deathDrop,
+      verticalOffset,
       recoilYaw,
       recoilPitch: recoilPitch + deathPitch,
+      viewmodelRecoilDepth,
       viewmodelOffset: resolveCameraViewmodelOffset(crouchAmount, aimAmount),
       viewmodelTransition,
       aimSwayX,

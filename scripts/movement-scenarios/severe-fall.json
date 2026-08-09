@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "name": "severe-fall",
+  "description": "Fall from a fixed high airborne start without tunnelling and produce the strongest landing response.",
+  "seed": "continuous-head-motion/severe-fall/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 8, 0], "velocity": [0, 0, 0], "grounded": false, "o2": 100 },
+  "frames": [{ "duration": 1.4, "label": "severe-fall" }],
+  "expect": {
+    "requiredEvents": [{ "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery", "grounded"],
+    "requiredContactKinds": ["support"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "severe-impact-speed",
+        "field": "velocity.y",
+        "at": "min",
+        "label": "severe-fall",
+        "max": -20
+      },
+      {
+        "id": "severe-fall-no-tunnelling",
+        "field": "position.y",
+        "at": "min",
+        "label": "severe-fall",
+        "min": 0.85
+      },
+      {
+        "id": "severe-camera-compression",
+        "field": "camera.offsets.verticalOffset",
+        "at": "min",
+        "label": "severe-fall",
+        "max": -0.02
+      }
+    ]
+  }
+}

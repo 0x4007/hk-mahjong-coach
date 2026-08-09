@@ -37,10 +37,11 @@ describe("damage vignette response", () => {
 
   it("uses the same reticule-centred, aspect-aware pass controls as O₂", () => {
     const pass = createDamageVignettePass("shield", 25);
-    const center = pass.uniforms.uVignetteCenter?.value;
-    const resolution = pass.uniforms.uResolution?.value;
-    const strength = pass.uniforms.uVignetteStrength?.value;
-    const color = pass.uniforms.uVignetteColor?.value;
+    const uniforms = pass.uniforms as Record<string, { value?: unknown } | undefined>;
+    const center = uniforms.uVignetteCenter?.value;
+    const resolution = uniforms.uResolution?.value;
+    const strength = uniforms.uVignetteStrength?.value;
+    const color = uniforms.uVignetteColor?.value;
 
     expect(center).toBeInstanceOf(THREE.Vector2);
     expect(resolution).toBeInstanceOf(THREE.Vector2);

@@ -913,17 +913,6 @@ export const WEAPON_CHART_ENTRIES: readonly WeaponChartEntry[] = WEAPON_IDS.map(
 export const resolveWeaponSpreadRadians = (definition: WeaponDefinition): number =>
   Math.max(0, Number.isFinite(definition.spreadRadians) ? definition.spreadRadians : 0);
 
-/**
- * Resolve the short local view-model slide from the same per-projectile
- * damage value that drives the central camera recoil damper.
- */
-export const WEAPON_RECOIL_MAX_AMOUNT = 0.52;
-export const resolveWeaponRecoilAmount = (damage: number): number =>
-  Math.min(
-    WEAPON_RECOIL_MAX_AMOUNT,
-    (Math.max(0, Number.isFinite(damage) ? damage : 0) / 100) * WEAPON_RECOIL_MAX_AMOUNT,
-  );
-
 export interface WeaponReloadPose {
   /** How far the weapon is pitched toward the sky, from 0 to 1. */
   readonly skyAmount: number;

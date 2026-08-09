@@ -352,11 +352,11 @@ map and video-quality selectors; debug controls are offset below that area and n
   without changing the hyperfocal or Bokeh model. The effect reads as eye focus rather than a cinematic snap. Physics-resolved
   local acceleration drives the restrained pitch and roll response that suggests
   shifting weight, while movement speed drives a small damped vertical viewport bob that settles when the player stops.
-  The HUD reticule follows the same damped first-person acceleration and head-bob offsets as the camera, so the aim
-  marker and held viewmodel stay on the one presentation path while the focus ray remains anchored to the configured
-  reticule position. The outer ring follows that motion at 5x; the center dot is tuned to a 5x total displacement without changing
-  the camera transform. The current experiment multiplies the underlying camera weight-shift targets by 2x; the
-  reticule still reads the raw shared camera output.
+  The per-frame `ReticlePresentation` is the only source for the visible ring, centre dot, aim ray, and focus ray.
+  Camera motion moves that shared point, so focus follows the live centre dot instead of the configured base position.
+  The camera and held viewmodel consume the same damper snapshot. A shot or local melee action keeps the pre-action
+  ray for the gameplay hit, then immediately recomposes the camera, viewmodel, reticle, and later focus consumers from
+  one post-action snapshot without advancing the damper twice.
 - First-person movement uses the Apache-2.0 `@dimforge/rapier3d-compat` runtime for a kinematic character
   controller. The first collision slice supplies simplified static colliders for the world floor and table body;
   render meshes remain visual-only, and tile/furniture dynamics are intentionally not inferred from every mesh.
@@ -372,26 +372,27 @@ map and video-quality selectors; debug controls are offset below that area and n
   decorative strips stay out of the blocking set. This keeps collision cheap without making every tile or triangle
   a physics body. Appended chunks remain resident for the life of the scene, so returning to a neighborhood does
   not change its collision layout.
-- When airborne and moving into a nearby top edge, first-person movement uses one shared local-box vault resolver. The
-  legacy ledge-grab transition is disabled; vaulting owns tops from 0.15 m through 2.0 m above the approach feet for
-  authored and generated boxes alike. A valid target is kept on the supported surface, biased a short distance
-  forward, and the controller eases the camera and capsule over a continuous climb-over arc rather than snapping
-  dead-center. Duration maps from 0.04 s at leg height (0.45 m) to 1.0 s at 2.0 m, with the arc height using the same
-  height mapping. Vaults can be checked on the first upward jump-edge frame as well as while descending, so Rapier
-  does not have to report a separate contact first.
+- When airborne and moving into a nearby top edge, first-person movement uses one shared local-box traversal resolver.
+  Tops from 0.15 m through 0.9 m above the approach feet use a low vault. Validated tops from 0.9 m through 2.0 m use
+  an airborne ledge grab and physics-checked pull-up. Both paths keep the target on the approached support surface and
+  move the capsule through a continuous collision-checked arc instead of teleporting the camera or body. Contact with
+  the source box is allowed during ascent; an unrelated blocking contact cancels the traversal. A streamed source that
+  keeps its ID but changes centre, extents, or rotation is also cancelled through its captured geometry signature.
 - Tall walls use a separate traversal state. When horizontal movement is blocked by a real contact, a wall must be
   above the refined ledge-height window relative to the player's current feet, overlap the player's lateral reach,
   and be within 0.5 m of the capsule front. The resolver tests the approached face in each box's local horizontal
   frame, so streamed rotated backdrop buildings use the same face and top that Rapier uses. Wall-hang detection runs
   only after both ledge and low-vault checks have rejected the contact.
-  The capsule is placed 0.27 m outside the approached face (radius plus separation), remains attached with gravity
-  suppressed, and climbs when forward or Space is pressed. The top target keeps the tangent coordinate where the
+  The capsule is placed 0.27 m outside the approached face (radius plus separation) and remains attached with gravity
+  suppressed. Release Jump after attachment, then press Jump again to request a climb; forward input alone does not
+  start one. Releasing Jump during the active climb cancels it and returns the capsule to ordinary airborne physics.
+  The top target keeps the tangent coordinate where the
   player caught the wall; it does not slide to a skinny wall's centre. The wall target scan includes streamed static
   boxes but excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal
   so low vault/ledge movement is not reclassified as a wall hang. The live climb uses the same short smooth arc,
   preserved momentum, and landing boost as vaulting, so the gun returns after the brief traversal instead of a long
-  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W and press Space while
-  approaching to catch the upper face, release movement to hang, then hold W or press Space to climb.
+  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W and press Jump while
+  approaching to catch the upper face, release Jump to re-arm the input, then press Jump again to climb.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -414,8 +415,8 @@ map and video-quality selectors; debug controls are offset below that area and n
   Space keeps the same quick airtime while doubling the jump apex. Double-tapping any WASD
   or arrow movement key
   engages the faster 3× sprint (10.2 m/s, 36.72 km/h) that remains active while any movement key is held, so W→A/D/S direction
-  transfers preserve sprint speed. A sprint request from crouch first performs the normal stand transition; the stand
-  still costs 5 O₂, and an unaffordable transition leaves the player crouched.
+  transfers preserve sprint speed. Standing and crouching are free posture changes at every O₂ reserve. A sprint
+  request from crouch first stands the player, then uses the normal per-frame sprint affordability check.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
@@ -568,37 +569,28 @@ ground snap, jump speed, gravity, and collision tolerances come from `apps/web/s
 fallback physics, the movement simulator, and the debug camera consume the same values. The seated mahjong table camera
 is a presentation camera and is explicitly kept separate from the player's physical eye height.
 
-## Wall hang and climb
+## Deterministic movement simulator and wall traversal
 
-The movement CLI (`pnpm test:movement:sim`) models wall traversal after the shared vault check. A wall is
-eligible only when the player is airborne, its approached local face is in front of the capsule, within 0.5 m of the
-capsule front surface, laterally overlapped, above the ordinary ledge threshold, and no more than
-0.6 m above the capsule top. A thin platform underside may be just inside that same hand window; swept contact is
-snapped back to the near face instead of letting a jump pass through the edge. Wall entry is also gated by an
-airborne jump traversal state, so a ground-level run into any wall remains a normal collision; a five-metre wall is
-rejected when its top is outside hand reach.
-The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01 m separation, so the hang does
-not embed the player in the collider. The helper scans all boxes and chooses the closest valid candidate.
+`scripts/movement-simulate.ts` uses the hard-cut schema-v2 fixture contract. Each fixed frame runs the shared movement
+controller, applies the O₂ action, resolves fallback or Rapier physics, feeds resolved contact and velocity data back to
+the controller, updates vitals, and then advances the central camera damper. The full trace records position, resolved
+three-axis velocity, grounded state, collision count, stable contact IDs, typed movement state and traversal progress,
+ordered events, O₂/vitals, camera input and offsets, and the shared visible/aim/focus NDC.
 
-The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
-are suppressed. Forward or jump starts the same vault-style short climb arc used by the browser controller, keeping
-the caught tangent coordinate and preserved momentum before a supported landing query. Samples emit `wallHang` only
-on the entry frame and expose `hanging`, `climbing`, and `traversalState` for later frames. JSON mode writes only the
-summary to stdout; the current Rapier package warning is emitted on stderr. The rotated-backdrop regression is
-`pnpm test:movement:sim scripts/movement-scenarios/wall-hang-generated-rotated-test.json --json`.
+The 21 fixtures in `scripts/movement-scenarios/` cover walk and sprint acceleration, sprint release, collision braking,
+direction reversal, diagonal and crouch movement, full and held jumping, low vault and invalid-vault rejection, wall
+contact and climb release, ledge grab/contact loss/top support, slide start/stop, three landing strengths, and O₂
+depletion/recovery. Every fixture has a unique fixed seed and explicit exact or bounded assertions. Geometry traversal
+uses Rapier; deterministic locomotion cases use the fallback runtime. Use
+`pnpm test:movement:sim <fixture> --json` for normal inspection. A JSON-only consumer should run
+`pnpm exec tsx scripts/movement-simulate.ts <fixture> --json`, because the package-script wrapper prints its command
+prefix to stdout. Rapier's current initialization deprecation warning remains on stderr.
 
-The same traversal state is active in the live first-person browser controller. Open the `Climbing gym`
-debug preset from `?debug=1`; it starts on clear ground facing the measured block row. Click the scene to capture
-pointer lock, hold `W`, and press `Space` while approaching a selected block (or use the touch joystick and Jump
-action). The capsule attaches to a valid airborne edge without gravity, remains hanging while forward is released,
-and starts a vault-style climb when forward is pressed again or `Space`/the mobile Jump action is used. The row
-includes blocks from 0.10 m through 5.00 m in 0.10 m increments, each with a height label. The gym uses a 1.75 m
-standing-eye reference (separate from the elevated mahjong table camera), so the 2.00 m block is visibly above the
-player's head; blocks above 2.00 m are high-obstacle stress tests beyond the current vault window. The CLI regression for
-the full-height timing is
-`pnpm test:movement:sim scripts/movement-scenarios/vault-2m-test.json --json`.
-Backward input releases the hang. The climb follows the vault arc and asks Rapier for the final supported position
-instead of marking the player grounded in midair.
+A wall contact is eligible only while airborne with Jump active, after low-vault and ledge checks reject the contact.
+The approached local face must block the capsule, overlap its lateral reach, and have a reachable top. The attachment
+keeps the caught tangent coordinate and suppresses gravity. Release Jump after the catch, then make a fresh Jump press
+to request the climb. The climb uses the same collision-checked arc and supported landing query as other traversal;
+releasing Jump, losing source contact, changing source geometry, or losing destination clearance cancels it.
 
 ## Centralized camera motion and landing weight
 
@@ -606,6 +598,16 @@ First-person presentation motion lives in `apps/web/src/scene/camera-motion.ts`.
 input frame to that damper after physics resolves the base camera position. Lateral weight shift, three-axis
 footfall-shaped gait bob, jump lift, and landing response are combined into one camera/viewmodel output. The reticule and
 aim ray consume the same lateral, vertical, and acceleration-pitch response.
+
+The final vertical presentation offset is clamped only after breathing, gait, weight, landing, and death-drop components
+are composed. Physics-derived support and ceiling clearance provide the bounds. The individual gait and weight values
+remain available for presentation and diagnostics, but the rendered camera cannot pass through those clearances. Local
+shot and melee impulses publish a new damper snapshot immediately; the scene recomposes that snapshot without a second
+time step, while the projectile or melee query keeps the pre-action ray.
+
+Sustained local acceleration uses an exact target-and-response cascade over each held input interval. Its roll and pitch
+therefore depend on elapsed time instead of render count at 60 or 120 Hz, and both stages decay smoothly after measured
+acceleration stops.
 
 The running stride uses a smooth lateral sine with a parabolic vertical relationship, producing a U-shaped path
 instead of a circular orbit. Breathing and jump/landing responses remain additive.
@@ -653,9 +655,8 @@ The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve i
 Standing idle restores 12 points per second. The normal standing trot is exactly 1.5× the 3.4 m/s base (5.1 m/s,
 18.36 km/h), maps one quarter of the way from walk to sprint, and recovers about 5.17 O₂ points per second while moving.
 Crouch walking keeps the reserve flat and does not recharge it while movement is active. Sprinting drains 3.33 points
-per second (about 30 seconds from full). A full jump and each transition from
-crouch to standing costs 5 points, so roughly 20
-consecutive full jumps empty the reserve.
+per second (about 30 seconds from full). A full jump costs 5 points, so roughly 20 consecutive full jumps empty the
+reserve. Crouching and standing are free at every reserve level.
 
 Landing is a separate leg-exertion event. A landing at the full-jump downward speed costs 10 O₂, and the charge follows
 the square of downward speed as a frame-rate-independent kinetic-energy proxy. With the current 48 m/s² gravity, a
@@ -670,10 +671,10 @@ seconds. These delays are stored in the pure state and recovery is integrated fo
 after it expires. The browser publishes the rounded reserve as `data-player-o2` and renders it as a third
 HUD bar.
 
-O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. If the reserve
-cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
+O₂ is an action reserve. A full jump requires the 5-point cost. If the reserve cannot pay it, the controller performs
+a free mini hop instead: its launch speed uses the same neutral
 balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
-The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. The normal standing
+The mini hop does not change O₂ or add the full-jump recovery delay. Crouching and standing have no cost. The normal standing
 speed is the 1.5×-base trot, so ordinary movement slowly regenerates O₂. Sprinting is allowed only when the current
 frame's drain is affordable. When it is not (including at 0%), the sprint request is cleared and the controller stays at
 the same 1.5×-base trot rather than retrying sprint every frame. The trot's quarter walk-to-sprint blend combines the
@@ -694,9 +695,10 @@ The physical left Command key (`MetaLeft`) is the temporary desktop hold-breath 
 mouse toggles zoom and does not hold breath. While left Command is held, the scene cancels
 page-level keyboard defaults for every key event that reaches the page, so ordinary Command-modified keys
 are treated as game input; browser-reserved shortcuts such as macOS Command+W may still close the tab before
-JavaScript receives an event. While the hold is active and O₂ remains above zero, the shared camera damper
-leaves half of the rested baseline reticle, weapon, and stationary-breathing instability and suppresses the
-reserve-driven breathing destabilisation. Releasing the hold or reaching zero restores the normal reserve-driven
+JavaScript receives an event. At full O₂, a stationary fresh damper has exactly zero breathing and reserve-driven aim
+motion. As reserve falls, those components grow continuously. While the hold is active and O₂ remains above zero, the
+shared camera damper suppresses the fatigue destabilisation and leaves half of the smaller reserve-proportional base
+response. Releasing the hold or reaching zero restores the normal reserve-driven
 response. The continuous response in
 `apps/web/src/scene/o2-stability.ts` maps the current reserve to the shared reticle/camera sway response
 without threshold states outside explicit crouch, hold-breath, or wall-brace stabilisation. Camera breathing grows
@@ -1101,9 +1103,9 @@ a hard colour band. It reaches 1.0 strength at zero reserve in scene-linear spac
 ## Held-breath, crouch, and wall-brace stability
 
 Holding breath keeps the O₂ reserve drain and zero-reserve release rules, but it does not let the falling reserve feed
-back into breathing sway. While the hold is active above zero O₂, reticle and weapon sway use only their baseline
-breathing response, and the camera uses the rested breathing amplitude and frequency before applying the 50% hold
-factor. This prevents holding breath from causing the heavy breathing and shaking it is intended to control.
+back into the fatigue destabilisation. While the hold is active above zero O₂, reticle, weapon, and camera breathing use
+half of the smaller reserve-proportional base response. A full-O₂ stationary frame remains exactly still. This prevents
+holding breath from causing the heavy breathing and shaking it is intended to control.
 
 Wall bracing still applies its independent 50% factor to the existing reserve-driven response. If the player leans on a
 wall while crouched, the factors compose to 25% for reticle, weapon, and stationary camera breathing motion. Holding

@@ -105,11 +105,13 @@ export const resolveO2Stability = (input: O2StabilityInput): O2StabilityResponse
     screenVignetteStrength: O2_SCREEN_VIGNETTE_MAX_STRENGTH * fatigue,
     screenContrastMultiplier: O2_SCREEN_CONTRAST_MAX_MULTIPLIER,
     reticleSwayRadians:
-      (O2_RETICLE_SWAY_BASE_RADIANS + O2_RETICLE_SWAY_MAX_RADIANS * destabilization) *
+      (O2_RETICLE_SWAY_BASE_RADIANS * breathlessness +
+        O2_RETICLE_SWAY_MAX_RADIANS * destabilization) *
       postureFactor *
       breathControlFactor,
     weaponSwayRadians:
-      (O2_WEAPON_SWAY_BASE_RADIANS + O2_WEAPON_SWAY_MAX_RADIANS * destabilization) *
+      (O2_WEAPON_SWAY_BASE_RADIANS * breathlessness +
+        O2_WEAPON_SWAY_MAX_RADIANS * destabilization) *
       postureFactor *
       breathControlFactor,
     accuracyMultiplier:

@@ -133,7 +133,7 @@ describe("camera motion damper", () => {
     expect(lifted.verticalOffset).toBeCloseTo(lifted.headBob + lifted.weightShift, 8);
   });
 
-  it("breathes while stationary and increases the bob when oxygen is low", () => {
+  it("is exactly still at full O₂ and adds breathing only as reserve falls", () => {
     const rested = createCameraMotionDamper();
     const exhausted = createCameraMotionDamper();
     let restedPeak = 0;
@@ -147,8 +147,11 @@ describe("camera motion damper", () => {
       );
     }
 
-    expect(restedPeak).toBeGreaterThan(0);
-    expect(exhaustedPeak).toBeGreaterThan(restedPeak * 4);
+    expect(restedPeak).toBe(0);
+    expect(rested.getOffsets().aimSwayX).toBe(0);
+    expect(rested.getOffsets().aimSwayY).toBe(0);
+    expect(rested.getOffsets().verticalOffset).toBe(0);
+    expect(exhaustedPeak).toBeGreaterThan(0);
   });
 
   it("uses a continuous O₂ response without reserve-driven aim sway while holding breath", () => {
@@ -191,20 +194,22 @@ describe("camera motion damper", () => {
 
     expect(strainedPeak).toBeGreaterThan(restedPeak);
     expect(heldPeak).toBeGreaterThan(0);
-    expect(heldPeak).toBeCloseTo(heldLowPeak, 12);
-    expect(heldPeak / restedPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
+    expect(restedPeak).toBe(0);
+    expect(heldPeak).toBeGreaterThan(0);
+    expect(heldPeak).toBeLessThan(strainedPeak);
+    expect(heldLowPeak).toBeGreaterThan(heldPeak);
   });
 
   it("does not amplify stationary breathing while O₂ is held", () => {
-    const restedDamper = createCameraMotionDamper();
+    const unheldDamper = createCameraMotionDamper();
     const heldDamper = createCameraMotionDamper();
     const heldLowDamper = createCameraMotionDamper();
-    let restedPeak = 0;
+    let unheldPeak = 0;
     let heldPeak = 0;
     let heldLowPeak = 0;
 
     for (let index = 0; index < 180; index += 1) {
-      const restedFrame = restedDamper.update(idleInput);
+      const unheldFrame = unheldDamper.update({ ...idleInput, oxygenRatio: 0.4 });
       const heldFrame = heldDamper.update({
         ...idleInput,
         holdingBreath: true,
@@ -215,13 +220,14 @@ describe("camera motion damper", () => {
         holdingBreath: true,
         oxygenRatio: 0.1,
       });
-      restedPeak = Math.max(restedPeak, Math.abs(restedFrame.headBob));
+      unheldPeak = Math.max(unheldPeak, Math.abs(unheldFrame.headBob));
       heldPeak = Math.max(heldPeak, Math.abs(heldFrame.headBob));
       heldLowPeak = Math.max(heldLowPeak, Math.abs(heldLowFrame.headBob));
     }
 
-    expect(heldPeak).toBeCloseTo(heldLowPeak, 12);
-    expect(heldPeak / restedPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
+    expect(heldPeak).toBeGreaterThan(0);
+    expect(heldPeak).toBeLessThan(unheldPeak);
+    expect(heldLowPeak).toBeGreaterThan(heldPeak);
   });
 
   it("leaves one half of breathing and aim sway while braced against a wall", () => {
@@ -314,16 +320,21 @@ describe("camera motion damper", () => {
     expect(neutral.coverLeanOffset).toBeGreaterThan(left.coverLeanOffset);
   });
 
-  it("stacks wall bracing and held breath into quarter camera motion", () => {
-    const restedDamper = createCameraMotionDamper();
+  it("stacks wall bracing on top of held-breath camera motion", () => {
+    const heldDamper = createCameraMotionDamper();
     const combinedDamper = createCameraMotionDamper();
-    let restedHeadBobPeak = 0;
+    let heldHeadBobPeak = 0;
     let combinedHeadBobPeak = 0;
-    let restedAimSwayPeak = 0;
+    let heldAimSwayPeak = 0;
     let combinedAimSwayPeak = 0;
 
     for (let index = 0; index < 180; index += 1) {
-      const restedFrame = restedDamper.update({ ...idleInput, aimingDownSights: true });
+      const heldFrame = heldDamper.update({
+        ...idleInput,
+        aimingDownSights: true,
+        holdingBreath: true,
+        oxygenRatio: 0.2,
+      });
       const combinedFrame = combinedDamper.update({
         ...idleInput,
         aimingDownSights: true,
@@ -331,11 +342,11 @@ describe("camera motion damper", () => {
         stabilizedByWall: true,
         oxygenRatio: 0.2,
       });
-      restedHeadBobPeak = Math.max(restedHeadBobPeak, Math.abs(restedFrame.headBob));
+      heldHeadBobPeak = Math.max(heldHeadBobPeak, Math.abs(heldFrame.headBob));
       combinedHeadBobPeak = Math.max(combinedHeadBobPeak, Math.abs(combinedFrame.headBob));
-      restedAimSwayPeak = Math.max(
-        restedAimSwayPeak,
-        Math.hypot(restedFrame.aimSwayX, restedFrame.aimSwayY),
+      heldAimSwayPeak = Math.max(
+        heldAimSwayPeak,
+        Math.hypot(heldFrame.aimSwayX, heldFrame.aimSwayY),
       );
       combinedAimSwayPeak = Math.max(
         combinedAimSwayPeak,
@@ -343,9 +354,8 @@ describe("camera motion damper", () => {
       );
     }
 
-    const quarterFactor = O2_WALL_BRACE_STABILITY_FACTOR ** 2;
-    expect(combinedHeadBobPeak / restedHeadBobPeak).toBeCloseTo(quarterFactor, 2);
-    expect(combinedAimSwayPeak / restedAimSwayPeak).toBeCloseTo(quarterFactor, 2);
+    expect(combinedHeadBobPeak / heldHeadBobPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
+    expect(combinedAimSwayPeak / heldAimSwayPeak).toBeCloseTo(O2_WALL_BRACE_STABILITY_FACTOR, 2);
   });
 
   it("stacks crouch and wall bracing into quarter camera motion", () => {
@@ -443,6 +453,45 @@ describe("camera motion damper", () => {
     expect(frame.roll).toBe(0);
     expect(frame.headBobPitch).toBeLessThan(0);
     expect(frame.weightShift).toBeGreaterThan(0);
+  });
+
+  it("clamps only the final composed vertical presentation offset", () => {
+    const damper = createCameraMotionDamper();
+    const frame = damper.update({
+      ...idleInput,
+      localAcceleration: { right: 0, forward: 0, up: 600 },
+      movementMagnitude: 1,
+      movementSpeedRatio: 1,
+      verticalOffsetBounds: { min: -0.01, max: 0.01 },
+    });
+
+    expect(frame.headBob + frame.weightShift).toBeGreaterThan(0.01);
+    expect(frame.verticalOffset).toBe(0.01);
+  });
+
+  it("produces equivalent one-second gait and acceleration output at 60 and 120 Hz", () => {
+    const simulate = (deltaSeconds: number, frames: number) => {
+      const damper = createCameraMotionDamper();
+      let frame = damper.getOffsets();
+      for (let index = 0; index < frames; index += 1) {
+        frame = damper.update({
+          ...idleInput,
+          deltaSeconds,
+          localAcceleration: { right: 18, forward: -12, up: 0 },
+          movementMagnitude: 1,
+          movementSpeedRatio: 2 / 3,
+        });
+      }
+      return frame;
+    };
+
+    const sixty = simulate(1 / 60, 60);
+    const oneTwenty = simulate(1 / 120, 120);
+    expect(sixty.roll).toBeCloseTo(oneTwenty.roll, 8);
+    expect(sixty.headBobPitch).toBeCloseTo(oneTwenty.headBobPitch, 8);
+    expect(sixty.headBob).toBeCloseTo(oneTwenty.headBob, 8);
+    expect(sixty.headBobLateral).toBeCloseTo(oneTwenty.headBobLateral, 8);
+    expect(sixty.headBobDepth).toBeCloseTo(oneTwenty.headBobDepth, 8);
   });
 
   it("matches the lateral shift with a damped front/back acceleration pitch", () => {
@@ -620,9 +669,11 @@ describe("camera motion damper", () => {
   });
 
   it("makes a building-height fall stronger than a normal jump landing", () => {
+    const lowLedge = Math.abs(resolveCameraVerticalWeightImpulse(-360, 1 / 60));
     const normalJump = Math.abs(resolveCameraVerticalWeightImpulse(-792, 1 / 60));
     const buildingFall = Math.abs(resolveCameraVerticalWeightImpulse(-2400, 1 / 60));
 
+    expect(normalJump).toBeGreaterThan(lowLedge);
     expect(buildingFall).toBeGreaterThan(normalJump);
   });
 
@@ -714,6 +765,46 @@ describe("camera motion damper", () => {
     }
     expect(Math.abs(settled.recoilYaw)).toBeLessThan(0.0001);
     expect(Math.abs(settled.recoilPitch)).toBeLessThan(0.0001);
+  });
+
+  it("publishes coherent recoil and viewmodel depth on the shot frame", () => {
+    const damper = createCameraMotionDamper();
+    const before = damper.update(idleInput);
+    const shot = damper.applyWeaponShotImpulse({
+      damage: 100,
+      reticleOffset: { x: 36, y: 36 },
+    });
+
+    expect(shot).toBe(damper.getOffsets());
+    expect(shot.recoilYaw).toBeGreaterThan(before.recoilYaw);
+    expect(shot.recoilPitch).toBeGreaterThan(before.recoilPitch);
+    expect(shot.viewmodelRecoilDepth).toBeGreaterThan(before.viewmodelRecoilDepth);
+
+    const melee = damper.applyMeleeImpactImpulse({
+      localDirection: { right: -1, forward: 0, up: 0 },
+      stoppingPower: CAMERA_MELEE_IMPACT_MAX_STOPPING_POWER_METERS_PER_SECOND,
+    });
+    expect(melee).toBe(damper.getOffsets());
+    expect(melee.recoilYaw).toBeLessThan(shot.recoilYaw);
+    expect(melee.recoilPitch).toBe(shot.recoilPitch);
+    expect(melee.viewmodelRecoilDepth).toBe(shot.viewmodelRecoilDepth);
+  });
+
+  it("keeps damage-scaled recoil independent of O₂", () => {
+    const rested = createCameraMotionDamper();
+    const exhausted = createCameraMotionDamper();
+    rested.update(idleInput);
+    exhausted.update({ ...idleInput, oxygenRatio: 0 });
+
+    const shot = { damage: 28, reticleOffset: { x: 36, y: -18 } } as const;
+    rested.applyWeaponShotImpulse(shot);
+    exhausted.applyWeaponShotImpulse(shot);
+
+    expect(exhausted.getOffsets().recoilYaw).toBe(rested.getOffsets().recoilYaw);
+    expect(exhausted.getOffsets().recoilPitch).toBe(rested.getOffsets().recoilPitch);
+    expect(exhausted.getOffsets().viewmodelRecoilDepth).toBe(
+      rested.getOffsets().viewmodelRecoilDepth,
+    );
   });
 
   it("maps the physical melee push into a signed view impulse", () => {
@@ -852,6 +943,7 @@ describe("camera motion damper", () => {
       movementMagnitude: 1,
       movementSpeedRatio: 1,
     });
+    damper.applyWeaponShotImpulse({ damage: 100, reticleOffset: { x: 36, y: 0 } });
 
     damper.reset();
 
@@ -867,6 +959,7 @@ describe("camera motion damper", () => {
       verticalOffset: 0,
       recoilYaw: 0,
       recoilPitch: 0,
+      viewmodelRecoilDepth: 0,
       viewmodelOffset: CAMERA_VIEWMODEL_STANDING_OFFSET,
       viewmodelTransition: {
         phase: "idle",

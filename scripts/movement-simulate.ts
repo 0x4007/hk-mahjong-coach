@@ -1,936 +1,1525 @@
 import { readFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
+  createCameraMotionDamper,
+  resolveCameraLocalAccelerationFromVelocityDelta,
+  type CameraMotionOffsets,
+  type CameraMotionUpdateInput,
+} from "../apps/web/src/scene/camera-motion.js";
+import {
+  createFallbackMahjongPhysics,
   createMahjongPhysics,
-  type PhysicsBox,
-  type PhysicsVector,
+  resolvePhysicsBoxObstacleId,
   type MahjongPhysicsRuntime,
+  type PhysicsBox,
+  type PhysicsContact,
+  type PhysicsMovement,
+  type PhysicsVector,
 } from "../apps/web/src/scene/mahjong-physics.js";
 import {
-  PLAYER_CAPSULE_CENTER_HEIGHT,
-  PLAYER_CAPSULE_RADIUS,
-  PLAYER_JUMP_SPEED,
-  PLAYER_MOVE_SPEED_METERS_PER_SECOND,
-  PLAYER_SPRINT_MULTIPLIER,
-  PLAYER_SUPPORT_SNAP_HEIGHT,
-  WORLD_GRAVITY,
-  WORLD_EPSILON,
-} from "../apps/web/src/scene/world-scale.js";
-import {
-  resolveLedgeClimbMomentum,
-  resolveVaultTarget,
+  isPlayerCapsulePositionClear,
+  LOW_OBSTACLE_VAULT_MAX_HEIGHT,
+  resolveCameraVerticalOffsetBounds,
+  resolveLedgeGrabTargetDetails,
+  resolveO2ScaledTraversalDuration,
+  resolveReticlePresentation,
+  resolveVaultTargetDetails,
   resolveVaultTraversalArcHeight,
   resolveVaultTraversalDuration,
-  resolveWallClimbTarget as resolveSharedWallClimbTarget,
+  resolveVaultTraversalO2Cost,
+  resolveWallClimbTarget,
   resolveWallHangTargetDetails,
+  type TraversalTargetResolution,
 } from "../apps/web/src/scene/mahjong-table.js";
+import {
+  PLAYER_MOVEMENT_MAX_STEP_SECONDS,
+  createPlayerMovementControllerState,
+  stepPlayerMovementController,
+  type PlayerExternalTraversalState,
+  type PlayerMovementContact,
+  type PlayerMovementControllerState,
+  type PlayerMovementEvent,
+  type PlayerMovementPosture,
+  type PlayerMovementVector,
+  type PlayerTraversalKind,
+} from "../apps/web/src/scene/player-movement.js";
+import { resolveLandingO2Cost } from "../apps/web/src/scene/player-impact.js";
+import {
+  O2_JUMP_RECOVERY_DELAY_SECONDS,
+  O2_LANDING_RECOVERY_DELAY_SECONDS,
+  O2_SPRINT_DRAIN_PER_SECOND,
+  PLAYER_MAX_O2,
+  applyPlayerO2Cost,
+  applyPlayerO2ImpactCost,
+  canAffordPlayerO2Cost,
+  createPlayerVitals,
+  setPlayerHoldingBreath,
+  tickPlayerVitals,
+  type PlayerVitalsState,
+} from "../apps/web/src/scene/player-vitals.js";
+import {
+  PLAYER_CAPSULE_CENTER_HEIGHT,
+  PLAYER_CROUCH_EYE_HEIGHT,
+  PLAYER_SPRINT_SPEED_METERS_PER_SECOND,
+  PLAYER_STANDING_EYE_HEIGHT,
+  PLAYER_SUPPORT_SNAP_HEIGHT,
+  WORLD_GRAVITY,
+} from "../apps/web/src/scene/world-scale.js";
 
-type RawScenario = {
-  readonly name?: string;
-  readonly description?: string;
-  readonly frameDurationSec?: unknown;
-  readonly reportEveryFrames?: unknown;
-  readonly start?: unknown;
-  readonly physics?: unknown;
-  readonly staticBoxes?: unknown;
-  readonly frames?: unknown;
+export const MOVEMENT_SCENARIO_SCHEMA_VERSION = 2 as const;
+
+const DEFAULT_SCENARIO_PATH = resolvePath(
+  process.cwd(),
+  "scripts/movement-scenarios/walk-acceleration.json",
+);
+const DEFAULT_FRAME_DURATION_SECONDS = 1 / 60;
+const DEFAULT_FLOOR: PhysicsBox = {
+  obstacleId: "floor",
+  center: { x: 0, y: -0.5, z: 0 },
+  halfExtents: { x: 100, y: 0.5, z: 100 },
 };
+const RETICLE_VIEWPORT_WIDTH = 1920;
+const RETICLE_VIEWPORT_HEIGHT = 1080;
+const TRAVERSAL_CONTACT_EPSILON = 0.03;
 
-type RawScenarioStep = {
-  readonly duration?: unknown;
-  readonly forward?: unknown;
-  readonly right?: unknown;
-  readonly jump?: unknown;
-  readonly sprint?: unknown;
-  readonly crouch?: unknown;
-  readonly yawRate?: unknown;
-  readonly label?: unknown;
-};
+type PhysicsRuntimeKind = "fallback" | "rapier";
 
-type PhysicsConfig = {
-  readonly moveSpeed: number;
-  readonly sprintMultiplier: number;
-  readonly jumpSpeed: number;
-  readonly gravity: number;
-};
-
-type StartState = {
+export interface MovementScenarioStart {
   readonly position: PhysicsVector;
+  readonly velocity: PhysicsVector;
   readonly yaw: number;
   readonly grounded: boolean;
-};
+  readonly o2: number;
+}
 
-type Scenario = {
-  readonly name: string;
-  readonly description?: string;
-  readonly frameDurationSec: number;
-  readonly reportEveryFrames: number;
-  readonly start: StartState;
-  readonly physics: PhysicsConfig;
-  readonly staticBoxes: readonly PhysicsBox[];
-  readonly frames: readonly ScenarioStep[];
-};
-
-type ScenarioStep = {
+export interface MovementScenarioFrame {
   readonly duration: number;
   readonly forward: number;
   readonly right: number;
   readonly jump: boolean;
   readonly sprint: boolean;
   readonly crouch: boolean;
+  readonly walking: boolean;
+  readonly slide: boolean;
+  readonly zoom: boolean;
+  readonly holdBreath: boolean;
   readonly yawRate: number;
-  readonly label: string | null;
-};
+  readonly label: string;
+  readonly disabledObstacleIds: readonly string[];
+}
 
-type LedgeEvent = {
-  readonly targetX: number;
-  readonly targetY: number;
-  readonly targetZ: number;
-  readonly preservedForwardVelocity: number;
-  readonly preservedStrafeVelocity: number;
-  readonly preserveSprinting: boolean;
-};
+export interface MovementEventPattern {
+  readonly kind: PlayerMovementEvent["kind"];
+  readonly result?: "full" | "fallback";
+  readonly traversal?: PlayerTraversalKind;
+}
 
-type FrameSample = {
-  readonly timeSec: number;
+export type MovementTraceNumericField =
+  | "position.x"
+  | "position.y"
+  | "position.z"
+  | "velocity.x"
+  | "velocity.y"
+  | "velocity.z"
+  | "speed.horizontal"
+  | "o2"
+  | "collisions"
+  | "movement.progress"
+  | "camera.input.acceleration.right"
+  | "camera.input.acceleration.forward"
+  | "camera.input.acceleration.up"
+  | "camera.offsets.roll"
+  | "camera.offsets.headBob"
+  | "camera.offsets.headBobLateral"
+  | "camera.offsets.headBobDepth"
+  | "camera.offsets.headBobPitch"
+  | "camera.offsets.verticalOffset"
+  | "camera.offsets.aimSwayX"
+  | "camera.offsets.aimSwayY";
+
+export interface MovementRangeExpectation {
+  readonly id: string;
+  readonly field: MovementTraceNumericField;
+  readonly at: "first" | "last" | "min" | "max";
+  readonly label?: string;
+  readonly min?: number;
+  readonly max?: number;
+  readonly equals?: number;
+  readonly tolerance: number;
+}
+
+export interface MovementScenarioExpectations {
+  readonly requiredEvents: readonly MovementEventPattern[];
+  readonly forbiddenEvents: readonly MovementEventPattern[];
+  readonly requiredStates: readonly string[];
+  readonly forbiddenStates: readonly string[];
+  readonly requiredContactKinds: readonly PhysicsContact["kind"][];
+  readonly finalGrounded?: boolean;
+  readonly finalState?: string;
+  readonly ranges: readonly MovementRangeExpectation[];
+}
+
+export interface MovementScenario {
+  readonly schemaVersion: typeof MOVEMENT_SCENARIO_SCHEMA_VERSION;
+  readonly name: string;
+  readonly description: string;
+  readonly seed: string;
+  readonly frameDurationSec: number;
+  readonly runtime: PhysicsRuntimeKind;
+  readonly start: MovementScenarioStart;
+  readonly staticBoxes: readonly PhysicsBox[];
+  readonly frames: readonly MovementScenarioFrame[];
+  readonly expect: MovementScenarioExpectations;
+}
+
+export interface MovementTraceEvent {
+  readonly stage: "controller" | "post-physics";
+  readonly event: PlayerMovementEvent;
+}
+
+export interface MovementCameraInputTrace {
+  readonly deltaSeconds: number;
+  readonly localAcceleration: CameraMotionUpdateInput["localAcceleration"];
+  readonly movementMagnitude: number;
+  readonly movementSpeedRatio: number;
+  readonly oxygenRatio: number;
+  readonly crouching: boolean;
+  readonly shiftEnabled: boolean;
+  readonly bobEnabled: boolean;
+  readonly zoom: boolean;
+  readonly holdingBreath: boolean;
+  readonly stabilizedByWall: boolean;
+  readonly grounded: boolean;
+  readonly traversalActive: boolean;
+  readonly verticalOffsetBounds: {
+    readonly min: number;
+    readonly max: number | null;
+  };
+}
+
+export interface MovementFrameTrace {
   readonly frame: number;
+  readonly timeSec: number;
   readonly stepIndex: number;
   readonly stepLabel: string;
   readonly position: PhysicsVector;
-  readonly velocityY: number;
+  readonly velocity: PhysicsVector;
   readonly grounded: boolean;
-  readonly crouching: boolean;
-  readonly sprinting: boolean;
   readonly collisions: number;
-  readonly ledgeGrab: LedgeEvent | null;
-  // A vault is a jump onto a low platform that does not qualify as a ledge.
-  // We reuse the same shape as `LedgeEvent` because the data needed (target
-  // position and preserved velocities) is identical.
-  readonly vaultGrab: LedgeEvent | null;
-  // A wallHang event is emitted only on the frame that enters the hanging
-  // state. The state fields below describe subsequent hanging/climbing frames.
-  readonly wallHang: LedgeEvent | null;
-  readonly hanging: boolean;
-  readonly climbing: boolean;
-  readonly traversalState: TraversalState["kind"];
-};
+  readonly contacts: readonly PhysicsContact[];
+  readonly movement: {
+    readonly state: PlayerMovementControllerState["movement"]["kind"];
+    readonly posture: PlayerMovementPosture;
+    readonly traversalProgress: number;
+    readonly obstacleId: string | null;
+  };
+  readonly events: readonly MovementTraceEvent[];
+  readonly o2: number;
+  readonly vitals: PlayerVitalsState;
+  readonly camera: {
+    readonly input: MovementCameraInputTrace;
+    readonly offsets: CameraMotionOffsets;
+  };
+  readonly presentation: {
+    readonly visibleReticleNdc: Readonly<{ x: number; y: number }>;
+    readonly aimRayNdc: Readonly<{ x: number; y: number }>;
+    readonly focusRayNdc: Readonly<{ x: number; y: number }>;
+  };
+}
 
-type WallHangingState = {
-  readonly kind: "wall-hanging";
+export interface MovementOrderedEvent extends MovementTraceEvent {
+  readonly frame: number;
+  readonly timeSec: number;
+}
+
+export interface MovementScenarioAssertion {
+  readonly id: string;
+  readonly passed: boolean;
+  readonly expected: string;
+  readonly actual: string;
+}
+
+export interface MovementSimulationResult {
+  readonly schemaVersion: typeof MOVEMENT_SCENARIO_SCHEMA_VERSION;
+  readonly name: string;
+  readonly description: string;
+  readonly seed: string;
+  readonly runtime: PhysicsRuntimeKind;
+  readonly durationSec: number;
+  readonly frameCount: number;
+  readonly trace: readonly MovementFrameTrace[];
+  readonly orderedEvents: readonly MovementOrderedEvent[];
+  readonly final: MovementFrameTrace;
+  readonly metrics: {
+    readonly distanceMeters: number;
+    readonly maximumHorizontalSpeed: number;
+    readonly maximumUpwardSpeed: number;
+    readonly maximumDownwardSpeed: number;
+    readonly minimumO2: number;
+    readonly maximumO2: number;
+    readonly maximumCollisions: number;
+  };
+  readonly assertions: readonly MovementScenarioAssertion[];
+}
+
+interface ActiveTraversal {
+  readonly kind: PlayerTraversalKind;
+  readonly obstacleId: string;
+  readonly sourceBox: PhysicsBox;
+  readonly start: PhysicsVector;
   readonly target: PhysicsVector;
+  readonly duration: number;
+  readonly arcHeight: number;
+  readonly wall: WallTraversalGeometry | null;
+  elapsed: number;
+  terminal: "completed" | "cancelled" | null;
+}
+
+interface WallTraversalGeometry {
   readonly wallNormal: PhysicsVector;
   readonly wallFacePoint: PhysicsVector;
   readonly wallTopY: number;
   readonly box: PhysicsBox;
-  readonly preservedForwardVelocity: number;
-  readonly preservedStrafeVelocity: number;
-  readonly preserveSprinting: boolean;
-  elapsed: number;
-};
+}
 
-type ClimbingState = {
-  readonly kind: "climbing";
-  readonly startPosition: PhysicsVector;
-  readonly targetPosition: PhysicsVector;
-  readonly box: PhysicsBox | null;
-  readonly duration: number;
-  readonly arcHeight: number;
-  readonly phase: "vault" | "landingBoost";
-  readonly preservedForwardVelocity: number;
-  readonly preservedStrafeVelocity: number;
-  readonly preserveSprinting: boolean;
-  readonly landingBoostDistance: number;
-  elapsed: number;
-};
-
-type TraversalState = { readonly kind: "none" } | WallHangingState | ClimbingState;
-
-type SimulationState = {
-  position: PhysicsVector;
-  verticalVelocity: number;
-  yaw: number;
-  grounded: boolean;
-  lastGrounded: boolean;
-  traversal: TraversalState;
-};
-
-const DEFAULT_SCENARIO_PATH = resolvePath(
-  process.cwd(),
-  "scripts/movement-scenarios/default-movement.json",
-);
-
-const DEFAULT_MOVE_SPEED = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
-const DEFAULT_SPRINT_MULTIPLIER = PLAYER_SPRINT_MULTIPLIER;
-const DEFAULT_JUMP_SPEED = PLAYER_JUMP_SPEED;
-const DEFAULT_GRAVITY = WORLD_GRAVITY;
-const PLAYER_COLLIDER_CENTER_HEIGHT = PLAYER_CAPSULE_CENTER_HEIGHT;
-const PLAYER_COLLIDER_RADIUS = PLAYER_CAPSULE_RADIUS;
-const LEDGE_GRAB_MIN_FALL_OFFSET = 0.05;
-const FRAME_GROUND_EPSILON = WORLD_EPSILON;
-const WALL_HANG_EPSILON = 0.0001;
-const WALL_HANG_SETTLE_DURATION = 0.14;
-const WALL_CLIMB_EXIT_BOOST_DURATION = 0.06;
-const WALL_CLIMB_EXIT_BOOST_DISTANCE = 0.12;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
-const asVector = (value: unknown): PhysicsVector => {
-  if (
-    !Array.isArray(value) ||
-    value.length !== 3 ||
-    !value.every((entry) => isFiniteNumber(entry))
-  ) {
-    throw new TypeError("A vector must be [x, y, z] with finite numeric values");
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, Number.isFinite(value) ? value : 0));
+
+const parseVector = (value: unknown, field: string): PhysicsVector => {
+  if (!Array.isArray(value) || value.length !== 3 || !value.every(isFiniteNumber)) {
+    throw new TypeError(`${field} must be a three-number vector`);
   }
   const [x, y, z] = value;
   if (!isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(z)) {
-    throw new TypeError("A vector must be [x, y, z] with finite numeric values");
+    throw new TypeError(`${field} must be a three-number vector`);
   }
   return { x, y, z };
 };
 
-const parseBoolean = (value: unknown, fallback: boolean): boolean =>
+const parseBoolean = (value: unknown, fallback = false): boolean =>
   typeof value === "boolean" ? value : fallback;
 
-const parsePositiveNumber = (value: unknown, fallback: number): number => {
-  if (!isFiniteNumber(value) || value <= 0) {
-    return fallback;
+const parseNumber = (value: unknown, fallback: number): number =>
+  isFiniteNumber(value) ? value : fallback;
+
+const parsePositiveNumber = (value: unknown, fallback: number): number =>
+  isFiniteNumber(value) && value > 0 ? value : fallback;
+
+const parseStringArray = (value: unknown, field: string): readonly string[] => {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    throw new TypeError(`${field} must be an array of strings`);
   }
   return value;
 };
 
-const parsePercentLike = (value: unknown, min: number, max: number, fallback: number): number =>
-  isFiniteNumber(value) && value >= min && value <= max ? value : fallback;
-
-const clamp = (value: number, min: number, max: number): number =>
-  Math.min(max, Math.max(min, value));
-
-const parsePhysicsBox = (box: unknown): PhysicsBox => {
-  if (!box || typeof box !== "object" || box === null || Array.isArray(box)) {
-    throw new TypeError("Each static collider must be an object");
+const parsePhysicsBox = (value: unknown, index: number): PhysicsBox => {
+  if (!isRecord(value)) {
+    throw new TypeError(`staticBoxes[${String(index)}] must be an object`);
   }
-  const source = box as {
-    center?: unknown;
-    halfExtents?: unknown;
-    rotationX?: unknown;
-    rotationY?: unknown;
-    rotationZ?: unknown;
-    dynamic?: unknown;
-    dynamicId?: unknown;
-    restitution?: unknown;
-    friction?: unknown;
-    linearVelocity?: unknown;
-    angularVelocity?: unknown;
-    linearDamping?: unknown;
-    angularDamping?: unknown;
-  };
-  const rotationX = asFiniteOrUndefined(source.rotationX);
-  const rotationY = asFiniteOrUndefined(source.rotationY);
-  const rotationZ = asFiniteOrUndefined(source.rotationZ);
-  const dynamicId = typeof source.dynamicId === "number" ? source.dynamicId : undefined;
-  const restitution =
-    source.restitution === undefined ? undefined : asFiniteOrFallback(source.restitution, 0.15);
-  const friction =
-    source.friction === undefined ? undefined : asFiniteOrFallback(source.friction, 0.9);
-  const linearVelocity =
-    source.linearVelocity === undefined ? undefined : asVector(source.linearVelocity);
-  const angularVelocity =
-    source.angularVelocity === undefined ? undefined : asVector(source.angularVelocity);
-  const linearDamping =
-    source.linearDamping === undefined ? undefined : asFiniteOrFallback(source.linearDamping, 0.2);
-  const angularDamping =
-    source.angularDamping === undefined
-      ? undefined
-      : asFiniteOrFallback(source.angularDamping, 0.2);
+  if (typeof value.obstacleId !== "string" || value.obstacleId.trim() === "") {
+    throw new TypeError(`staticBoxes[${String(index)}].obstacleId is required`);
+  }
+  const rotationX = isFiniteNumber(value.rotationX) ? value.rotationX : undefined;
+  const rotationY = isFiniteNumber(value.rotationY) ? value.rotationY : undefined;
+  const rotationZ = isFiniteNumber(value.rotationZ) ? value.rotationZ : undefined;
   return {
-    center: asVector(source.center),
-    halfExtents: asVector(source.halfExtents),
+    obstacleId: value.obstacleId,
+    center: parseVector(value.center, `staticBoxes[${String(index)}].center`),
+    halfExtents: parseVector(value.halfExtents, `staticBoxes[${String(index)}].halfExtents`),
     ...(rotationX === undefined ? {} : { rotationX }),
     ...(rotationY === undefined ? {} : { rotationY }),
     ...(rotationZ === undefined ? {} : { rotationZ }),
-    ...(source.dynamic === true ? { dynamic: true } : {}),
-    ...(dynamicId === undefined ? {} : { dynamicId }),
-    ...(restitution === undefined ? {} : { restitution }),
-    ...(friction === undefined ? {} : { friction }),
-    ...(linearVelocity === undefined ? {} : { linearVelocity }),
-    ...(angularVelocity === undefined ? {} : { angularVelocity }),
-    ...(linearDamping === undefined ? {} : { linearDamping }),
-    ...(angularDamping === undefined ? {} : { angularDamping }),
   };
 };
 
-const asFiniteOrUndefined = (value: unknown): number | undefined =>
-  isFiniteNumber(value) ? value : undefined;
+const eventKinds = new Set<PlayerMovementEvent["kind"]>([
+  "jump",
+  "vault-start",
+  "wall-contact",
+  "wall-climb-request",
+  "ledge-grab",
+  "traversal-cancel",
+  "traversal-complete",
+  "slide-start",
+  "slide-end",
+  "landing",
+]);
 
-const asFiniteOrFallback = (value: unknown, fallback: number): number =>
-  isFiniteNumber(value) ? value : fallback;
-
-const parseScenario = (raw: unknown): Scenario => {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new TypeError("Scenario file must be a JSON object");
+const parseEventPatterns = (value: unknown, field: string): readonly MovementEventPattern[] => {
+  if (value === undefined) {
+    return [];
   }
-  const source = raw as RawScenario;
-
-  if (!Array.isArray(source.frames) || source.frames.length < 1) {
-    throw new TypeError("Scenario must include at least one frame");
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${field} must be an array`);
   }
-
-  const staticBoxes = Array.isArray(source.staticBoxes)
-    ? source.staticBoxes.map((box, index) => {
-        try {
-          return parsePhysicsBox(box);
-        } catch (error) {
-          throw new Error(
-            `Invalid static collider at index ${String(index)}: ${String(error instanceof Error ? error.message : "unknown")}`,
-          );
-        }
-      })
-    : [];
-
-  const parsedFrames = source.frames.map((value, index) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new TypeError(`Frame ${String(index)} must be an object`);
+  return value.map((entry, index) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.kind !== "string" ||
+      !eventKinds.has(entry.kind as PlayerMovementEvent["kind"])
+    ) {
+      throw new TypeError(`${field}[${String(index)}] has an invalid event kind`);
     }
-    const frame = value as RawScenarioStep;
-    const duration = parsePositiveNumber(frame.duration, 0.016);
-    const forwardRaw = parsePercentLike(frame.forward ?? 0, -1, 1, 0);
-    const rightRaw = parsePercentLike(frame.right ?? 0, -1, 1, 0);
-    const jump = parseBoolean(frame.jump, false);
-    const sprint = parseBoolean(frame.sprint, false);
-    const crouch = parseBoolean(frame.crouch, false);
-    const yawRate = isFiniteNumber(frame.yawRate) ? frame.yawRate : 0;
-    const label = frame.label === undefined || typeof frame.label !== "string" ? null : frame.label;
-    return { duration, forward: forwardRaw, right: rightRaw, jump, sprint, crouch, yawRate, label };
+    const result =
+      entry.result === "full" || entry.result === "fallback" ? entry.result : undefined;
+    const traversal =
+      entry.traversal === "vault" ||
+      entry.traversal === "wall-contact" ||
+      entry.traversal === "wall-climb" ||
+      entry.traversal === "ledge-grab"
+        ? entry.traversal
+        : undefined;
+    return {
+      kind: entry.kind as PlayerMovementEvent["kind"],
+      ...(result === undefined ? {} : { result }),
+      ...(traversal === undefined ? {} : { traversal }),
+    };
   });
+};
 
-  const start: StartState = (() => {
-    const provided = source.start ?? {};
-    if (typeof provided !== "object" || provided === null || Array.isArray(provided)) {
-      throw new TypeError("start must be an object");
+const traceFields = new Set<MovementTraceNumericField>([
+  "position.x",
+  "position.y",
+  "position.z",
+  "velocity.x",
+  "velocity.y",
+  "velocity.z",
+  "speed.horizontal",
+  "o2",
+  "collisions",
+  "movement.progress",
+  "camera.input.acceleration.right",
+  "camera.input.acceleration.forward",
+  "camera.input.acceleration.up",
+  "camera.offsets.roll",
+  "camera.offsets.headBob",
+  "camera.offsets.headBobLateral",
+  "camera.offsets.headBobDepth",
+  "camera.offsets.headBobPitch",
+  "camera.offsets.verticalOffset",
+  "camera.offsets.aimSwayX",
+  "camera.offsets.aimSwayY",
+]);
+
+const parseRangeExpectations = (value: unknown): readonly MovementRangeExpectation[] => {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new TypeError("expect.ranges must be an array");
+  }
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new TypeError(`expect.ranges[${String(index)}] must be an object`);
     }
-    const startRaw = provided as { position?: unknown; yaw?: unknown; grounded?: unknown };
-    const position = asVector(startRaw.position ?? [0, PLAYER_COLLIDER_CENTER_HEIGHT, 0]);
-    const yaw = isFiniteNumber(startRaw.yaw) ? startRaw.yaw : 0;
-    const grounded = parseBoolean(startRaw.grounded, true);
-    return { position, yaw, grounded };
-  })();
+    if (typeof entry.id !== "string" || entry.id.trim() === "") {
+      throw new TypeError(`expect.ranges[${String(index)}].id is required`);
+    }
+    if (
+      typeof entry.field !== "string" ||
+      !traceFields.has(entry.field as MovementTraceNumericField)
+    ) {
+      throw new TypeError(`expect.ranges[${String(index)}].field is invalid`);
+    }
+    if (entry.at !== "first" && entry.at !== "last" && entry.at !== "min" && entry.at !== "max") {
+      throw new TypeError(`expect.ranges[${String(index)}].at is invalid`);
+    }
+    const label = typeof entry.label === "string" ? entry.label : undefined;
+    const min = isFiniteNumber(entry.min) ? entry.min : undefined;
+    const max = isFiniteNumber(entry.max) ? entry.max : undefined;
+    const equals = isFiniteNumber(entry.equals) ? entry.equals : undefined;
+    if (min === undefined && max === undefined && equals === undefined) {
+      throw new TypeError(`expect.ranges[${String(index)}] needs min, max, or equals`);
+    }
+    return {
+      id: entry.id,
+      field: entry.field as MovementTraceNumericField,
+      at: entry.at,
+      ...(label === undefined ? {} : { label }),
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
+      ...(equals === undefined ? {} : { equals }),
+      tolerance: Math.max(0, parseNumber(entry.tolerance, 0)),
+    };
+  });
+};
 
-  const physicsSource = source.physics ?? {};
-  const physics =
-    typeof physicsSource === "object" && physicsSource !== null && !Array.isArray(physicsSource)
-      ? {
-          moveSpeed: parsePositiveNumber(
-            (physicsSource as { moveSpeed?: unknown }).moveSpeed,
-            DEFAULT_MOVE_SPEED,
-          ),
-          sprintMultiplier: parsePositiveNumber(
-            (physicsSource as { sprintMultiplier?: unknown }).sprintMultiplier,
-            DEFAULT_SPRINT_MULTIPLIER,
-          ),
-          jumpSpeed: parsePositiveNumber(
-            (physicsSource as { jumpSpeed?: unknown }).jumpSpeed,
-            DEFAULT_JUMP_SPEED,
-          ),
-          gravity: parsePositiveNumber(
-            (physicsSource as { gravity?: unknown }).gravity,
-            DEFAULT_GRAVITY,
-          ),
-        }
-      : {
-          moveSpeed: DEFAULT_MOVE_SPEED,
-          sprintMultiplier: DEFAULT_SPRINT_MULTIPLIER,
-          jumpSpeed: DEFAULT_JUMP_SPEED,
-          gravity: DEFAULT_GRAVITY,
-        };
-
-  const description = typeof source.description === "string" ? source.description : undefined;
+const parseExpectations = (value: unknown): MovementScenarioExpectations => {
+  const source = isRecord(value) ? value : {};
+  const finalGrounded =
+    typeof source.finalGrounded === "boolean" ? source.finalGrounded : undefined;
+  const finalState = typeof source.finalState === "string" ? source.finalState : undefined;
+  const requiredContactKinds = parseStringArray(
+    source.requiredContactKinds,
+    "expect.requiredContactKinds",
+  ).map((kind) => {
+    if (kind !== "support" && kind !== "wall" && kind !== "ceiling") {
+      throw new TypeError(`Invalid required contact kind: ${kind}`);
+    }
+    return kind;
+  });
   return {
-    name: typeof source.name === "string" ? source.name : "movement-scenario",
-    ...(description === undefined ? {} : { description }),
-    frameDurationSec: parsePositiveNumber(source.frameDurationSec, 0.016),
-    reportEveryFrames: Number.isInteger(source.reportEveryFrames as number)
-      ? Math.max(1, Number(source.reportEveryFrames))
-      : 10,
-    start,
-    physics,
+    requiredEvents: parseEventPatterns(source.requiredEvents, "expect.requiredEvents"),
+    forbiddenEvents: parseEventPatterns(source.forbiddenEvents, "expect.forbiddenEvents"),
+    requiredStates: parseStringArray(source.requiredStates, "expect.requiredStates"),
+    forbiddenStates: parseStringArray(source.forbiddenStates, "expect.forbiddenStates"),
+    requiredContactKinds,
+    ...(finalGrounded === undefined ? {} : { finalGrounded }),
+    ...(finalState === undefined ? {} : { finalState }),
+    ranges: parseRangeExpectations(source.ranges),
+  };
+};
+
+export const parseMovementScenario = (value: unknown): MovementScenario => {
+  if (!isRecord(value)) {
+    throw new TypeError("Scenario must be a JSON object");
+  }
+  if (value.schemaVersion !== MOVEMENT_SCENARIO_SCHEMA_VERSION) {
+    throw new TypeError(
+      `Scenario schemaVersion must be ${String(MOVEMENT_SCENARIO_SCHEMA_VERSION)}`,
+    );
+  }
+  if (typeof value.name !== "string" || value.name.trim() === "") {
+    throw new TypeError("Scenario name is required");
+  }
+  if (typeof value.seed !== "string" || value.seed.trim() === "") {
+    throw new TypeError("Scenario seed is required");
+  }
+  if (!Array.isArray(value.frames) || value.frames.length === 0) {
+    throw new TypeError("Scenario frames must be a non-empty array");
+  }
+  const startSource = isRecord(value.start) ? value.start : {};
+  const staticBoxes = Array.isArray(value.staticBoxes)
+    ? value.staticBoxes.map(parsePhysicsBox)
+    : [];
+  const obstacleIds = new Set<string>([resolvePhysicsBoxObstacleId(DEFAULT_FLOOR)]);
+  for (const box of staticBoxes) {
+    const obstacleId = resolvePhysicsBoxObstacleId(box);
+    if (obstacleIds.has(obstacleId)) {
+      throw new TypeError(`Duplicate obstacleId: ${obstacleId}`);
+    }
+    obstacleIds.add(obstacleId);
+  }
+  const frames = value.frames.map((frame, index): MovementScenarioFrame => {
+    if (!isRecord(frame)) {
+      throw new TypeError(`frames[${String(index)}] must be an object`);
+    }
+    const label = typeof frame.label === "string" ? frame.label : `step-${String(index + 1)}`;
+    return {
+      duration: parsePositiveNumber(frame.duration, DEFAULT_FRAME_DURATION_SECONDS),
+      forward: clamp(parseNumber(frame.forward, 0), -1, 1),
+      right: clamp(parseNumber(frame.right, 0), -1, 1),
+      jump: parseBoolean(frame.jump),
+      sprint: parseBoolean(frame.sprint),
+      crouch: parseBoolean(frame.crouch),
+      walking: parseBoolean(frame.walking),
+      slide: parseBoolean(frame.slide),
+      zoom: parseBoolean(frame.zoom),
+      holdBreath: parseBoolean(frame.holdBreath),
+      yawRate: parseNumber(frame.yawRate, 0),
+      label,
+      disabledObstacleIds: parseStringArray(
+        frame.disabledObstacleIds,
+        `frames[${String(index)}].disabledObstacleIds`,
+      ),
+    };
+  });
+  const runtimeSource = isRecord(value.physics) ? value.physics.runtime : undefined;
+  const runtime: PhysicsRuntimeKind = runtimeSource === "rapier" ? "rapier" : "fallback";
+  return {
+    schemaVersion: MOVEMENT_SCENARIO_SCHEMA_VERSION,
+    name: value.name,
+    description: typeof value.description === "string" ? value.description : "",
+    seed: value.seed,
+    frameDurationSec: parsePositiveNumber(value.frameDurationSec, DEFAULT_FRAME_DURATION_SECONDS),
+    runtime,
+    start: {
+      position: parseVector(
+        startSource.position ?? [0, PLAYER_CAPSULE_CENTER_HEIGHT, 0],
+        "start.position",
+      ),
+      velocity: parseVector(startSource.velocity ?? [0, 0, 0], "start.velocity"),
+      yaw: parseNumber(startSource.yaw, 0),
+      grounded: parseBoolean(startSource.grounded, true),
+      o2: clamp(parseNumber(startSource.o2, PLAYER_MAX_O2), 0, PLAYER_MAX_O2),
+    },
     staticBoxes,
-    frames: parsedFrames,
+    frames,
+    expect: parseExpectations(value.expect),
   };
 };
 
-const computeForwardDirection = (yaw: number): PhysicsVector => ({
-  x: -Math.sin(yaw),
-  y: 0,
-  z: -Math.cos(yaw),
-});
+export const readMovementScenarioFile = async (path: string): Promise<MovementScenario> =>
+  parseMovementScenario(JSON.parse(await readFile(path, "utf8")) as unknown);
 
-const rotateHorizontalToBoxLocal = (
-  x: number,
-  z: number,
-  rotationY: number,
-): { readonly x: number; readonly z: number } => {
-  const cosine = Math.cos(rotationY);
-  const sine = Math.sin(rotationY);
+const horizontalBasis = (
+  yaw: number,
+): {
+  readonly forward: PhysicsVector;
+  readonly right: PhysicsVector;
+} => {
+  const forward = { x: -Math.sin(yaw), y: 0, z: -Math.cos(yaw) };
   return {
-    x: cosine * x + sine * z,
-    z: -sine * x + cosine * z,
+    forward,
+    right: { x: -forward.z, y: 0, z: forward.x },
   };
 };
 
-const toBoxLocalPoint = (
-  point: PhysicsVector,
-  box: PhysicsBox,
-): { readonly x: number; readonly z: number } => {
-  const local = rotateHorizontalToBoxLocal(
-    point.x - box.center.x,
-    point.z - box.center.z,
-    box.rotationY ?? 0,
-  );
-  return { x: local.x, z: local.z };
+const worldToLocalVelocity = (velocity: PhysicsVector, yaw: number): PlayerMovementVector => {
+  const basis = horizontalBasis(yaw);
+  return {
+    right: velocity.x * basis.right.x + velocity.z * basis.right.z,
+    up: velocity.y,
+    forward: velocity.x * basis.forward.x + velocity.z * basis.forward.z,
+  };
 };
 
-const isCapsulePositionClear = (
+const localToWorldVelocity = (velocity: PlayerMovementVector, yaw: number): PhysicsVector => {
+  const basis = horizontalBasis(yaw);
+  return {
+    x: velocity.right * basis.right.x + velocity.forward * basis.forward.x,
+    y: velocity.up,
+    z: velocity.right * basis.right.z + velocity.forward * basis.forward.z,
+  };
+};
+
+const smoothStep = (value: number): number => {
+  const bounded = clamp(value, 0, 1);
+  return bounded * bounded * (3 - 2 * bounded);
+};
+
+const createRuntime = async (kind: PhysicsRuntimeKind): Promise<MahjongPhysicsRuntime> =>
+  kind === "rapier"
+    ? createMahjongPhysics([DEFAULT_FLOOR])
+    : createFallbackMahjongPhysics([DEFAULT_FLOOR]);
+
+const sourceBoxForTraversal = (
+  boxes: readonly PhysicsBox[],
+  obstacleId: string,
+): PhysicsBox | null =>
+  boxes.find((box) => resolvePhysicsBoxObstacleId(box) === obstacleId) ?? null;
+
+const activeExternalTraversal = (
+  traversal: ActiveTraversal | null,
+  boxes: readonly PhysicsBox[],
+  jump: boolean,
+): PlayerExternalTraversalState | null => {
+  if (traversal === null) {
+    return null;
+  }
+  const sourcePresent = sourceBoxForTraversal(boxes, traversal.obstacleId) !== null;
+  const releasedActiveMotion = traversal.kind !== "wall-contact" && !jump;
+  const contactValid = sourcePresent && !releasedActiveMotion && traversal.terminal !== "cancelled";
+  return {
+    kind: traversal.kind,
+    obstacleId: traversal.obstacleId,
+    progress: traversal.duration <= 0 ? 0 : clamp(traversal.elapsed / traversal.duration, 0, 1),
+    contactValid,
+    ...(traversal.terminal === "completed" ? { completed: true } : {}),
+    ...(!contactValid || traversal.terminal === "cancelled" ? { cancelled: true } : {}),
+  };
+};
+
+const motionForActiveTraversal = (
+  runtime: MahjongPhysicsRuntime,
+  traversal: ActiveTraversal,
   position: PhysicsVector,
-  staticPhysicsBoxes: readonly PhysicsBox[],
-): boolean => {
-  const capsuleBottomY = position.y - PLAYER_COLLIDER_CENTER_HEIGHT;
-  const capsuleTopY = position.y + PLAYER_COLLIDER_CENTER_HEIGHT;
-  for (const box of staticPhysicsBoxes) {
-    const boxBottomY = box.center.y - box.halfExtents.y;
-    const boxTopY = box.center.y + box.halfExtents.y;
-    if (capsuleBottomY >= boxTopY - FRAME_GROUND_EPSILON || capsuleTopY <= boxBottomY) {
-      continue;
+  deltaSeconds: number,
+): PhysicsMovement => {
+  if (traversal.kind === "wall-contact") {
+    return runtime.move(position, {
+      x: traversal.target.x - position.x,
+      y: traversal.target.y - position.y,
+      z: traversal.target.z - position.z,
+    });
+  }
+  traversal.elapsed = Math.min(traversal.duration, traversal.elapsed + deltaSeconds);
+  const progress = smoothStep(traversal.elapsed / traversal.duration);
+  const proposed = {
+    x: traversal.start.x + (traversal.target.x - traversal.start.x) * progress,
+    y:
+      traversal.start.y +
+      (traversal.target.y - traversal.start.y) * progress +
+      Math.sin(progress * Math.PI) * traversal.arcHeight,
+    z: traversal.start.z + (traversal.target.z - traversal.start.z) * progress,
+  };
+  const movement = runtime.move(position, {
+    x: proposed.x - position.x,
+    y: proposed.y - position.y,
+    z: proposed.z - position.z,
+  });
+  const blocked =
+    movement.collisions > 0 &&
+    Math.hypot(
+      movement.position.x - proposed.x,
+      movement.position.y - proposed.y,
+      movement.position.z - proposed.z,
+    ) > TRAVERSAL_CONTACT_EPSILON &&
+    !(
+      movement.contacts.length > 0 &&
+      movement.contacts.every((contact) => contact.obstacleId === traversal.obstacleId)
+    );
+  if (blocked) {
+    traversal.terminal = "cancelled";
+    return movement;
+  }
+  if (traversal.elapsed < traversal.duration) {
+    return movement;
+  }
+  const landing = runtime.move(movement.position, {
+    x: traversal.target.x - movement.position.x,
+    y: traversal.target.y - movement.position.y - PLAYER_SUPPORT_SNAP_HEIGHT,
+    z: traversal.target.z - movement.position.z,
+  });
+  const landedOnSource =
+    landing.grounded &&
+    landing.contacts.some(
+      (contact) => contact.kind === "support" && contact.obstacleId === traversal.obstacleId,
+    );
+  traversal.terminal = landedOnSource ? "completed" : "cancelled";
+  return landing;
+};
+
+const addTraversalContact = (
+  output: PlayerMovementContact[],
+  kind: "vault" | "ledge",
+  resolution: TraversalTargetResolution,
+  approach: PhysicsVector,
+  currentPosition: PhysicsVector,
+  vitals: PlayerVitalsState,
+): void => {
+  const height = Math.max(0, resolution.target.y - currentPosition.y);
+  const oxygenCost = resolveVaultTraversalO2Cost(height);
+  output.push({
+    kind,
+    normal: { x: -approach.x, y: 0, z: -approach.z },
+    obstacle: {
+      id: resolution.obstacleId,
+      topY: resolution.topY,
+      clearanceValid: canAffordPlayerO2Cost(vitals, oxygenCost),
+    },
+    target: resolution.target,
+  });
+};
+
+const resolveTraversalCandidates = (
+  beforePosition: PhysicsVector,
+  desiredHorizontalDelta: PhysicsVector,
+  movement: PhysicsMovement,
+  boxes: readonly PhysicsBox[],
+  vitals: PlayerVitalsState,
+): {
+  readonly contacts: readonly PlayerMovementContact[];
+  readonly vault: TraversalTargetResolution | null;
+  readonly ledge: TraversalTargetResolution | null;
+  readonly wall: ReturnType<typeof resolveWallHangTargetDetails>;
+} => {
+  const horizontalDistance = Math.hypot(desiredHorizontalDelta.x, desiredHorizontalDelta.z);
+  if (horizontalDistance < 0.015) {
+    return { contacts: [], vault: null, ledge: null, wall: null };
+  }
+  const approach = {
+    x: desiredHorizontalDelta.x / horizontalDistance,
+    y: 0,
+    z: desiredHorizontalDelta.z / horizontalDistance,
+  };
+  const feetY = beforePosition.y - PLAYER_CAPSULE_CENTER_HEIGHT;
+  const vaultCandidate = resolveVaultTargetDetails(
+    beforePosition,
+    desiredHorizontalDelta,
+    feetY,
+    boxes,
+  );
+  const vault =
+    vaultCandidate !== null &&
+    vaultCandidate.topY - feetY <= LOW_OBSTACLE_VAULT_MAX_HEIGHT &&
+    isPlayerCapsulePositionClear(vaultCandidate.target, boxes)
+      ? vaultCandidate
+      : null;
+  const ledgeCandidate =
+    vault === null
+      ? resolveLedgeGrabTargetDetails(beforePosition, desiredHorizontalDelta, feetY, boxes, [])
+      : null;
+  const ledge =
+    ledgeCandidate !== null && isPlayerCapsulePositionClear(ledgeCandidate.target, boxes)
+      ? ledgeCandidate
+      : null;
+  let wall =
+    vault === null && ledge === null
+      ? resolveWallHangTargetDetails(movement.position, approach, boxes)
+      : null;
+  if (
+    wall !== null &&
+    !movement.contacts.some(
+      (contact) =>
+        contact.kind === "wall" &&
+        contact.obstacleId === resolvePhysicsBoxObstacleId(wall?.box ?? DEFAULT_FLOOR),
+    )
+  ) {
+    wall = null;
+  }
+  const contacts: PlayerMovementContact[] = [];
+  if (vault !== null) {
+    addTraversalContact(contacts, "vault", vault, approach, beforePosition, vitals);
+  } else if (ledge !== null) {
+    addTraversalContact(contacts, "ledge", ledge, approach, beforePosition, vitals);
+  } else if (wall !== null) {
+    contacts.push({
+      kind: "wall",
+      normal: wall.wallNormal,
+      obstacle: {
+        id: resolvePhysicsBoxObstacleId(wall.box),
+        topY: wall.wallTopY,
+        clearanceValid: true,
+      },
+      target: wall.target,
+    });
+  }
+  return { contacts, vault, ledge, wall };
+};
+
+const startRequestedTraversal = (
+  request: NonNullable<ReturnType<typeof stepPlayerMovementController>["traversalRequest"]>,
+  candidates: ReturnType<typeof resolveTraversalCandidates>,
+  position: PhysicsVector,
+  vitals: PlayerVitalsState,
+): { readonly traversal: ActiveTraversal | null; readonly vitals: PlayerVitalsState } => {
+  if (request.kind === "wall-contact") {
+    const wall = candidates.wall;
+    if (wall?.box === undefined || resolvePhysicsBoxObstacleId(wall.box) !== request.obstacle.id) {
+      return { traversal: null, vitals };
     }
-    const local = toBoxLocalPoint(position, box);
-    const closestX = clamp(local.x, -box.halfExtents.x, box.halfExtents.x);
-    const closestZ = clamp(local.z, -box.halfExtents.z, box.halfExtents.z);
-    const horizontalDistance = Math.hypot(local.x - closestX, local.z - closestZ);
-    if (horizontalDistance < PLAYER_COLLIDER_RADIUS - FRAME_GROUND_EPSILON) {
-      return false;
-    }
+    return {
+      traversal: {
+        kind: "wall-contact",
+        obstacleId: request.obstacle.id,
+        sourceBox: wall.box,
+        start: { ...position },
+        target: { ...wall.target },
+        duration: 0.14,
+        arcHeight: 0,
+        wall: {
+          wallNormal: wall.wallNormal,
+          wallFacePoint: wall.wallFacePoint,
+          wallTopY: wall.wallTopY,
+          box: wall.box,
+        },
+        elapsed: 0,
+        terminal: null,
+      },
+      vitals,
+    };
+  }
+  const resolution =
+    request.kind === "vault"
+      ? candidates.vault
+      : request.kind === "ledge-grab"
+        ? candidates.ledge
+        : null;
+  if (resolution?.obstacleId !== request.obstacle.id) {
+    return { traversal: null, vitals };
+  }
+  const height = Math.max(0, resolution.target.y - position.y);
+  const oxygenCost = resolveVaultTraversalO2Cost(height);
+  if (!canAffordPlayerO2Cost(vitals, oxygenCost)) {
+    return { traversal: null, vitals };
+  }
+  const nextVitals = applyPlayerO2Cost(vitals, oxygenCost, O2_JUMP_RECOVERY_DELAY_SECONDS);
+  return {
+    traversal: {
+      kind: request.kind,
+      obstacleId: resolution.obstacleId,
+      sourceBox: resolution.box,
+      start: { ...position },
+      target: { ...resolution.target },
+      duration: resolveO2ScaledTraversalDuration(
+        resolveVaultTraversalDuration(height),
+        nextVitals.o2 / PLAYER_MAX_O2,
+      ),
+      arcHeight: resolveVaultTraversalArcHeight(height),
+      wall: null,
+      elapsed: 0,
+      terminal: null,
+    },
+    vitals: nextVitals,
+  };
+};
+
+const startWallClimb = (
+  traversal: ActiveTraversal | null,
+  boxes: readonly PhysicsBox[],
+  position: PhysicsVector,
+  vitals: PlayerVitalsState,
+): { readonly traversal: ActiveTraversal | null; readonly vitals: PlayerVitalsState } => {
+  if (traversal?.kind !== "wall-contact" || traversal.wall === null) {
+    return { traversal, vitals };
+  }
+  const sourceBox = sourceBoxForTraversal(boxes, traversal.obstacleId);
+  if (sourceBox === null) {
+    return { traversal, vitals };
+  }
+  const wall = { ...traversal.wall, box: sourceBox };
+  const target = resolveWallClimbTarget(wall);
+  if (!isPlayerCapsulePositionClear(target, boxes)) {
+    return { traversal, vitals };
+  }
+  const height = Math.max(0, target.y - position.y);
+  const oxygenCost = resolveVaultTraversalO2Cost(height);
+  if (!canAffordPlayerO2Cost(vitals, oxygenCost)) {
+    return { traversal, vitals };
+  }
+  const nextVitals = applyPlayerO2Cost(vitals, oxygenCost, O2_JUMP_RECOVERY_DELAY_SECONDS);
+  return {
+    traversal: {
+      kind: "wall-climb",
+      obstacleId: traversal.obstacleId,
+      sourceBox,
+      start: { ...position },
+      target,
+      duration: resolveO2ScaledTraversalDuration(
+        resolveVaultTraversalDuration(height),
+        nextVitals.o2 / PLAYER_MAX_O2,
+      ),
+      arcHeight: resolveVaultTraversalArcHeight(height),
+      wall,
+      elapsed: 0,
+      terminal: null,
+    },
+    vitals: nextVitals,
+  };
+};
+
+const eventMatches = (event: PlayerMovementEvent, pattern: MovementEventPattern): boolean => {
+  if (event.kind !== pattern.kind) {
+    return false;
+  }
+  if (pattern.result !== undefined) {
+    return event.kind === "jump" && event.result === pattern.result;
+  }
+  if (pattern.traversal !== undefined) {
+    return (
+      (event.kind === "traversal-cancel" || event.kind === "traversal-complete") &&
+      event.traversal === pattern.traversal
+    );
   }
   return true;
 };
 
-const resolveWallClimbTarget = (
-  wallHang: {
-    readonly wallNormal: PhysicsVector;
-    readonly wallFacePoint: PhysicsVector;
-    readonly wallTopY: number;
-    readonly box: PhysicsBox;
-  },
-  staticPhysicsBoxes: readonly PhysicsBox[],
-): PhysicsVector | null => {
-  const target = resolveSharedWallClimbTarget(wallHang);
-  return isCapsulePositionClear(target, staticPhysicsBoxes) ? target : null;
-};
-
-const smoothStep = (value: number): number => value * value * (3 - 2 * value);
-
-const advanceWallClimb = (
-  traversal: ClimbingState,
-  delta: number,
-): { readonly position: PhysicsVector; readonly reachedTarget: boolean } => {
-  traversal.elapsed = Math.min(traversal.elapsed + delta, traversal.duration);
-  const progress = smoothStep(clamp(traversal.elapsed / traversal.duration, 0, 1));
-  return {
-    position: {
-      x:
-        traversal.startPosition.x +
-        (traversal.targetPosition.x - traversal.startPosition.x) * progress,
-      y:
-        traversal.startPosition.y +
-        (traversal.targetPosition.y - traversal.startPosition.y) * progress +
-        (traversal.phase === "vault" ? Math.sin(progress * Math.PI) * traversal.arcHeight : 0),
-      z:
-        traversal.startPosition.z +
-        (traversal.targetPosition.z - traversal.startPosition.z) * progress,
-    },
-    reachedTarget: traversal.elapsed >= traversal.duration,
-  };
-};
-
-const runScenario = async (
-  scenario: Scenario,
-): Promise<{
-  readonly name: string;
-  readonly description?: string;
-  readonly durationSec: number;
-  readonly finalPosition: PhysicsVector;
-  readonly finalYaw: number;
-  readonly finalGrounded: boolean;
-  readonly finalHanging: boolean;
-  readonly finalClimbing: boolean;
-  readonly verticalVelocity: number;
-  readonly distanceXY: number;
-  readonly frameCount: number;
-  readonly maxHorizontalSpeed: number;
-  readonly samples: readonly FrameSample[];
-}> => {
-  const defaultFloor: PhysicsBox = {
-    center: { x: 0, y: -0.5, z: 0 },
-    halfExtents: { x: 100, y: 0.5, z: 100 },
-  };
-  const runtime: MahjongPhysicsRuntime = await createMahjongPhysics([
-    defaultFloor,
-    ...scenario.staticBoxes,
-  ]);
-
-  try {
-    const startState = scenario.start;
-    const state: SimulationState = {
-      position: { ...startState.position },
-      verticalVelocity: 0,
-      yaw: startState.yaw,
-      grounded: startState.grounded,
-      lastGrounded: startState.grounded,
-      traversal: { kind: "none" },
-    };
-    const samples: FrameSample[] = [];
-    let frameTimeSec = 0;
-    let frameIndex = 0;
-    // Track total planar distance traveled (X‑Z plane). The original implementation
-    // mistakenly used the variable name `distanceXy` (lower‑case "y"), but the function
-    // later attempted to return `distanceXY`. This caused a runtime error:
-    // "distanceXY is not defined". We rename the variable to `distanceXY` for
-    // consistency with the returned summary.
-    let distanceXY = 0;
-    let maxHorizontalSpeed = 0;
-
-    const frameDurationSec = scenario.frameDurationSec;
-
-    for (const [stepIndex, step] of scenario.frames.entries()) {
-      const requestedFrames = Math.max(1, Math.ceil(step.duration / frameDurationSec));
-      for (let i = 0; i < requestedFrames; i += 1) {
-        const delta = step.duration / requestedFrames;
-        frameTimeSec += delta;
-        const previous = { ...state.position };
-        const fromPosition = { ...state.position };
-        state.lastGrounded = state.grounded;
-
-        const forwardInput = clamp(step.forward, -1, 1);
-        const rightInput = clamp(step.right, -1, 1);
-        const inputMagnitude = Math.hypot(forwardInput, rightInput);
-        const normalizedForward =
-          inputMagnitude <= 1 || inputMagnitude === 0
-            ? forwardInput
-            : forwardInput / inputMagnitude;
-        const normalizedRight =
-          inputMagnitude <= 1 || inputMagnitude === 0 ? rightInput : rightInput / inputMagnitude;
-        const movementFactor = clamp(inputMagnitude, 0, 1);
-        const canSprint = step.sprint && inputMagnitude > 0 && !step.crouch;
-        const sprinting = canSprint;
-        const moveSpeed =
-          scenario.physics.moveSpeed *
-          (step.crouch ? 0.5 : 1) *
-          (sprinting ? scenario.physics.sprintMultiplier : 1);
-        const requestedForwardSpeed = normalizedForward * moveSpeed * movementFactor;
-        const requestedRightSpeed = normalizedRight * moveSpeed * movementFactor;
-
-        maxHorizontalSpeed = Math.max(
-          maxHorizontalSpeed,
-          Math.hypot(requestedForwardSpeed, requestedRightSpeed),
-        );
-
-        const ledgeEvent: LedgeEvent | null = null;
-        let vaultEvent: LedgeEvent | null = null;
-        // This is intentionally frame-local. It describes only the transition
-        // into hanging and cannot leak into later samples.
-        let wallHangEvent: LedgeEvent | null = null;
-        let movement = {
-          position: { ...state.position },
-          grounded: state.grounded,
-          collisions: 0,
-        };
-
-        const traversalAtFrameStart = state.traversal;
-        if (traversalAtFrameStart.kind === "wall-hanging") {
-          state.position = { ...traversalAtFrameStart.target };
-          state.grounded = false;
-          state.verticalVelocity = 0;
-          movement = { position: { ...state.position }, grounded: false, collisions: 0 };
-          traversalAtFrameStart.elapsed = Math.min(
-            traversalAtFrameStart.elapsed + delta,
-            WALL_HANG_SETTLE_DURATION,
-          );
-          if (step.forward < 0) {
-            // Backward input releases the wall; the ordinary movement path
-            // below handles the resulting fall or retreat.
-            state.traversal = { kind: "none" };
-          } else if (
-            traversalAtFrameStart.elapsed >= WALL_HANG_SETTLE_DURATION &&
-            (step.forward > 0 || step.jump)
-          ) {
-            const targetPosition = resolveWallClimbTarget(
-              traversalAtFrameStart,
-              scenario.staticBoxes,
-            );
-            if (targetPosition !== null) {
-              const preservedSpeed = Math.hypot(
-                traversalAtFrameStart.preservedForwardVelocity,
-                traversalAtFrameStart.preservedStrafeVelocity,
-              );
-              state.traversal = {
-                kind: "climbing",
-                startPosition: { ...state.position },
-                targetPosition,
-                box: traversalAtFrameStart.box,
-                duration: resolveVaultTraversalDuration(targetPosition.y - state.position.y),
-                arcHeight: resolveVaultTraversalArcHeight(targetPosition.y - state.position.y),
-                phase: "vault",
-                preservedForwardVelocity: traversalAtFrameStart.preservedForwardVelocity,
-                preservedStrafeVelocity: traversalAtFrameStart.preservedStrafeVelocity,
-                preserveSprinting: traversalAtFrameStart.preserveSprinting,
-                landingBoostDistance:
-                  preservedSpeed > 0
-                    ? Math.min(WALL_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
-                    : 0,
-                elapsed: 0,
-              };
-            }
-          }
-        }
-
-        if (state.traversal.kind === "wall-hanging") {
-          // Gravity and ordinary movement are suppressed while attached.
-          state.grounded = false;
-          state.verticalVelocity = 0;
-        } else if (state.traversal.kind === "climbing") {
-          const climb = advanceWallClimb(state.traversal, delta);
-          state.position = climb.position;
-          state.grounded = false;
-          state.verticalVelocity = 0;
-          movement = { position: { ...state.position }, grounded: false, collisions: 0 };
-          if (climb.reachedTarget) {
-            if (state.traversal.phase === "vault" && state.traversal.landingBoostDistance > 0) {
-              const traversal = state.traversal;
-              const preservedSpeed = Math.hypot(
-                traversal.preservedForwardVelocity,
-                traversal.preservedStrafeVelocity,
-              );
-              const boostDirectionForward =
-                preservedSpeed > 0 ? traversal.preservedForwardVelocity / preservedSpeed : 0;
-              const boostDirectionRight =
-                preservedSpeed > 0 ? traversal.preservedStrafeVelocity / preservedSpeed : 0;
-              state.traversal = {
-                ...traversal,
-                startPosition: { ...traversal.targetPosition },
-                targetPosition: {
-                  x:
-                    traversal.targetPosition.x +
-                    boostDirectionForward * traversal.landingBoostDistance,
-                  y: traversal.targetPosition.y,
-                  z:
-                    traversal.targetPosition.z +
-                    boostDirectionRight * traversal.landingBoostDistance,
-                },
-                duration: WALL_CLIMB_EXIT_BOOST_DURATION,
-                phase: "landingBoost",
-                elapsed: 0,
-              };
-            } else {
-              // Use the same short downward settle as the live controller. A
-              // zero-length query does not ask Rapier to snap the capsule onto
-              // the wall top, which can turn a valid edge landing into a fall.
-              const landingMovement = runtime.move(state.position, {
-                x: 0,
-                y: -PLAYER_SUPPORT_SNAP_HEIGHT,
-                z: 0,
-              });
-              const targetBottomY = state.position.y - PLAYER_COLLIDER_CENTER_HEIGHT;
-              const box = state.traversal.box;
-              const boxTopY = box === null ? null : box.center.y + box.halfExtents.y;
-              const localLanding = box === null ? null : toBoxLocalPoint(state.position, box);
-              const supportedByWallTop =
-                box !== null &&
-                boxTopY !== null &&
-                localLanding !== null &&
-                Math.abs(targetBottomY - boxTopY) <= 0.05 &&
-                localLanding.x >= -box.halfExtents.x &&
-                localLanding.x <= box.halfExtents.x &&
-                localLanding.z >= -box.halfExtents.z &&
-                localLanding.z <= box.halfExtents.z;
-              state.position = landingMovement.position;
-              state.grounded = landingMovement.grounded || supportedByWallTop;
-              state.verticalVelocity = 0;
-              state.traversal = { kind: "none" };
-              movement = landingMovement;
-            }
-          }
-        } else {
-          const jumpStarted = step.jump && state.lastGrounded;
-          if (step.jump && state.grounded) {
-            state.verticalVelocity = scenario.physics.jumpSpeed;
-            state.grounded = false;
-          }
-
-          const forward = computeForwardDirection(state.yaw);
-          const right = { x: -forward.z, y: 0, z: forward.x };
-          const desiredHorizontalDelta = {
-            x: (requestedForwardSpeed * forward.x + requestedRightSpeed * right.x) * delta,
-            y: 0,
-            z: (requestedForwardSpeed * forward.z + requestedRightSpeed * right.z) * delta,
-          };
-          const desiredDelta = {
-            x: desiredHorizontalDelta.x,
-            y: state.verticalVelocity * delta,
-            z: desiredHorizontalDelta.z,
-          };
-
-          movement = runtime.move(state.position, desiredDelta);
-          state.position = movement.position;
-          state.grounded = movement.grounded && state.verticalVelocity <= 0;
-          if (!state.grounded) {
-            state.verticalVelocity -= scenario.physics.gravity * delta;
-          } else if (state.verticalVelocity < 0) {
-            state.verticalVelocity = 0;
-          }
-
-          const jumpOffset = Math.max(0, movement.position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
-          const horizontalVelocity = {
-            x: desiredHorizontalDelta.x / Math.max(delta, FRAME_GROUND_EPSILON),
-            y: 0,
-            z: desiredHorizontalDelta.z / Math.max(delta, FRAME_GROUND_EPSILON),
-          };
-          const canUseAirborneTraversal =
-            (jumpStarted || !state.lastGrounded) &&
-            !state.grounded &&
-            (!movement.grounded || state.verticalVelocity > 0) &&
-            jumpOffset > LEDGE_GRAB_MIN_FALL_OFFSET &&
-            desiredHorizontalDelta.x ** 2 + desiredHorizontalDelta.z ** 2 > 0.0002;
-          const vaultTarget = canUseAirborneTraversal
-            ? resolveVaultTarget(
-                fromPosition,
-                horizontalVelocity,
-                fromPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT,
-                scenario.staticBoxes,
-              )
-            : null;
-          const horizontalApproachDistance = Math.hypot(
-            desiredHorizontalDelta.x,
-            desiredHorizontalDelta.z,
-          );
-          const approachDistance =
-            horizontalApproachDistance > WALL_HANG_EPSILON
-              ? (movement.position.x - fromPosition.x) *
-                  (desiredHorizontalDelta.x / horizontalApproachDistance) +
-                (movement.position.z - fromPosition.z) *
-                  (desiredHorizontalDelta.z / horizontalApproachDistance)
-              : 0;
-          const horizontalMotionBlocked =
-            horizontalApproachDistance > 0.015 &&
-            approachDistance + WALL_HANG_EPSILON < horizontalApproachDistance;
-          // Wall hanging is an approach traversal, not a generic collision
-          // recovery. A floor, ceiling, or unrelated prop can also produce
-          // a Rapier collision while a wall happens to be nearby. Only a
-          // blocked horizontal approach may enter the wall resolver; the
-          // resolver then applies the near-top, reach, face, and overlap
-          // checks.
-          if (vaultTarget !== null) {
-            const momentum = resolveLedgeClimbMomentum(
-              requestedForwardSpeed,
-              requestedRightSpeed,
-              0,
-              0,
-              sprinting,
-              scenario.physics.moveSpeed,
-            );
-            // Resolve timing from the obstacle top relative to the feet at the
-            // start of the approach. The physics move may already lift the
-            // capsule during the jump; using that post-move position would
-            // make a measured two-metre block finish early.
-            const climbHeight = Math.max(0, vaultTarget.y - fromPosition.y);
-            state.traversal = {
-              kind: "climbing",
-              startPosition: { ...state.position },
-              targetPosition: { ...vaultTarget },
-              box: null,
-              duration: resolveVaultTraversalDuration(climbHeight),
-              arcHeight: resolveVaultTraversalArcHeight(climbHeight),
-              phase: "vault",
-              preservedForwardVelocity: momentum.preservedForwardVelocity,
-              preservedStrafeVelocity: momentum.preservedStrafeVelocity,
-              preserveSprinting: momentum.preserveSprinting,
-              landingBoostDistance:
-                Math.hypot(momentum.preservedForwardVelocity, momentum.preservedStrafeVelocity) > 0
-                  ? Math.min(
-                      WALL_CLIMB_EXIT_BOOST_DISTANCE,
-                      Math.hypot(
-                        momentum.preservedForwardVelocity,
-                        momentum.preservedStrafeVelocity,
-                      ) * 0.05,
-                    )
-                  : 0,
-              elapsed: 0,
-            };
-            state.grounded = false;
-            state.verticalVelocity = 0;
-            vaultEvent = {
-              targetX: vaultTarget.x,
-              targetY: vaultTarget.y,
-              targetZ: vaultTarget.z,
-              preservedForwardVelocity: momentum.preservedForwardVelocity,
-              preservedStrafeVelocity: momentum.preservedStrafeVelocity,
-              preserveSprinting: momentum.preserveSprinting,
-            };
-          } else if (canUseAirborneTraversal && horizontalMotionBlocked) {
-            const wallPhysicsPosition = movement.position;
-            const wallHang = resolveWallHangTargetDetails(
-              wallPhysicsPosition,
-              forward,
-              scenario.staticBoxes,
-            );
-            const resolvedWallHang =
-              wallHang ?? resolveWallHangTargetDetails(fromPosition, forward, scenario.staticBoxes);
-            if (resolvedWallHang !== null) {
-              state.position = { ...resolvedWallHang.target };
-              state.verticalVelocity = 0;
-              state.grounded = false;
-              state.traversal = {
-                kind: "wall-hanging",
-                target: resolvedWallHang.target,
-                wallNormal: resolvedWallHang.wallNormal,
-                wallFacePoint: resolvedWallHang.wallFacePoint,
-                wallTopY: resolvedWallHang.wallTopY,
-                box: resolvedWallHang.box,
-                preservedForwardVelocity: requestedForwardSpeed,
-                preservedStrafeVelocity: requestedRightSpeed,
-                preserveSprinting: sprinting,
-                elapsed: 0,
-              };
-              wallHangEvent = {
-                targetX: resolvedWallHang.target.x,
-                targetY: resolvedWallHang.target.y,
-                targetZ: resolvedWallHang.target.z,
-                preservedForwardVelocity: requestedForwardSpeed,
-                preservedStrafeVelocity: requestedRightSpeed,
-                preserveSprinting: sprinting,
-              };
-            }
-          }
-        }
-
-        const planarDelta = Math.hypot(
-          state.position.x - previous.x,
-          state.position.z - previous.z,
-        );
-        distanceXY += planarDelta;
-
-        if (
-          state.grounded &&
-          state.position.y - PLAYER_COLLIDER_CENTER_HEIGHT < FRAME_GROUND_EPSILON &&
-          !state.lastGrounded
-        ) {
-          state.position.y = PLAYER_COLLIDER_CENTER_HEIGHT;
-          state.verticalVelocity = 0;
-        }
-
-        if (
-          frameIndex % scenario.reportEveryFrames === 0 ||
-          vaultEvent !== null ||
-          wallHangEvent !== null ||
-          i === requestedFrames - 1
-        ) {
-          samples.push({
-            timeSec: frameTimeSec,
-            frame: frameIndex,
-            stepIndex,
-            stepLabel: step.label ?? `step-${String(stepIndex + 1)}`,
-            position: {
-              x: state.position.x,
-              y: state.position.y,
-              z: state.position.z,
-            },
-            velocityY: state.verticalVelocity,
-            grounded: state.grounded,
-            crouching: step.crouch,
-            sprinting,
-            collisions: movement.collisions,
-            ledgeGrab: ledgeEvent,
-            vaultGrab: vaultEvent,
-            wallHang: wallHangEvent,
-            hanging: state.traversal.kind === "wall-hanging",
-            climbing: state.traversal.kind === "climbing",
-            traversalState: state.traversal.kind,
-          });
-        }
-
-        state.yaw += step.yawRate * delta;
-        frameIndex += 1;
-      }
-    }
-
-    const totalFrames = frameIndex;
-    const description = scenario.description;
-    return {
-      name: scenario.name,
-      ...(description === undefined ? {} : { description }),
-      durationSec: frameTimeSec,
-      finalPosition: state.position,
-      finalYaw: state.yaw,
-      finalGrounded: state.grounded,
-      finalHanging: state.traversal.kind === "wall-hanging",
-      finalClimbing: state.traversal.kind === "climbing",
-      verticalVelocity: state.verticalVelocity,
-      distanceXY,
-      frameCount: totalFrames,
-      maxHorizontalSpeed,
-      samples,
-    };
-  } finally {
-    runtime.dispose();
+const traceNumber = (sample: MovementFrameTrace, field: MovementTraceNumericField): number => {
+  switch (field) {
+    case "position.x":
+      return sample.position.x;
+    case "position.y":
+      return sample.position.y;
+    case "position.z":
+      return sample.position.z;
+    case "velocity.x":
+      return sample.velocity.x;
+    case "velocity.y":
+      return sample.velocity.y;
+    case "velocity.z":
+      return sample.velocity.z;
+    case "speed.horizontal":
+      return Math.hypot(sample.velocity.x, sample.velocity.z);
+    case "o2":
+      return sample.o2;
+    case "collisions":
+      return sample.collisions;
+    case "movement.progress":
+      return sample.movement.traversalProgress;
+    case "camera.input.acceleration.right":
+      return sample.camera.input.localAcceleration.right;
+    case "camera.input.acceleration.forward":
+      return sample.camera.input.localAcceleration.forward;
+    case "camera.input.acceleration.up":
+      return sample.camera.input.localAcceleration.up;
+    case "camera.offsets.roll":
+      return sample.camera.offsets.roll;
+    case "camera.offsets.headBob":
+      return sample.camera.offsets.headBob;
+    case "camera.offsets.headBobLateral":
+      return sample.camera.offsets.headBobLateral;
+    case "camera.offsets.headBobDepth":
+      return sample.camera.offsets.headBobDepth;
+    case "camera.offsets.headBobPitch":
+      return sample.camera.offsets.headBobPitch;
+    case "camera.offsets.verticalOffset":
+      return sample.camera.offsets.verticalOffset;
+    case "camera.offsets.aimSwayX":
+      return sample.camera.offsets.aimSwayX;
+    case "camera.offsets.aimSwayY":
+      return sample.camera.offsets.aimSwayY;
   }
 };
 
-const formatSummary = (summary: Awaited<ReturnType<typeof runScenario>>): string => {
-  const lines = [
-    `name: ${summary.name}`,
-    summary.description === undefined ? null : `description: ${summary.description}`,
-    `frames: ${summary.frameCount}`,
-    `duration_sec: ${summary.durationSec.toFixed(3)}`,
-    `distance_xy_m: ${summary.distanceXY.toFixed(4)}`,
-    `max_horizontal_speed_m_s: ${summary.maxHorizontalSpeed.toFixed(3)}`,
-    `final_position_m: x=${summary.finalPosition.x.toFixed(3)} y=${summary.finalPosition.y.toFixed(3)} z=${summary.finalPosition.z.toFixed(3)}`,
-    `final_yaw_rad: ${summary.finalYaw.toFixed(4)}`,
-    `final_grounded: ${String(summary.finalGrounded)}`,
-    `final_hanging: ${String(summary.finalHanging)}`,
-    `final_climbing: ${String(summary.finalClimbing)}`,
-    `final_vertical_velocity_m_s: ${summary.verticalVelocity.toFixed(3)}`,
-  ].filter((line): line is string => line !== null);
-  return lines.join("\n");
+const evaluateRange = (
+  trace: readonly MovementFrameTrace[],
+  expectation: MovementRangeExpectation,
+): MovementScenarioAssertion => {
+  const candidates =
+    expectation.label === undefined
+      ? trace
+      : trace.filter((sample) => sample.stepLabel === expectation.label);
+  if (candidates.length === 0) {
+    return {
+      id: expectation.id,
+      passed: false,
+      expected: `samples for ${expectation.label ?? "scenario"}`,
+      actual: "no matching samples",
+    };
+  }
+  const values = candidates.map((sample) => traceNumber(sample, expectation.field));
+  const actual =
+    expectation.at === "first"
+      ? values[0]
+      : expectation.at === "last"
+        ? values[values.length - 1]
+        : expectation.at === "min"
+          ? Math.min(...values)
+          : Math.max(...values);
+  if (actual === undefined) {
+    throw new Error(`Missing numeric value for ${expectation.id}`);
+  }
+  const tolerance = expectation.tolerance;
+  const equalsPass =
+    expectation.equals === undefined || Math.abs(actual - expectation.equals) <= tolerance;
+  const minPass = expectation.min === undefined || actual >= expectation.min - tolerance;
+  const maxPass = expectation.max === undefined || actual <= expectation.max + tolerance;
+  return {
+    id: expectation.id,
+    passed: equalsPass && minPass && maxPass,
+    expected: JSON.stringify({
+      ...(expectation.equals === undefined ? {} : { equals: expectation.equals }),
+      ...(expectation.min === undefined ? {} : { min: expectation.min }),
+      ...(expectation.max === undefined ? {} : { max: expectation.max }),
+      tolerance,
+    }),
+    actual: String(actual),
+  };
+};
+
+const evaluateExpectations = (
+  scenario: MovementScenario,
+  trace: readonly MovementFrameTrace[],
+  events: readonly MovementOrderedEvent[],
+): readonly MovementScenarioAssertion[] => {
+  const assertions: MovementScenarioAssertion[] = [];
+  for (const [index, pattern] of scenario.expect.requiredEvents.entries()) {
+    const count = events.filter((entry) => eventMatches(entry.event, pattern)).length;
+    assertions.push({
+      id: `required-event-${String(index + 1)}-${pattern.kind}`,
+      passed: count > 0,
+      expected: `at least one ${JSON.stringify(pattern)}`,
+      actual: String(count),
+    });
+  }
+  for (const [index, pattern] of scenario.expect.forbiddenEvents.entries()) {
+    const count = events.filter((entry) => eventMatches(entry.event, pattern)).length;
+    assertions.push({
+      id: `forbidden-event-${String(index + 1)}-${pattern.kind}`,
+      passed: count === 0,
+      expected: `no ${JSON.stringify(pattern)}`,
+      actual: String(count),
+    });
+  }
+  for (const state of scenario.expect.requiredStates) {
+    const count = trace.filter((sample) => sample.movement.state === state).length;
+    assertions.push({
+      id: `required-state-${state}`,
+      passed: count > 0,
+      expected: `state ${state}`,
+      actual: String(count),
+    });
+  }
+  for (const state of scenario.expect.forbiddenStates) {
+    const count = trace.filter((sample) => sample.movement.state === state).length;
+    assertions.push({
+      id: `forbidden-state-${state}`,
+      passed: count === 0,
+      expected: `no state ${state}`,
+      actual: String(count),
+    });
+  }
+  for (const kind of scenario.expect.requiredContactKinds) {
+    const count = trace.reduce(
+      (total, sample) => total + sample.contacts.filter((contact) => contact.kind === kind).length,
+      0,
+    );
+    assertions.push({
+      id: `required-contact-${kind}`,
+      passed: count > 0,
+      expected: `contact ${kind}`,
+      actual: String(count),
+    });
+  }
+  const final = trace[trace.length - 1];
+  if (final === undefined) {
+    throw new Error(`Scenario ${scenario.name} produced no trace`);
+  }
+  if (scenario.expect.finalGrounded !== undefined) {
+    assertions.push({
+      id: "final-grounded",
+      passed: final.grounded === scenario.expect.finalGrounded,
+      expected: String(scenario.expect.finalGrounded),
+      actual: String(final.grounded),
+    });
+  }
+  if (scenario.expect.finalState !== undefined) {
+    assertions.push({
+      id: "final-state",
+      passed: final.movement.state === scenario.expect.finalState,
+      expected: scenario.expect.finalState,
+      actual: final.movement.state,
+    });
+  }
+  assertions.push(
+    ...scenario.expect.ranges.map((expectation) => evaluateRange(trace, expectation)),
+  );
+  return assertions;
+};
+
+export const runMovementScenario = async (
+  scenario: MovementScenario,
+): Promise<MovementSimulationResult> => {
+  const runtime = await createRuntime(scenario.runtime);
+  const cameraDamper = createCameraMotionDamper();
+  let controllerState = createPlayerMovementControllerState(scenario.seed, scenario.start.grounded);
+  let position = { ...scenario.start.position };
+  let velocity = { ...scenario.start.velocity };
+  let grounded = scenario.start.grounded;
+  let yaw = scenario.start.yaw;
+  let vitals: PlayerVitalsState = { ...createPlayerVitals(), o2: scenario.start.o2 };
+  let traversal: ActiveTraversal | null = null;
+  let timeSec = 0;
+  let frame = 0;
+  let distanceMeters = 0;
+  let maximumFallSpeed = Math.max(0, -velocity.y);
+  const trace: MovementFrameTrace[] = [];
+  const orderedEvents: MovementOrderedEvent[] = [];
+
+  try {
+    for (const [stepIndex, step] of scenario.frames.entries()) {
+      const disabled = new Set(step.disabledObstacleIds);
+      const activeBoxes = scenario.staticBoxes.filter(
+        (box) => !disabled.has(resolvePhysicsBoxObstacleId(box)),
+      );
+      runtime.setDynamicBoxes(activeBoxes);
+      const boundedFrameDuration = Math.min(
+        scenario.frameDurationSec,
+        PLAYER_MOVEMENT_MAX_STEP_SECONDS,
+      );
+      const frameCount = Math.max(1, Math.ceil(step.duration / boundedFrameDuration));
+      const deltaSeconds = step.duration / frameCount;
+
+      for (let stepFrame = 0; stepFrame < frameCount; stepFrame += 1) {
+        frame += 1;
+        timeSec += deltaSeconds;
+        yaw += step.yawRate * deltaSeconds;
+        const priorPosition = { ...position };
+        const priorVelocity = { ...velocity };
+        const priorGrounded = grounded;
+        const inputMagnitude = Math.min(1, Math.hypot(step.right, step.forward));
+        const sprintFrameCost = O2_SPRINT_DRAIN_PER_SECOND * deltaSeconds * inputMagnitude;
+        const sprintAffordable = canAffordPlayerO2Cost(vitals, sprintFrameCost);
+        const externalTraversal = activeExternalTraversal(traversal, activeBoxes, step.jump);
+        const localVelocity = worldToLocalVelocity(velocity, yaw);
+        const controllerOutput = stepPlayerMovementController(controllerState, {
+          deltaSeconds,
+          seed: scenario.seed,
+          direction: { right: step.right, forward: step.forward },
+          currentVelocity: localVelocity,
+          grounded,
+          sprint: step.sprint,
+          sprintAffordable,
+          crouch: step.crouch,
+          jump: step.jump,
+          walking: step.walking,
+          oxygen: vitals.o2,
+          externalTraversal,
+          slideRequested: step.slide,
+        });
+        controllerState = controllerOutput.state;
+        const frameEvents: MovementTraceEvent[] = controllerOutput.events.map((event) => ({
+          stage: "controller",
+          event,
+        }));
+
+        if (controllerOutput.jumpAction !== null) {
+          vitals = applyPlayerO2Cost(
+            vitals,
+            controllerOutput.jumpAction.oxygenCost,
+            O2_JUMP_RECOVERY_DELAY_SECONDS,
+          );
+        }
+        vitals = setPlayerHoldingBreath(vitals, step.holdBreath, step.zoom, deltaSeconds);
+
+        if (
+          externalTraversal?.completed === true ||
+          externalTraversal?.cancelled === true ||
+          controllerOutput.events.some((event) => event.kind === "traversal-cancel")
+        ) {
+          traversal = null;
+        }
+        if (controllerOutput.events.some((event) => event.kind === "wall-climb-request")) {
+          const started = startWallClimb(traversal, activeBoxes, position, vitals);
+          traversal = started.traversal;
+          vitals = started.vitals;
+        }
+
+        const controllerDesiredWorld = localToWorldVelocity(controllerOutput.desiredVelocity, yaw);
+        let movement: PhysicsMovement;
+        if (traversal !== null && traversal.terminal === null) {
+          movement = motionForActiveTraversal(runtime, traversal, position, deltaSeconds);
+        } else {
+          const verticalVelocity =
+            controllerOutput.jumpAction !== null
+              ? controllerOutput.jumpAction.launchSpeed
+              : grounded
+                ? 0
+                : velocity.y - WORLD_GRAVITY * deltaSeconds;
+          const desiredDelta = {
+            x: controllerDesiredWorld.x * deltaSeconds,
+            y: verticalVelocity * deltaSeconds,
+            z: controllerDesiredWorld.z * deltaSeconds,
+          };
+          movement = runtime.move(position, desiredDelta);
+        }
+
+        position = { ...movement.position };
+        velocity = {
+          x: (position.x - priorPosition.x) / deltaSeconds,
+          y: (position.y - priorPosition.y) / deltaSeconds,
+          z: (position.z - priorPosition.z) / deltaSeconds,
+        };
+        grounded = movement.grounded && velocity.y <= 0.001;
+        if (traversal?.terminal === "completed") {
+          velocity = { x: 0, y: 0, z: 0 };
+          grounded = movement.grounded;
+        }
+        if (grounded) {
+          velocity = { ...velocity, y: 0 };
+        }
+        maximumFallSpeed = Math.max(maximumFallSpeed, Math.max(0, -velocity.y));
+
+        if (traversal === null && step.jump && !grounded) {
+          const desiredHorizontalDelta = {
+            x: controllerDesiredWorld.x * deltaSeconds,
+            y: 0,
+            z: controllerDesiredWorld.z * deltaSeconds,
+          };
+          const candidates = resolveTraversalCandidates(
+            priorPosition,
+            desiredHorizontalDelta,
+            movement,
+            activeBoxes,
+            vitals,
+          );
+          const postPhysicsOutput = stepPlayerMovementController(controllerState, {
+            phase: "post-physics",
+            deltaSeconds: 0,
+            seed: scenario.seed,
+            direction: { right: step.right, forward: step.forward },
+            currentVelocity: worldToLocalVelocity(velocity, yaw),
+            grounded,
+            sprint: step.sprint,
+            sprintAffordable,
+            crouch: step.crouch,
+            jump: step.jump,
+            walking: step.walking,
+            oxygen: vitals.o2,
+            contacts: candidates.contacts,
+            externalTraversal: null,
+          });
+          controllerState = postPhysicsOutput.state;
+          frameEvents.push(
+            ...postPhysicsOutput.events.map((event): MovementTraceEvent => ({
+              stage: "post-physics",
+              event,
+            })),
+          );
+          if (postPhysicsOutput.traversalRequest !== null) {
+            const started = startRequestedTraversal(
+              postPhysicsOutput.traversalRequest,
+              candidates,
+              position,
+              vitals,
+            );
+            traversal = started.traversal;
+            vitals = started.vitals;
+            if (traversal?.kind === "wall-contact") {
+              const attachment = runtime.move(position, {
+                x: traversal.target.x - position.x,
+                y: traversal.target.y - position.y,
+                z: traversal.target.z - position.z,
+              });
+              const attached =
+                Math.hypot(
+                  attachment.position.x - traversal.target.x,
+                  attachment.position.y - traversal.target.y,
+                  attachment.position.z - traversal.target.z,
+                ) <= TRAVERSAL_CONTACT_EPSILON;
+              position = { ...attachment.position };
+              velocity = {
+                x: (position.x - priorPosition.x) / deltaSeconds,
+                y: (position.y - priorPosition.y) / deltaSeconds,
+                z: (position.z - priorPosition.z) / deltaSeconds,
+              };
+              grounded = false;
+              if (!attached) {
+                traversal.terminal = "cancelled";
+              }
+            }
+          }
+        }
+
+        if (!priorGrounded && grounded) {
+          const landingCost = resolveLandingO2Cost(maximumFallSpeed);
+          vitals = applyPlayerO2ImpactCost(
+            vitals,
+            landingCost,
+            O2_LANDING_RECOVERY_DELAY_SECONDS,
+            0,
+          ).state;
+          maximumFallSpeed = 0;
+        }
+        const horizontalSpeed = Math.hypot(velocity.x, velocity.z);
+        const sprinting =
+          step.sprint &&
+          sprintAffordable &&
+          !step.crouch &&
+          inputMagnitude > 0 &&
+          horizontalSpeed > 0;
+        vitals = tickPlayerVitals(vitals, deltaSeconds, {
+          exerciseIntensity: inputMagnitude * (sprinting ? 1 : 0.45),
+          movementMagnitude: inputMagnitude,
+          locomotionBlend: sprinting ? 1 : 0,
+          sprinting,
+          crouchWalking: step.crouch && inputMagnitude > 0,
+          walking: !step.crouch && inputMagnitude > 0 && !sprinting,
+          crouched: step.crouch,
+          aimingDownSights: step.zoom,
+        });
+
+        const basis = horizontalBasis(yaw);
+        const localAcceleration = resolveCameraLocalAccelerationFromVelocityDelta(
+          velocity,
+          priorVelocity,
+          deltaSeconds,
+          {
+            right: basis.right,
+            forward: basis.forward,
+            up: { x: 0, y: 1, z: 0 },
+          },
+        );
+        const posture = controllerOutput.posture;
+        const baseCameraY =
+          position.y -
+          PLAYER_CAPSULE_CENTER_HEIGHT +
+          (posture === "crouching" ? PLAYER_CROUCH_EYE_HEIGHT : PLAYER_STANDING_EYE_HEIGHT);
+        const verticalOffsetBounds = resolveCameraVerticalOffsetBounds(
+          position,
+          baseCameraY,
+          activeBoxes,
+        );
+        const traversalActive = traversal !== null && traversal.kind !== "wall-contact";
+        const cameraInput: CameraMotionUpdateInput = {
+          deltaSeconds,
+          localAcceleration,
+          movementMagnitude: inputMagnitude,
+          movementSpeedRatio: clamp(horizontalSpeed / PLAYER_SPRINT_SPEED_METERS_PER_SECOND, 0, 1),
+          oxygenRatio: vitals.o2 / PLAYER_MAX_O2,
+          crouching: posture === "crouching",
+          shiftEnabled: true,
+          bobEnabled: true,
+          aimingDownSights: step.zoom,
+          holdingBreath: vitals.holdingBreath,
+          stabilizedByWall: traversal?.kind === "wall-contact",
+          grounded,
+          traversalActive,
+          ...(traversalActive && traversal !== null
+            ? { traversalDurationSeconds: traversal.duration }
+            : {}),
+          verticalOffsetBounds,
+        };
+        const cameraOffsets = cameraDamper.update(cameraInput);
+        const reticle = resolveReticlePresentation(
+          { x: 0.5, y: 0.5 },
+          cameraOffsets,
+          RETICLE_VIEWPORT_WIDTH,
+          RETICLE_VIEWPORT_HEIGHT,
+        );
+        const cameraInputTrace: MovementCameraInputTrace = {
+          deltaSeconds,
+          localAcceleration,
+          movementMagnitude: inputMagnitude,
+          movementSpeedRatio: cameraInput.movementSpeedRatio,
+          oxygenRatio: cameraInput.oxygenRatio,
+          crouching: cameraInput.crouching,
+          shiftEnabled: cameraInput.shiftEnabled,
+          bobEnabled: cameraInput.bobEnabled,
+          zoom: step.zoom,
+          holdingBreath: vitals.holdingBreath,
+          stabilizedByWall: traversal?.kind === "wall-contact",
+          grounded,
+          traversalActive,
+          verticalOffsetBounds: {
+            min: verticalOffsetBounds.min,
+            max: Number.isFinite(verticalOffsetBounds.max) ? verticalOffsetBounds.max : null,
+          },
+        };
+        const sample: MovementFrameTrace = {
+          frame,
+          timeSec,
+          stepIndex,
+          stepLabel: step.label,
+          position: { ...position },
+          velocity: { ...velocity },
+          grounded,
+          collisions: movement.collisions,
+          contacts: [...movement.contacts].sort((left, right) =>
+            `${left.obstacleId}:${left.kind}`.localeCompare(`${right.obstacleId}:${right.kind}`),
+          ),
+          movement: {
+            state: controllerState.movement.kind,
+            posture,
+            traversalProgress:
+              traversal === null || traversal.duration <= 0
+                ? 0
+                : clamp(traversal.elapsed / traversal.duration, 0, 1),
+            obstacleId: traversal?.obstacleId ?? null,
+          },
+          events: frameEvents,
+          o2: vitals.o2,
+          vitals,
+          camera: { input: cameraInputTrace, offsets: cameraOffsets },
+          presentation: {
+            visibleReticleNdc: reticle.aimNdc,
+            aimRayNdc: reticle.aimNdc,
+            focusRayNdc: reticle.aimNdc,
+          },
+        };
+        trace.push(sample);
+        for (const event of frameEvents) {
+          orderedEvents.push({ frame, timeSec, ...event });
+        }
+        distanceMeters += Math.hypot(
+          position.x - priorPosition.x,
+          position.y - priorPosition.y,
+          position.z - priorPosition.z,
+        );
+      }
+    }
+  } finally {
+    runtime.dispose();
+  }
+
+  const final = trace[trace.length - 1];
+  if (final === undefined) {
+    throw new Error(`Scenario ${scenario.name} produced no frames`);
+  }
+  const speeds = trace.map((sample) => Math.hypot(sample.velocity.x, sample.velocity.z));
+  const upwardSpeeds = trace.map((sample) => sample.velocity.y);
+  const downwardSpeeds = trace.map((sample) => -sample.velocity.y);
+  const oxygenValues = trace.map((sample) => sample.o2);
+  const collisionCounts = trace.map((sample) => sample.collisions);
+  const assertions = evaluateExpectations(scenario, trace, orderedEvents);
+  return {
+    schemaVersion: MOVEMENT_SCENARIO_SCHEMA_VERSION,
+    name: scenario.name,
+    description: scenario.description,
+    seed: scenario.seed,
+    runtime: scenario.runtime,
+    durationSec: timeSec,
+    frameCount: trace.length,
+    trace,
+    orderedEvents,
+    final,
+    metrics: {
+      distanceMeters,
+      maximumHorizontalSpeed: Math.max(...speeds),
+      maximumUpwardSpeed: Math.max(...upwardSpeeds),
+      maximumDownwardSpeed: Math.max(...downwardSpeeds),
+      minimumO2: Math.min(...oxygenValues),
+      maximumO2: Math.max(...oxygenValues),
+      maximumCollisions: Math.max(...collisionCounts),
+    },
+    assertions,
+  };
+};
+
+export const runMovementScenarioFile = async (path: string): Promise<MovementSimulationResult> =>
+  runMovementScenario(await readMovementScenarioFile(path));
+
+const formatSummary = (result: MovementSimulationResult): string => {
+  const passed = result.assertions.filter((assertion) => assertion.passed).length;
+  const eventNames = result.orderedEvents.map(({ event }) => event.kind).join(", ");
+  return [
+    `name: ${result.name}`,
+    `schema_version: ${String(result.schemaVersion)}`,
+    `runtime: ${result.runtime}`,
+    `frames: ${String(result.frameCount)}`,
+    `duration_sec: ${result.durationSec.toFixed(3)}`,
+    `distance_m: ${result.metrics.distanceMeters.toFixed(3)}`,
+    `max_horizontal_speed_m_s: ${result.metrics.maximumHorizontalSpeed.toFixed(3)}`,
+    `max_downward_speed_m_s: ${result.metrics.maximumDownwardSpeed.toFixed(3)}`,
+    `final_position_m: x=${result.final.position.x.toFixed(3)} y=${result.final.position.y.toFixed(3)} z=${result.final.position.z.toFixed(3)}`,
+    `final_state: ${result.final.movement.state}`,
+    `final_grounded: ${String(result.final.grounded)}`,
+    `final_o2: ${result.final.o2.toFixed(3)}`,
+    `events: ${eventNames || "none"}`,
+    `assertions: ${String(passed)}/${String(result.assertions.length)} passed`,
+  ].join("\n");
 };
 
 const parseArgs = (): { readonly scenarioPath: string; readonly emitJson: boolean } => {
   const args = process.argv.slice(2);
-  const emitJson = args.includes("--json");
+  const unknownFlags = args.filter((entry) => entry.startsWith("--") && entry !== "--json");
+  if (unknownFlags.length > 0) {
+    throw new TypeError(`Unknown option: ${unknownFlags.join(", ")}`);
+  }
   const positional = args.filter((entry) => !entry.startsWith("--"));
+  if (positional.length > 1) {
+    throw new TypeError("Expected at most one scenario path");
+  }
   return {
-    scenarioPath: positional[0] ?? DEFAULT_SCENARIO_PATH,
-    emitJson,
+    scenarioPath: resolvePath(positional[0] ?? DEFAULT_SCENARIO_PATH),
+    emitJson: args.includes("--json"),
   };
-};
-
-const readScenarioFile = async (path: string): Promise<Scenario> => {
-  const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
-  return parseScenario(raw);
 };
 
 const main = async (): Promise<void> => {
   const { scenarioPath, emitJson } = parseArgs();
-  const scenario = await readScenarioFile(scenarioPath);
-  const summary = await runScenario(scenario);
+  const result = await runMovementScenarioFile(scenarioPath);
   if (emitJson) {
-    process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
-    return;
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    process.stdout.write(`${formatSummary(result)}\n`);
   }
-  process.stdout.write(`${formatSummary(summary)}\n`);
+  if (result.assertions.some((assertion) => !assertion.passed)) {
+    process.exitCode = 1;
+  }
 };
 
-try {
-  await main();
-} catch (error) {
-  const message = error instanceof Error ? error.message : "Unknown movement simulation error";
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
+const isMainModule =
+  process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolvePath(process.argv[1]);
+
+if (isMainModule) {
+  try {
+    await main();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown movement simulation error";
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  }
 }

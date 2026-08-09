@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "name": "held-jump",
+  "description": "Hold Jump through the first landing, then release and press again for exactly one new launch.",
+  "seed": "continuous-head-motion/held-jump/v2",
+  "physics": { "runtime": "fallback" },
+  "start": { "position": [0, 0.86, 0], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
+  "frames": [
+    { "duration": 1, "jump": true, "label": "held-through-landing" },
+    { "duration": 0.1, "label": "release" },
+    { "duration": 0.08, "jump": true, "label": "fresh-press" },
+    { "duration": 1, "label": "second-flight" }
+  ],
+  "expect": {
+    "requiredEvents": [{ "kind": "jump", "result": "full" }, { "kind": "landing" }],
+    "requiredStates": ["airborne", "landing-recovery"],
+    "finalGrounded": true,
+    "ranges": [
+      {
+        "id": "held-key-does-not-repeat-in-first-phase",
+        "field": "velocity.y",
+        "at": "last",
+        "label": "held-through-landing",
+        "equals": 0,
+        "tolerance": 0.15
+      },
+      {
+        "id": "fresh-press-launches",
+        "field": "velocity.y",
+        "at": "max",
+        "label": "fresh-press",
+        "min": 10
+      }
+    ]
+  }
+}
