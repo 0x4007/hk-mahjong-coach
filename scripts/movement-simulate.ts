@@ -32,6 +32,9 @@ import {
   resolveVaultTraversalO2Cost,
   resolveWallClimbTarget,
   resolveWallHangTargetDetails,
+  WALL_HANG_ATTACHMENT_TOLERANCE,
+  WALL_HANG_CONTACT_PROBE_DISTANCE,
+  WALL_HANG_SETTLE_DURATION,
   type TraversalTargetResolution,
 } from "../apps/web/src/scene/mahjong-table.js";
 import {
@@ -628,6 +631,20 @@ export const isMovementTraversalGeometryValid = (
   );
 };
 
+export const isMovementWallAttachmentValid = (
+  obstacleId: string,
+  target: PhysicsVector,
+  movement: PhysicsMovement,
+): boolean =>
+  movement.contacts.some(
+    (contact) => contact.kind === "wall" && contact.obstacleId === obstacleId,
+  ) &&
+  Math.hypot(
+    movement.position.x - target.x,
+    movement.position.y - target.y,
+    movement.position.z - target.z,
+  ) <= WALL_HANG_ATTACHMENT_TOLERANCE;
+
 const activeExternalTraversal = (
   traversal: ActiveTraversal | null,
   boxes: readonly PhysicsBox[],
@@ -643,7 +660,7 @@ const activeExternalTraversal = (
     traversal.target,
     boxes,
   );
-  const releasedActiveMotion = traversal.kind !== "wall-contact" && !jump;
+  const releasedActiveMotion = !jump;
   const contactValid = geometryValid && !releasedActiveMotion && traversal.terminal !== "cancelled";
   return {
     kind: traversal.kind,
@@ -662,11 +679,20 @@ const motionForActiveTraversal = (
   deltaSeconds: number,
 ): PhysicsMovement => {
   if (traversal.kind === "wall-contact") {
-    return runtime.move(position, {
-      x: traversal.target.x - position.x,
+    traversal.elapsed = Math.min(traversal.duration, traversal.elapsed + deltaSeconds);
+    const wallNormal = traversal.wall?.wallNormal ?? { x: 0, y: 0, z: 0 };
+    const movement = runtime.move(position, {
+      x: traversal.target.x - position.x - wallNormal.x * WALL_HANG_CONTACT_PROBE_DISTANCE,
       y: traversal.target.y - position.y,
-      z: traversal.target.z - position.z,
+      z: traversal.target.z - position.z - wallNormal.z * WALL_HANG_CONTACT_PROBE_DISTANCE,
     });
+    const attached =
+      traversal.wall !== null &&
+      isMovementWallAttachmentValid(traversal.obstacleId, traversal.target, movement);
+    if (!attached) {
+      traversal.terminal = "cancelled";
+    }
+    return movement;
   }
   traversal.elapsed = Math.min(traversal.duration, traversal.elapsed + deltaSeconds);
   const progress = smoothStep(traversal.elapsed / traversal.duration);
@@ -832,7 +858,7 @@ const startRequestedTraversal = (
         sourceGeometryKey: resolvePhysicsBoxGeometrySignature(wall.box),
         start: { ...position },
         target: { ...wall.target },
-        duration: 0.14,
+        duration: WALL_HANG_SETTLE_DURATION,
         arcHeight: 0,
         wall: {
           wallNormal: wall.wallNormal,
@@ -889,21 +915,21 @@ const startWallClimb = (
   vitals: PlayerVitalsState,
 ): { readonly traversal: ActiveTraversal | null; readonly vitals: PlayerVitalsState } => {
   if (traversal?.kind !== "wall-contact" || traversal.wall === null) {
-    return { traversal, vitals };
+    return { traversal: null, vitals };
   }
   const sourceBox = sourceBoxForTraversal(boxes, traversal.obstacleId);
   if (sourceBox === null) {
-    return { traversal, vitals };
+    return { traversal: null, vitals };
   }
   const wall = { ...traversal.wall, box: sourceBox };
   const target = resolveWallClimbTarget(wall);
   if (!isPlayerCapsulePositionClear(target, boxes)) {
-    return { traversal, vitals };
+    return { traversal: null, vitals };
   }
   const height = Math.max(0, target.y - position.y);
   const oxygenCost = resolveVaultTraversalO2Cost(height);
   if (!canAffordPlayerO2Cost(vitals, oxygenCost)) {
-    return { traversal, vitals };
+    return { traversal: null, vitals };
   }
   const nextVitals = applyPlayerO2Cost(vitals, oxygenCost, O2_JUMP_RECOVERY_DELAY_SECONDS);
   return {
@@ -1360,6 +1386,7 @@ export const runMovementScenario = async (
           activeBoxes,
         );
         const traversalActive = traversal !== null && traversal.kind !== "wall-contact";
+        const stabilizedByWall = step.zoom && traversal?.kind === "wall-contact";
         const cameraInput: CameraMotionUpdateInput = {
           deltaSeconds,
           localAcceleration,
@@ -1371,7 +1398,7 @@ export const runMovementScenario = async (
           bobEnabled: true,
           aimingDownSights: step.zoom,
           holdingBreath: vitals.holdingBreath,
-          stabilizedByWall: traversal?.kind === "wall-contact",
+          stabilizedByWall,
           grounded,
           traversalActive,
           ...(traversalActive && traversal !== null
@@ -1397,7 +1424,7 @@ export const runMovementScenario = async (
           bobEnabled: cameraInput.bobEnabled,
           zoom: step.zoom,
           holdingBreath: vitals.holdingBreath,
-          stabilizedByWall: traversal?.kind === "wall-contact",
+          stabilizedByWall,
           grounded,
           traversalActive,
           verticalOffsetBounds: {

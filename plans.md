@@ -134,13 +134,13 @@ Experimental continuous head-motion prototype evidence recorded 2026-08-09 (does
   reticle, aim ray, and focus ray. Full-O₂ stationary presentation is zero, standing/crouching remain free, and local
   action impulses publish one coherent post-action render snapshot.
 - The hard-cut schema-v2 simulator contains the required 21 unique-seed scenarios, including successful wall-climb top
-  support and separate climb-release cancellation. Each result is serialized twice through the CLI writer and must be
-  byte-identical with no failed embedded assertion. The final pre-commit audit candidate passed 42 runs and 310
+  support while Jump stays held and separate release-to-fall cancellation. Each result is serialized twice through the
+  CLI writer and must be byte-identical with no failed embedded assertion. The final pre-commit audit candidate passed 42 runs and 316
   assertions with zero byte mismatches.
-- Repository formatting, full lint, strict typecheck, the production build, and `git diff --check` pass. Server-owned
-  clean test-bus run `1786263732647-95115-730879b5` matched code/test candidate
-  `cb89667ba8b2188634cab8e6fe121ec90f10a963` and passed all 639 tests across 136 suites. The external handoff records
-  the matching clean receipt for the final documentation commit as well.
+- The final handoff must tie repository formatting, full lint, strict typecheck, the production build,
+  `git diff --check`, and a clean server-owned test-bus receipt to the committed correction. Earlier clean run
+  `1786263732647-95115-730879b5` passed 639 tests across 136 suites at
+  `cb89667ba8b2188634cab8e6fe121ec90f10a963`, before the held-Jump catch-to-climb correction, so it is historical only.
   Browser, HMR, Playwright, and computer-use validation are excluded from this implementation run. The user must still
   complete the real one-window browser acceptance, so the visual-table milestone remains pending.
 

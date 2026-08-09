@@ -3250,13 +3250,14 @@ export const WALL_CLIMB_SPEED = 2.5;
 
 const WALL_HANG_SEPARATION = 0.01;
 const WALL_HANG_EPSILON = 0.0001;
-const WALL_HANG_CONTACT_PROBE_DISTANCE = 0.02;
+export const WALL_HANG_CONTACT_PROBE_DISTANCE = 0.02;
+export const WALL_HANG_ATTACHMENT_TOLERANCE = 0.025;
 const WALL_CLIMB_CLEARANCE = 0.04;
 const WALL_CLIMB_TOP_INSET = PLAYER_COLLIDER_RADIUS + WALL_HANG_SEPARATION;
 // Keep the attachment visible for a short beat before a held approach input
 // starts the climb. Otherwise a run into the wall enters and leaves the hang
 // state within one animation frame and feels like an ordinary collision.
-const WALL_HANG_SETTLE_DURATION = 0.14;
+export const WALL_HANG_SETTLE_DURATION = 0.14;
 
 export type WallHangResolution = Readonly<{
   readonly target: PhysicsVector;
@@ -15071,10 +15072,10 @@ export const createMahjongTableScene = (
         ? { kind, obstacleId, progress: 1, contactValid: true, completed: true }
         : { kind, obstacleId, progress: 0, contactValid: false, cancelled: true };
   };
-  const beginWallClimb = (): void => {
+  const beginWallClimb = (): boolean => {
     const wall = wallHangState;
     if (wall === null || wallClimbTransition !== null) {
-      return;
+      return false;
     }
     const wallClimbPhysicsBoxes = [
       ...staticPhysicsBoxes,
@@ -15089,7 +15090,7 @@ export const createMahjongTableScene = (
         ? null
         : resolveWallHangTargetDetails(wall.target, wall.approachDirection, [sourceBox]);
     if (refreshedWall === null) {
-      return;
+      return false;
     }
     wall.target = refreshedWall.target;
     wall.wallNormal = refreshedWall.wallNormal;
@@ -15098,13 +15099,13 @@ export const createMahjongTableScene = (
     wall.box = refreshedWall.box;
     const targetPosition = resolveWallClimbTarget(wall);
     if (!isPlayerCapsulePositionClear(targetPosition, wallClimbPhysicsBoxes)) {
-      return;
+      return false;
     }
     const climbHeight = Math.max(0, targetPosition.y - wall.target.y);
     const oxygenRatio = playerVitals.o2 / PLAYER_MAX_O2;
     const traversalO2Cost = resolveVaultTraversalO2Cost(climbHeight);
     if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
-      return;
+      return false;
     }
     const preservedSpeed = Math.hypot(wall.preservedForwardVelocity, wall.preservedStrafeVelocity);
     wallClimbTransition = {
@@ -15138,6 +15139,7 @@ export const createMahjongTableScene = (
     verticalVelocity = 0;
     forwardVelocity = 0;
     strafeVelocity = 0;
+    return true;
   };
   const resetCameraMotion = (): void => {
     cameraMotion.reset();
@@ -18203,7 +18205,8 @@ export const createMahjongTableScene = (
               kind: "wall-contact",
               obstacleId: wallHangState.sourceObstacleId,
               progress: wallHangElapsed / WALL_HANG_SETTLE_DURATION,
-              contactValid: forward >= -0.1,
+              contactValid: jumpInputActive,
+              ...(jumpInputActive ? {} : { cancelled: true }),
             }
           : wallClimbTransition !== null
             ? {
@@ -18254,7 +18257,10 @@ export const createMahjongTableScene = (
         if (event.kind === "traversal-cancel") {
           cancelTraversalExecution(event.traversal);
         } else if (event.kind === "wall-climb-request") {
-          beginWallClimb();
+          if (!beginWallClimb()) {
+            queueTraversalFeedback("wall-contact", event.obstacleId, "cancelled");
+            cancelTraversalExecution("wall-contact");
+          }
         }
       }
       isWallTraversalActive = wallHangState !== null || wallClimbTransition !== null;
@@ -18339,7 +18345,7 @@ export const createMahjongTableScene = (
                 attachmentPosition.x - refreshedWall.target.x,
                 attachmentPosition.y - refreshedWall.target.y,
                 attachmentPosition.z - refreshedWall.target.z,
-              ) <= 0.025;
+              ) <= WALL_HANG_ATTACHMENT_TOLERANCE;
             physicsCharacterPosition = attachmentPosition;
             verticalVelocity = (attachmentPosition.y - traversalStart.y) / velocityDeltaSeconds;
             resolvedWorldVelocity = {
@@ -18911,7 +18917,7 @@ export const createMahjongTableScene = (
                 attachment.position.x - wallHangResolution.target.x,
                 attachment.position.y - wallHangResolution.target.y,
                 attachment.position.z - wallHangResolution.target.z,
-              ) <= 0.025;
+              ) <= WALL_HANG_ATTACHMENT_TOLERANCE;
             if (attached) {
               clampedPosition = { ...attachment.position };
               wallHangState = {

@@ -10,7 +10,6 @@
   ],
   "frames": [
     { "duration": 0.35, "forward": 1, "sprint": true, "jump": true, "label": "catch" },
-    { "duration": 0.1, "label": "rearm" },
     { "duration": 0.8, "jump": true, "label": "climb" },
     { "duration": 0.25, "label": "supported" }
   ],

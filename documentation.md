@@ -383,15 +383,16 @@ map and video-quality selectors; debug controls are offset below that area and n
   frame, so streamed rotated backdrop buildings use the same face and top that Rapier uses. Wall-hang detection runs
   only after both ledge and low-vault checks have rejected the contact.
   The capsule is placed 0.27 m outside the approached face (radius plus separation) and remains attached with gravity
-  suppressed. Release Jump after attachment, then press Jump again to request a climb; forward input alone does not
-  start one. Releasing Jump during the active climb cancels it and returns the capsule to ordinary airborne physics.
+  suppressed for a short catch. Keep Jump held and the catch flows directly into the climb; forward input alone does
+  not start one. Releasing Jump during the catch or active climb cancels it and returns the capsule to ordinary
+  airborne physics.
   The top target keeps the tangent coordinate where the
   player caught the wall; it does not slide to a skinny wall's centre. The wall target scan includes streamed static
   boxes but excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal
   so low vault/ledge movement is not reclassified as a wall hang. The live climb uses the same short smooth arc,
   preserved momentum, and landing boost as vaulting, so the gun returns after the brief traversal instead of a long
-  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W and press Jump while
-  approaching to catch the upper face, release Jump to re-arm the input, then press Jump again to climb.
+  staged lift. The `?debug=1` climbing-gym preset places the player near its tall wall; hold W + Jump while
+  approaching to catch and climb the upper face, then release Jump to cancel and fall.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -577,8 +578,8 @@ three-axis velocity, grounded state, collision count, stable contact IDs, typed 
 ordered events, O₂/vitals, camera input and offsets, and the shared visible/aim/focus NDC.
 
 The 21 fixtures in `scripts/movement-scenarios/` cover walk and sprint acceleration, sprint release, collision braking,
-direction reversal, diagonal and crouch movement, full and held jumping, low vault and invalid-vault rejection, wall
-contact and climb release, ledge grab/contact loss, a completed wall-climb top support, slide start/stop, three landing strengths, and O₂
+direction reversal, diagonal and crouch movement, full and held jumping, low vault and invalid-vault rejection, held-Jump
+wall catch-to-climb and release-to-fall, ledge grab/contact loss, a completed wall-climb top support, slide start/stop, three landing strengths, and O₂
 depletion/recovery. Every fixture has a unique fixed seed and explicit exact or bounded assertions. Geometry traversal
 uses Rapier; deterministic locomotion cases use the fallback runtime. Use
 `pnpm test:movement:sim <fixture> --json` for normal inspection. A JSON-only consumer should run
@@ -590,11 +591,11 @@ source-geometry signature and destination-clearance gate, so an unchanged obstac
 
 A wall contact is eligible only while airborne with Jump active, after low-vault and ledge checks reject the contact.
 The approached local face must block the capsule, overlap its lateral reach, and have a reachable top. The attachment
-keeps the caught tangent coordinate and suppresses gravity. Release Jump after the catch, then make a fresh Jump press
-to request the climb. The climb uses the same collision-checked arc and supported landing query as other traversal;
-releasing Jump, losing source contact, changing source geometry, or losing destination clearance cancels it.
-Wall contact itself is a stable attachment rather than an active arc: releasing Jump re-arms the next climb press and
-does not detach the player.
+keeps the caught tangent coordinate and suppresses gravity for a short settle. If Jump remains held, the controller
+requests the climb as soon as that catch completes; no release or second press is required. The climb uses the same
+collision-checked arc and supported landing query as other traversal. Releasing Jump during the catch or climb, losing
+source contact, changing source geometry, or losing destination clearance cancels the traversal and returns the capsule
+to ordinary falling physics.
 
 ## Centralized camera motion and landing weight
 
@@ -644,17 +645,14 @@ deceleration pitches down through the same bounded spring. Gait lateral/depth of
 render matrix only, so Rapier or the deterministic fallback remains authoritative for the player position.
 Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
-The first front/back inertia pass uses the controller's forward velocity change before collision resolution. It feeds
-that acceleration into the same damped target/response pair as the local inertial roll: forward acceleration gives a
-small upward pitch and braking gives a matching downward pitch. A 60 m/s² reference reaches the current full-sprint
-roll magnitude. The damper now receives one local horizontal acceleration vector with right and forward components,
-so locomotion and collision corrections use the same coordinate convention. The right component produces the matching
-inertial roll, while the forward component produces pitch. The former direction-change roll path has been removed, so
-the vector is now the sole source of horizontal roll and cannot double-stack the same strafe reversal. A horizontal
-wall stop compares requested and resolved velocity, bounds the correction to the speed the player carried, projects it
-onto camera-right and camera-forward, and sends one additional impulse through that same vector input. Holding movement
-into the wall does not repeat the impulse every frame. Vertical jump and landing impulses remain explicit until they are
-folded into the same vector in the traversal pass.
+The inertia pass uses the physics-resolved world velocity change after collision and traversal resolution. One shared
+helper divides that delta by the bounded frame duration and projects it onto the yaw-local right, forward, and up axes.
+Forward acceleration gives a small upward pitch, braking gives a matching downward pitch, and right acceleration gives
+the corresponding roll. The former direction-change roll path has been removed, so this vector is the sole horizontal
+inertia source and cannot double-stack a strafe reversal. A wall stop appears once when physics removes the carried
+velocity; holding movement into the wall then produces no further resolved velocity delta and no repeated impulse.
+Take-off and landing use the same three-axis vector. A support stop keeps the measured vertical delta magnitude but
+reverses the raw upward contact-impulse sign so the camera reads the impact as downward weight.
 
 ## Oxygen vital and breathing response
 

@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   formatMovementSimulationJson,
   isMovementTraversalGeometryValid,
+  isMovementWallAttachmentValid,
   parseMovementScenario,
   runMovementScenario,
   type MovementFrameTrace,
@@ -168,6 +169,41 @@ describe("continuous head-motion movement scenarios", () => {
           halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
         },
       ]),
+    ).toBe(false);
+  });
+
+  it("rejects wall attachment after physical contact or target alignment is lost", () => {
+    const target = { x: 0, y: 2.6, z: -3.23 } as const;
+    const contact = {
+      kind: "wall" as const,
+      normal: { x: 0, y: 0, z: 1 },
+      point: { x: 0, y: 2.6, z: -3.5 },
+      obstacleId: "wall-1",
+    };
+
+    expect(
+      isMovementWallAttachmentValid("wall-1", target, {
+        position: target,
+        grounded: false,
+        collisions: 1,
+        contacts: [contact],
+      }),
+    ).toBe(true);
+    expect(
+      isMovementWallAttachmentValid("wall-1", target, {
+        position: target,
+        grounded: false,
+        collisions: 0,
+        contacts: [],
+      }),
+    ).toBe(false);
+    expect(
+      isMovementWallAttachmentValid("wall-1", target, {
+        position: { ...target, z: target.z + 0.026 },
+        grounded: false,
+        collisions: 1,
+        contacts: [contact],
+      }),
     ).toBe(false);
   });
 
@@ -334,6 +370,13 @@ describe("continuous head-motion movement scenarios", () => {
       wall.orderedEvents.filter(({ event }) => event.kind === "wall-climb-request"),
     ).toHaveLength(1);
     expect(
+      wall.trace.some(
+        (sample) =>
+          sample.stepLabel === "hold-climb" &&
+          sample.events.some(({ event }) => event.kind === "wall-climb-request"),
+      ),
+    ).toBe(true);
+    expect(
       wall.orderedEvents.filter(
         ({ event }) => event.kind === "traversal-cancel" && event.traversal === "wall-climb",
       ),
@@ -354,6 +397,13 @@ describe("continuous head-motion movement scenarios", () => {
     expect(
       completedWall.orderedEvents.filter(({ event }) => event.kind === "wall-climb-request"),
     ).toHaveLength(1);
+    expect(
+      completedWall.trace.some(
+        (sample) =>
+          sample.stepLabel === "climb" &&
+          sample.events.some(({ event }) => event.kind === "wall-climb-request"),
+      ),
+    ).toBe(true);
     expect(
       completedWall.orderedEvents.filter(
         ({ event }) => event.kind === "traversal-complete" && event.traversal === "wall-climb",
@@ -388,16 +438,24 @@ describe("continuous head-motion movement scenarios", () => {
     expect(landing).toBeGreaterThan(sourceSupport);
 
     const wallContactSamples = resultFor("airborne-wall-contact").trace.filter(
-      (sample) => sample.stepLabel === "release-on-wall",
+      (sample) => sample.stepLabel === "held-contact" && sample.movement.state === "wall-contact",
     );
-    expect(wallContactSamples.length).toBeGreaterThanOrEqual(12);
+    expect(wallContactSamples.length).toBeGreaterThanOrEqual(1);
     expect(
       wallContactSamples.every(
         (sample) =>
-          sample.movement.state === "wall-contact" &&
           !sample.grounded &&
-          Math.abs(sample.velocity.y) <= 0.05,
+          Math.abs(sample.velocity.y) <= 0.05 &&
+          sample.contacts.some(
+            (contact) => contact.kind === "wall" && contact.obstacleId === "reachable-wall",
+          ) &&
+          sample.camera.input.stabilizedByWall,
       ),
+    ).toBe(true);
+    expect(
+      resultFor("wall-climb-release")
+        .trace.filter((sample) => sample.movement.state === "wall-contact")
+        .every((sample) => !sample.camera.input.stabilizedByWall),
     ).toBe(true);
     expect(
       Math.max(

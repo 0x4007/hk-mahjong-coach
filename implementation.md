@@ -2222,10 +2222,10 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   momentum, brakes reversals more strongly, latches Jump input, and produces deterministic full or fallback jumps.
   Standing and crouching are free at zero O₂; only a full jump spends the 5-point jump cost.
 - Split contextual top traversal into low vaults through 0.9 m and ledge grab/pull-up through 2.0 m. Wall contact now
-  requires an airborne validated contact; release Jump after attachment and make a fresh Jump press to request a climb.
-  Active vault, ledge, and wall-climb arcs cancel on released input, lost contact, invalid destination clearance, or a
-  source collider whose stable ID now refers to changed centre, extent, or rotation geometry. Wall contact remains a
-  stable attachment while Jump is released so the fresh climb press can be latched deterministically.
+  requires an airborne validated contact and acts as a short catch before climbing proceeds while Jump remains held; no
+  release or fresh press is required. Releasing Jump during the catch or any active vault, ledge, or wall-climb arc,
+  losing contact, invalidating destination clearance, or changing the source collider's centre, extent, or rotation
+  cancels traversal and returns the capsule to ordinary physics.
 - Kept the physics capsule authoritative through every traversal arc and supported landing query. Source-only ascent
   contact is accepted, while unrelated blocking contact cancels the arc. Camera gait, acceleration, take-off, landing,
   breathing, recoil, and traversal response remain render-only outputs of the central damper. The acceleration
@@ -2241,15 +2241,14 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   completed wall climb and named supported landing, while the separate release fixture proves cancellation. The simulator runs controller → O₂ →
   physics → contact feedback → vitals → camera damper and records full position, velocity, contact, traversal, event,
   O₂, camera, and visible/aim/focus traces. On the final pre-commit audit candidate, all 21 scenarios passed their embedded
-  assertions twice through the CLI serializer: 42 runs, 310 passed assertions, and zero byte mismatches. `pnpm typecheck`,
-  `pnpm lint`, `pnpm format:check`, `pnpm build`, and `git diff --check` passed; the production web build reported only its
-  existing large-chunk warning. Server-owned run `1786263732647-95115-730879b5` matched clean code/test candidate
-  `cb89667ba8b2188634cab8e6fe121ec90f10a963` and passed all 639 tests across 136 suites. The external handoff records
-  the matching clean receipt for the final documentation commit as well.
+  assertions twice through the CLI serializer: 42 runs, 316 passed assertions, and zero byte mismatches. The final
+  handoff must tie lint, formatting, strict typecheck, production build, and server-owned test-bus evidence to the
+  committed correction. Earlier clean run `1786263732647-95115-730879b5` passed 639 tests across 136 suites at
+  `cb89667ba8b2188634cab8e6fe121ec90f10a963`, before the held-Jump catch-to-climb correction, so it is historical only.
   Browser, HMR, Playwright, and computer-use validation were intentionally not run; browser acceptance remains with
   the user in one existing window.
 - The v2 hard cut retires the old wall-hang and vault fixture filenames. The required scenario matrix now covers the
-  live catch/re-arm/climb-release flow, while focused scene regressions retain skinny-wall and rotated generated-wall
+  live held-input catch/climb/release flow, while focused scene regressions retain skinny-wall and rotated generated-wall
   geometry coverage.
 - Prototype limitations: wall running remains deferred, action-specific reload/melee poses remain mechanical viewmodel
   animation layered after the shared player-perspective damper, and rendered browser behavior is reserved for the

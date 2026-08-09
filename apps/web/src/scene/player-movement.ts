@@ -389,7 +389,7 @@ export const stepPlayerMovementController = (
           obstacle: contact.obstacle,
           ...(contact.target === undefined ? {} : { target: contact.target }),
         };
-        traversalLatched = true;
+        traversalLatched = requestKind !== "wall-contact";
         traversalObstacleId = contact.obstacle.id;
         if (requestKind === "vault") {
           events.push({ kind: "vault-start", obstacleId: contact.obstacle.id });
@@ -432,6 +432,7 @@ export const stepPlayerMovementController = (
     ) {
       events.push({ kind: "traversal-cancel", traversal: externalTraversal.kind });
       movement = { kind: "airborne", posture };
+      traversalLatched = input.jump;
       traversalObstacleId = null;
     } else if (externalTraversal.completed === true) {
       events.push({ kind: "traversal-complete", traversal: externalTraversal.kind });
@@ -443,6 +444,7 @@ export const stepPlayerMovementController = (
     }
   } else if (currentTraversal !== null) {
     events.push({ kind: "traversal-cancel", traversal: currentTraversal });
+    traversalLatched = input.jump;
     movement = input.grounded
       ? { kind: "landing-recovery", elapsedSeconds: 0, progress: 0, posture }
       : { kind: "airborne", posture };
@@ -451,7 +453,9 @@ export const stepPlayerMovementController = (
 
   if (
     movement.kind === "wall-contact" &&
-    jumpPressed &&
+    input.jump &&
+    externalTraversal?.kind === "wall-contact" &&
+    externalTraversal.progress >= 1 - Number.EPSILON &&
     !traversalLatched &&
     traversalObstacleId !== null
   ) {

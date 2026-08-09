@@ -368,7 +368,7 @@ describe("pure player movement controller", () => {
     expect(completed.state.movement.kind).toBe("landing-recovery");
   });
 
-  it("keeps a wall hang through release and requests a climb only after a fresh press", () => {
+  it("holds a brief wall contact, climbs while Jump remains held, and falls on release", () => {
     const initial = createPlayerMovementControllerState("movement-test", false);
     const preContact = step(initial, {
       grounded: false,
@@ -391,7 +391,7 @@ describe("pure player movement controller", () => {
         ],
       }),
     );
-    const held = step(contact.state, {
+    const settling = step(contact.state, {
       grounded: false,
       jump: true,
       externalTraversal: {
@@ -401,38 +401,92 @@ describe("pure player movement controller", () => {
         contactValid: true,
       },
     });
-    const released = step(held.state, {
-      grounded: false,
-      jump: false,
-      externalTraversal: {
-        kind: "wall-contact",
-        obstacleId: "wall-1",
-        progress: 0.6,
-        contactValid: true,
-      },
-    });
-    const repressed = step(released.state, {
+    const settled = step(settling.state, {
       grounded: false,
       jump: true,
       externalTraversal: {
         kind: "wall-contact",
         obstacleId: "wall-1",
-        progress: 0.7,
+        progress: 1,
         contactValid: true,
+      },
+    });
+    const repeatedSettledContact = step(settled.state, {
+      grounded: false,
+      jump: true,
+      externalTraversal: {
+        kind: "wall-contact",
+        obstacleId: "wall-1",
+        progress: 1,
+        contactValid: true,
+      },
+    });
+    const rejectedWhileHeld = step(contact.state, {
+      grounded: false,
+      jump: true,
+      externalTraversal: {
+        kind: "wall-contact",
+        obstacleId: "wall-1",
+        progress: 0.5,
+        contactValid: false,
+        cancelled: true,
+      },
+    });
+    const heldAfterRejection = stepPlayerMovementController(
+      rejectedWhileHeld.state,
+      baseInput({
+        phase: "post-physics",
+        grounded: false,
+        jump: true,
+        direction: { right: 0, forward: 1 },
+        contacts: [
+          {
+            kind: "wall",
+            normal: { x: 0, y: 0, z: 1 },
+            obstacle: { id: "wall-1", topY: 2.4, clearanceValid: true },
+          },
+        ],
+      }),
+    );
+    const released = step(contact.state, {
+      grounded: false,
+      jump: false,
+      externalTraversal: {
+        kind: "wall-contact",
+        obstacleId: "wall-1",
+        progress: 0.5,
+        contactValid: false,
+        cancelled: true,
       },
     });
 
     expect(contact.state.movement.kind).toBe("wall-contact");
-    expect(held.events).not.toContainEqual({
+    expect(settling.events).not.toContainEqual({
       kind: "wall-climb-request",
       obstacleId: "wall-1",
     });
-    expect(released.state.movement.kind).toBe("wall-contact");
-    expect(repressed.events).toContainEqual({
+    expect(settled.events).toContainEqual({
       kind: "wall-climb-request",
       obstacleId: "wall-1",
     });
-    expect(repressed.state.movement.kind).toBe("wall-contact");
+    expect(repeatedSettledContact.events).not.toContainEqual({
+      kind: "wall-climb-request",
+      obstacleId: "wall-1",
+    });
+    expect(rejectedWhileHeld.events).toContainEqual({
+      kind: "traversal-cancel",
+      traversal: "wall-contact",
+    });
+    expect(heldAfterRejection.events).not.toContainEqual({
+      kind: "wall-contact",
+      obstacleId: "wall-1",
+    });
+    expect(heldAfterRejection.traversalRequest).toBeNull();
+    expect(released.events).toContainEqual({
+      kind: "traversal-cancel",
+      traversal: "wall-contact",
+    });
+    expect(released.state.movement.kind).toBe("airborne");
   });
 
   it("cancels an external traversal whose obstacle identity changed", () => {

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "wall-climb-release",
-  "description": "Catch a wall, release Jump, request a climb with a fresh press, then cancel that climb on release.",
+  "description": "Catch a wall, continue smoothly into a climb while Jump stays held, then cancel that climb on release.",
   "seed": "continuous-head-motion/wall-climb-release/v2",
   "physics": { "runtime": "rapier" },
   "start": { "position": [0, 0.86, -2], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
@@ -10,8 +10,7 @@
   ],
   "frames": [
     { "duration": 0.35, "forward": 1, "sprint": true, "jump": true, "label": "catch" },
-    { "duration": 0.1, "label": "rearm" },
-    { "duration": 0.12, "jump": true, "label": "request-climb" },
+    { "duration": 0.12, "jump": true, "label": "hold-climb" },
     { "duration": 0.2, "label": "release-climb" },
     { "duration": 0.5, "label": "fall" }
   ],
@@ -27,9 +26,9 @@
         "id": "wall-climb-makes-progress",
         "field": "movement.progress",
         "at": "max",
-        "label": "request-climb",
+        "label": "hold-climb",
         "min": 0.01,
-        "max": 0.9
+        "max": 1
       },
       {
         "id": "release-resumes-fall",

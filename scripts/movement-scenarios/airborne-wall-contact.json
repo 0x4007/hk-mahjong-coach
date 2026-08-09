@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "airborne-wall-contact",
-  "description": "Jump into a reachable named wall and retain wall contact after Jump is released.",
+  "description": "Jump into a reachable named wall, hold a brief validated catch, then release to physics before climbing.",
   "seed": "continuous-head-motion/airborne-wall-contact/v2",
   "physics": { "runtime": "rapier" },
   "start": { "position": [0, 0.86, -2], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
@@ -10,20 +10,25 @@
   ],
   "frames": [
     { "duration": 0.35, "forward": 1, "sprint": true, "jump": true, "label": "catch" },
-    { "duration": 0.25, "label": "release-on-wall" }
+    { "duration": 0.04, "jump": true, "zoom": true, "label": "held-contact" },
+    { "duration": 0.1, "label": "release-from-contact" },
+    { "duration": 0.15, "label": "fall" }
   ],
   "expect": {
-    "requiredEvents": [{ "kind": "wall-contact" }],
+    "requiredEvents": [
+      { "kind": "wall-contact" },
+      { "kind": "traversal-cancel", "traversal": "wall-contact" }
+    ],
     "forbiddenEvents": [{ "kind": "wall-climb-request" }],
-    "requiredStates": ["wall-contact"],
+    "requiredStates": ["wall-contact", "airborne"],
     "finalGrounded": false,
-    "finalState": "wall-contact",
+    "finalState": "airborne",
     "ranges": [
       {
         "id": "wall-contact-holds-vertical-position",
         "field": "velocity.y",
         "at": "last",
-        "label": "release-on-wall",
+        "label": "held-contact",
         "equals": 0,
         "tolerance": 0.05
       },
@@ -31,8 +36,15 @@
         "id": "wall-contact-is-stabilized",
         "field": "camera.offsets.aimSwayX",
         "at": "max",
-        "label": "release-on-wall",
+        "label": "held-contact",
         "max": 0.001
+      },
+      {
+        "id": "wall-release-resumes-fall",
+        "field": "velocity.y",
+        "at": "min",
+        "label": "fall",
+        "max": -1
       }
     ]
   }
