@@ -70,6 +70,7 @@ import {
   resolvePlayerMovementSpeedMultiplier,
   resolveSimulantShotDamage,
   resolvePlayerKnockbackVelocity,
+  resolvePlayerRecoveryPosition,
   isWeaponRaycastSurface,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
@@ -1348,9 +1349,9 @@ describe("ledge vaulting helpers", () => {
   it("charges traversal O₂ continuously from the minimum vault to two metres", () => {
     expect(resolveVaultTraversalO2Cost(0.1)).toBe(0);
     expect(resolveVaultTraversalO2Cost(0.15)).toBeCloseTo(0, 8);
-    expect(resolveVaultTraversalO2Cost(1.075)).toBeCloseTo(O2_LANDING_BASE_COST / 2, 8);
-    expect(resolveVaultTraversalO2Cost(2)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
-    expect(resolveVaultTraversalO2Cost(3)).toBeCloseTo(O2_LANDING_BASE_COST, 8);
+    expect(resolveVaultTraversalO2Cost(1.075)).toBeCloseTo(O2_LANDING_BASE_COST / 4, 8);
+    expect(resolveVaultTraversalO2Cost(2)).toBeCloseTo(O2_LANDING_BASE_COST / 2, 8);
+    expect(resolveVaultTraversalO2Cost(3)).toBeCloseTo(O2_LANDING_BASE_COST / 2, 8);
     expect(resolveVaultTraversalO2Cost(Number.NaN)).toBe(0);
   });
 
@@ -1803,6 +1804,21 @@ describe("wall hanging helper", () => {
 });
 
 describe("coarse scene collision extraction", () => {
+  it("chooses a validated last-safe capsule position for geometry recovery", () => {
+    const blockingWall: PhysicsBox = {
+      center: { x: 0, y: 0.86, z: 0 },
+      halfExtents: { x: 0.5, y: 0.86, z: 0.5 },
+    };
+    const fallback = { x: 2, y: PLAYER_CAPSULE_CENTER_HEIGHT, z: 0 };
+
+    expect(
+      resolvePlayerRecoveryPosition({ x: 0, y: PLAYER_CAPSULE_CENTER_HEIGHT, z: 0 }, fallback, [
+        blockingWall,
+      ]),
+    ).toEqual(fallback);
+    expect(resolvePlayerRecoveryPosition(null, fallback, [blockingWall])).toEqual(fallback);
+  });
+
   it("turns meaningful render meshes into boxes while ignoring presentation detail", () => {
     const scene = new THREE.Scene();
     const environment = new THREE.Group();

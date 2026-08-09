@@ -377,6 +377,8 @@ map and video-quality selectors; debug controls are offset below that area and n
   move the capsule through a continuous collision-checked arc instead of teleporting the camera or body. Contact with
   the source box is allowed during ascent; an unrelated blocking contact cancels the traversal. A streamed source that
   keeps its ID but changes centre, extents, or rotation is also cancelled through its captured geometry signature.
+  Vaults, ledge pull-ups, and wall climbs charge a height-scaled O₂ cost: the 0.15 m minimum is free and the 2.0 m
+  maximum costs 5 O₂ (half the 10 O₂ full-landing reference charge).
 - Tall walls use a separate traversal state. When horizontal movement is blocked by a real contact, a wall must be
   above the refined ledge-height window relative to the player's current feet, overlap the player's lateral reach,
   and be within 0.5 m of the capsule front. The resolver tests the approached face in each box's local horizontal
@@ -400,6 +402,11 @@ map and video-quality selectors; debug controls are offset below that area and n
   below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
   drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
   writes the safe snapshot before the next HMR reload.
+- If the capsule is wedged between colliders, press `X` (or the mobile `Recover` action) to return to the
+  most recent validated capsule position. Recovery checks that checkpoint against the current static and
+  streamed colliders, clears active traversal and movement input, and falls back to a safe spawn when the
+  checkpoint is no longer clear. It moves the physics capsule first; the camera is then composed from that
+  resolved position.
 - The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only an explicit debug-UI
   change. The panel keeps the latest dirty tuning payload in memory and sends it once with `keepalive` on
   `pagehide`; its 500 ms live telemetry refresh never writes the artifact. The Vite middleware also skips

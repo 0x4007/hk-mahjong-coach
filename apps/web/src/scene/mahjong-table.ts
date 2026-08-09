@@ -1184,6 +1184,8 @@ export interface MahjongTableMount {
   readonly setTouchMovementVector: (forward: number, right: number, active: boolean) => void;
   readonly toggleCrouch: () => boolean;
   readonly setJumpInput: (pressed: boolean) => boolean;
+  /** Return the capsule to its most recent validated position after a geometry wedge. */
+  readonly recoverPlayer: () => boolean;
   readonly fire: () => void;
   readonly melee: () => void;
   readonly setReticleEnabled: (enabled: boolean) => void;
@@ -3020,11 +3022,14 @@ export const resolveVaultTraversalDuration = (heightAboveFeet: number): number =
     normalizedHeight,
   );
 };
+/** Half of the full-landing reference charge is enough for a two-metre traversal. */
+const O2_TRAVERSAL_COST_SCALE = 0.5;
+
 /**
  * Resolve the discrete O₂ charge for a vault or wall climb from its height.
- * The smallest vaultable ledges are free; a two-metre traversal costs the
- * same 10 O₂ reference charge as a full landing, with a linear curve between
- * those endpoints.
+ * The smallest vaultable ledges are free; a two-metre traversal costs half of
+ * the 10 O₂ reference charge used by a full landing, with a linear curve
+ * between those endpoints.
  */
 export const resolveVaultTraversalO2Cost = (heightAboveFeet: number): number => {
   const safeHeight = Number.isFinite(heightAboveFeet) ? Math.max(0, heightAboveFeet) : 0;
@@ -3033,7 +3038,7 @@ export const resolveVaultTraversalO2Cost = (heightAboveFeet: number): number => 
     0,
     1,
   );
-  return O2_LANDING_BASE_COST * normalizedHeight;
+  return O2_LANDING_BASE_COST * O2_TRAVERSAL_COST_SCALE * normalizedHeight;
 };
 /**
  * Scale traversal time from the current O₂ reserve. Empty O₂ keeps the existing
@@ -3693,6 +3698,28 @@ export const isPlayerCapsulePositionClear = (
     }
   }
   return true;
+};
+
+/**
+ * Select a validated capsule position for the explicit geometry-recovery action.
+ * The last safe position is preferred; the caller can provide a spawn fallback
+ * when streamed geometry invalidated that checkpoint.
+ */
+export const resolvePlayerRecoveryPosition = (
+  lastSafePosition: PhysicsVector | null,
+  fallbackPosition: PhysicsVector,
+  physicsBoxes: readonly PhysicsBox[],
+): PhysicsVector | null => {
+  for (const candidate of [lastSafePosition, fallbackPosition]) {
+    if (
+      candidate !== null &&
+      [candidate.x, candidate.y, candidate.z].every(Number.isFinite) &&
+      isPlayerCapsulePositionClear(candidate, physicsBoxes)
+    ) {
+      return { x: candidate.x, y: candidate.y, z: candidate.z };
+    }
+  }
+  return null;
 };
 
 /**
@@ -14309,6 +14336,8 @@ export const createMahjongTableScene = (
   let wallHangState: WallHangState | null = null;
   let wallClimbTransition: WallClimbTransition | null = null;
   let wallHangElapsed = 0;
+  let lastSafePhysicsPosition: PhysicsVector | null = null;
+  let recoverPlayerFromGeometry: () => boolean = () => false;
   const movementControllerSeed = `${roomSeed}|player-movement-v1`;
   let movementControllerState: PlayerMovementControllerState =
     createPlayerMovementControllerState(movementControllerSeed);
@@ -15041,6 +15070,7 @@ export const createMahjongTableScene = (
       y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
       z: camera.position.z,
     };
+    lastSafePhysicsPosition = { ...physicsCharacterPosition };
   };
   const clearWallTraversal = (): void => {
     wallHangState = null;
@@ -15303,6 +15333,7 @@ export const createMahjongTableScene = (
       event.code === "KeyR" ||
       event.code === "KeyQ" ||
       event.code === "KeyF" ||
+      event.code === "KeyX" ||
       /^Digit[0-6]$/u.test(event.code)
     ) {
       event.preventDefault();
@@ -15334,6 +15365,10 @@ export const createMahjongTableScene = (
       } else if (event.code === "KeyF") {
         if (!event.repeat) {
           triggerMeleeAttack();
+        }
+      } else if (event.code === "KeyX") {
+        if (!event.repeat) {
+          recoverPlayerFromGeometry();
         }
       } else if (/^Digit[0-6]$/u.test(event.code)) {
         if (!event.repeat) {
@@ -15669,6 +15704,77 @@ export const createMahjongTableScene = (
     resetMotionCalibration();
     syncPhysicsCharacterToCamera();
     saveSceneState(true);
+  };
+
+  recoverPlayerFromGeometry = (): boolean => {
+    if (physicsRuntime === null) {
+      resetToSpawn();
+      return true;
+    }
+    const recoveryPhysicsBoxes = [
+      ...staticPhysicsBoxes,
+      ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
+    ];
+    const fallbackSpawn =
+      isCleanSlateMap && debuggingTwoMap !== null
+        ? {
+            x: debuggingTwoMap.spawn.x,
+            y: debuggingTwoMap.spawn.y + PLAYER_CAPSULE_CENTER_HEIGHT,
+            z: debuggingTwoMap.spawn.z,
+          }
+        : resolveRandomSpawnPosition();
+    const recoveryPosition = resolvePlayerRecoveryPosition(
+      lastSafePhysicsPosition,
+      fallbackSpawn,
+      recoveryPhysicsBoxes,
+    );
+    if (recoveryPosition === null) {
+      resetToSpawn();
+      return true;
+    }
+
+    const settled = physicsRuntime.move(recoveryPosition, { x: 0, y: 0, z: 0 });
+    physicsCharacterPosition = settled.position;
+    lastSafePhysicsPosition = { ...settled.position };
+    grounded = settled.grounded;
+    verticalVelocity = 0;
+    jumpOffset = Math.max(0, settled.position.y - PLAYER_CAPSULE_CENTER_HEIGHT);
+    maximumFallSpeed = 0;
+    forwardVelocity = 0;
+    strafeVelocity = 0;
+    playerKnockbackVelocity.set(0, 0, 0);
+    pressedKeys.clear();
+    touchMovementActive = false;
+    touchForward = 0;
+    touchRight = 0;
+    jumpKeyHeld = false;
+    jumpPressQueued = false;
+    slideRequested = false;
+    movementControllerState = createPlayerMovementControllerState(
+      movementControllerSeed,
+      settled.grounded,
+    );
+    pendingTraversalFeedback = null;
+    ledgeClimbTransition = null;
+    clearWallTraversal();
+    touchingWall = false;
+    wallContact = null;
+    wallProximity = null;
+    wallBracedAim = false;
+    coverMode = false;
+    coverActivationPending = false;
+    coverActivationPendingWall = null;
+    coverWall = null;
+    coverSnapTarget = null;
+    camera.position.set(
+      settled.position.x,
+      settled.position.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight,
+      settled.position.z,
+    );
+    resetMotionCalibration();
+    resetCameraMotion();
+    saveSceneState(true);
+    return true;
   };
 
   const resolveRandomSpawnPosition = (): PhysicsVector => {
@@ -18650,6 +18756,12 @@ export const createMahjongTableScene = (
             // tangent span so A/D cannot silently drop wall contact.
             clampedPosition = clampPlayerPositionToWallTangent(clampedPosition, coverWall);
           }
+          if (
+            movement.collisions === 0 &&
+            isPlayerCapsulePositionClear(clampedPosition, traversalPhysicsBoxes)
+          ) {
+            lastSafePhysicsPosition = { ...clampedPosition };
+          }
           const canUseAirborneTraversal =
             jumpInputActive &&
             !grounded &&
@@ -19593,6 +19705,7 @@ export const createMahjongTableScene = (
     setTouchMovementVector,
     toggleCrouch,
     setJumpInput,
+    recoverPlayer: () => recoverPlayerFromGeometry(),
     fire: () => {
       if (meleeRuntime?.isActive()) {
         if (aimingDownSightsRequested || aimingDownSights) {

@@ -1667,6 +1667,9 @@ const App = (): React.JSX.Element => {
       setIsCrouched(nextCrouched);
     }
   };
+  const recoverPlayer = (): void => {
+    mountRef.current?.recoverPlayer();
+  };
   const handleJumpPointerDown = (event: React.PointerEvent<HTMLButtonElement>): void => {
     event.preventDefault();
     event.stopPropagation();
@@ -1916,7 +1919,7 @@ const App = (): React.JSX.Element => {
             ) : (
               <p>
                 Click to look · WASD move · double-tap sprint · Command/right-click zoom · E equip ·
-                R reload · Shift crouch · Space jump.
+                R reload · Shift crouch · Space jump · X recover.
               </p>
             )}
           </header>
@@ -2191,14 +2194,22 @@ const App = (): React.JSX.Element => {
                 >
                   Reload
                 </button>
+                <button
+                  className="mobile-action-button"
+                  onClick={() => handleMobileActionClick(recoverPlayer)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(recoverPlayer, event)}
+                  type="button"
+                >
+                  Recover
+                </button>
               </div>
             </div>
           )}
           <footer className="scene-card-footer scene-overlay scene-overlay-footer">
             <p>
               {isMobile
-                ? "Joystick move · swipe look · Equip · Fire · Reload · Crouch · Jump"
-                : "Mouse look · WASD move · double-tap sprint · Command/right-click zoom · E equip · click fire · R reload · Q throw · 0 holster · 1–6 switch · Shift crouch · Space jump · Esc release"}
+                ? "Joystick move · swipe look · Equip · Fire · Reload · Crouch · Jump · Recover"
+                : "Mouse look · WASD move · double-tap sprint · Command/right-click zoom · E equip · click fire · R reload · Q throw · 0 holster · 1–6 switch · Shift crouch · Space jump · X recover · Esc release"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>
           </footer>

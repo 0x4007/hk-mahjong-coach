@@ -2253,3 +2253,22 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Prototype limitations: wall running remains deferred, action-specific reload/melee poses remain mechanical viewmodel
   animation layered after the shared player-perspective damper, and rendered browser behavior is reserved for the
   user's one-window acceptance.
+
+## 2026-08-09 — Capsule geometry recovery
+
+- Added a deliberate first-person geometry escape path. The scene records the last capsule position that completed a
+  collision-free physics step, validates it against the current static and streamed colliders, and exposes `X` on
+  desktop plus `Recover` on touch layouts. Recovery resolves the physics capsule first, clears traversal, movement
+  input, cover, and camera-damper state, then composes the camera from the resolved capsule pose.
+- If streamed geometry invalidates the checkpoint, recovery uses a validated map spawn and finally the existing spawn
+  resolver. It never moves only the camera or feeds presentation offsets back into physics.
+- Added a regression for rejecting an occupied checkpoint and selecting the validated fallback position. Browser/HMR
+  acceptance remains with the user's existing one-window session; no additional browser was opened here.
+
+## 2026-08-09 — Halved ledge traversal O₂ charge
+
+- Reduced the shared height-scaled O₂ charge for low vaults, ledge pull-ups, and wall climbs by 50%. The smallest
+  0.15 m traversal remains free, while the 2.0 m maximum now costs 5 O₂ instead of 10 O₂; intermediate heights keep
+  the same linear curve.
+- Updated the pure traversal-energy regression and movement documentation. Browser/HMR acceptance was not run because
+  this balance-only change does not alter scene presentation and the existing one-window browser remains user-owned.
