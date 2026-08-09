@@ -526,6 +526,19 @@ describe("camera motion damper", () => {
     expect(Math.abs(settled.headBobPitch)).toBeLessThan(Math.abs(forwardFrame.headBobPitch) * 0.2);
   });
 
+  it("saturates the signed acceleration response monotonically at its hard bound", () => {
+    const responses = [0, -20, -60, -600, -6_000].map(resolveCameraAccelerationPitch);
+
+    for (let index = 1; index < responses.length; index += 1) {
+      expect(responses[index]).toBeGreaterThanOrEqual(responses[index - 1] ?? 0);
+    }
+    for (const response of responses) {
+      expect(response).toBeLessThanOrEqual(CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE);
+    }
+    expect(responses.at(-2)).toBe(CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE);
+    expect(responses.at(-1)).toBe(CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE);
+  });
+
   it("makes a high-energy stop visible on the first damper frame", () => {
     const ordinary = createCameraMotionDamper().update({
       ...idleInput,

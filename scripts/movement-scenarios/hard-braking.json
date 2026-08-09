@@ -35,6 +35,13 @@
         "max": -100
       },
       {
+        "id": "hard-stop-produces-acceleration-pitch-response",
+        "field": "camera.offsets.headBobPitch",
+        "at": "max",
+        "label": "impact",
+        "min": 0.001
+      },
+      {
         "id": "collision-is-recorded",
         "field": "collisions",
         "at": "max",

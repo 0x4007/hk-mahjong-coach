@@ -250,6 +250,16 @@ describe("player vitals model", () => {
     expect(applyPlayerO2Cost(insufficient, O2_JUMP_COST)).toEqual(insufficient);
   });
 
+  it("keeps every discrete action mutation bounded at zero reserve", () => {
+    const emptyReserve = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2);
+
+    expect(applyPlayerO2Cost(emptyReserve, O2_JUMP_COST, O2_JUMP_RECOVERY_DELAY_SECONDS)).toBe(
+      emptyReserve,
+    );
+    expect(applyPlayerProjectileO2Cost(emptyReserve, 100)).toBe(emptyReserve);
+    expect(setPlayerHoldingBreath(emptyReserve, true, true).holdingBreath).toBe(false);
+  });
+
   it("requires one affordable action slice before holding breath", () => {
     const tinyReserve = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2 - 0.01);
     const sliceReserve = applyPlayerO2Cost(

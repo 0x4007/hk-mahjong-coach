@@ -344,9 +344,8 @@ map and video-quality selectors; debug controls are offset below that area and n
 - The interactive seat view uses familiar first-person conventions: click-to-capture pointer lock,
   unrestricted vertical mouse look, WASD/arrow movement through the penthouse, an Escape unlock, and
   touch look/movement on mobile. Debug mode adds the orbit-controlled overhead lens and visual panel. The
-  shipping loop keeps the composed initial camera while its gaze focus follows the visible center-ray surface;
-  a tight five-ray neighborhood lets a nearby visible tile win when the reticule falls into a narrow gap,
-  without jumping through an opaque object. At the reference pupil, accommodation eases toward near focus in roughly
+  shipping loop keeps the composed initial camera while its gaze focus follows the exact visible centre-dot ray.
+  A nearby tile cannot pull focus away from that shared NDC. At the reference pupil, accommodation eases toward near focus in roughly
   0.8 seconds and relaxes toward far focus in roughly 0.65 seconds. Dark adaptation modestly slows both responses to
   about 1.1 and 0.8 seconds at the fully dilated pupil, approximating the loss of contrast and increased aberration
   without changing the hyperfocal or Bokeh model. The effect reads as eye focus rather than a cinematic snap. Physics-resolved
@@ -422,8 +421,8 @@ map and video-quality selectors; debug controls are offset below that area and n
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
   8 logical cores, keeping DPR, shadows, and post-processing bounded on unknown or software-WebGL devices;
   high remains an explicit debug choice. Bokeh is on by default only in high and can be toggled in debug;
-  GTAO remains an explicit reduced-resolution opt-in. Focus follows the nearest non-overlay gaze surface,
-  with a stable far fallback and a tight tile-neighborhood assist. The pass uses a restrained 17 mm eye
+  GTAO remains an explicit reduced-resolution opt-in. Focus follows the nearest non-overlay surface on the exact
+  centre-dot ray, with a stable far fallback. The pass uses a restrained 17 mm eye
   approximation with a 1 arcminute central acuity threshold: bright rooms settle near a 2.5 mm pupil,
   ordinary indoor light near 4 mm, and dark rooms expand toward 6.5 mm. That pupil drives the aperture and
   hyperfocal distance, so close tiles and near camera-child geometry can soften while the room and skyline stay
@@ -579,18 +578,23 @@ ordered events, O₂/vitals, camera input and offsets, and the shared visible/ai
 
 The 21 fixtures in `scripts/movement-scenarios/` cover walk and sprint acceleration, sprint release, collision braking,
 direction reversal, diagonal and crouch movement, full and held jumping, low vault and invalid-vault rejection, wall
-contact and climb release, ledge grab/contact loss/top support, slide start/stop, three landing strengths, and O₂
+contact and climb release, ledge grab/contact loss, a completed wall-climb top support, slide start/stop, three landing strengths, and O₂
 depletion/recovery. Every fixture has a unique fixed seed and explicit exact or bounded assertions. Geometry traversal
 uses Rapier; deterministic locomotion cases use the fallback runtime. Use
 `pnpm test:movement:sim <fixture> --json` for normal inspection. A JSON-only consumer should run
 `pnpm exec tsx scripts/movement-simulate.ts <fixture> --json`, because the package-script wrapper prints its command
 prefix to stdout. Rapier's current initialization deprecation warning remains on stderr.
+The scenario suite serializes each result twice through the same writer used by `--json` and requires the complete
+output bytes, including indentation and the trailing newline, to be identical. Active traversal also uses the live
+source-geometry signature and destination-clearance gate, so an unchanged obstacle ID cannot hide changed geometry.
 
 A wall contact is eligible only while airborne with Jump active, after low-vault and ledge checks reject the contact.
 The approached local face must block the capsule, overlap its lateral reach, and have a reachable top. The attachment
 keeps the caught tangent coordinate and suppresses gravity. Release Jump after the catch, then make a fresh Jump press
 to request the climb. The climb uses the same collision-checked arc and supported landing query as other traversal;
 releasing Jump, losing source contact, changing source geometry, or losing destination clearance cancels it.
+Wall contact itself is a stable attachment rather than an active arc: releasing Jump re-arms the next climb press and
+does not detach the player.
 
 ## Centralized camera motion and landing weight
 
@@ -603,11 +607,15 @@ The final vertical presentation offset is clamped only after breathing, gait, we
 are composed. Physics-derived support and ceiling clearance provide the bounds. The individual gait and weight values
 remain available for presentation and diagnostics, but the rendered camera cannot pass through those clearances. Local
 shot and melee impulses publish a new damper snapshot immediately; the scene recomposes that snapshot without a second
-time step, while the projectile or melee query keeps the pre-action ray.
+time step, while the projectile or melee query keeps the pre-action ray. Delayed gun and held-prop melee impacts retain
+that cloned action ray instead of following later presentation frames; weapon changes, stash/drop, death, completion,
+and disposal cancel any pending retained melee ray.
 
 Sustained local acceleration uses an exact target-and-response cascade over each held input interval. Its roll and pitch
 therefore depend on elapsed time instead of render count at 60 or 120 Hz, and both stages decay smoothly after measured
 acceleration stops.
+The O₂ model exposes one aim-sway amplitude only. The held weapon is a camera child aimed at that same live reticle ray;
+there is no separate weapon-sway value or oscillator.
 
 The running stride uses a smooth lateral sine with a parabolic vertical relationship, producing a U-shaped path
 instead of a circular orbit. Breathing and jump/landing responses remain additive.

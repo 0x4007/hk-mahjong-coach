@@ -37,7 +37,6 @@ describe("continuous O₂ stability response", () => {
 
     expect(higher.breathlessness).toBeLessThan(lower.breathlessness);
     expect(higher.reticleSwayRadians).toBeLessThan(lower.reticleSwayRadians);
-    expect(higher.weaponSwayRadians).toBeLessThan(lower.weaponSwayRadians);
     expect(higher.accuracyMultiplier).toBeLessThan(lower.accuracyMultiplier);
     expect(lower.reticleSwayRadians - higher.reticleSwayRadians).toBeLessThan(0.001);
   });
@@ -47,17 +46,15 @@ describe("continuous O₂ stability response", () => {
     const zoom = resolveO2Stability({ oxygenRatio: 0.4, aimingDownSights: true });
 
     expect(zoom.reticleSwayRadians).toBeCloseTo(hip.reticleSwayRadians, 12);
-    expect(zoom.weaponSwayRadians).toBeCloseTo(hip.weaponSwayRadians, 12);
   });
 
-  it("amplifies the shared breathing sway for the reticle and weapon output", () => {
+  it("amplifies the shared breathing sway consumed by reticle and viewmodel aim", () => {
     const rested = resolveO2Stability({ oxygenRatio: 1, aimingDownSights: true });
     const strained = resolveO2Stability({ oxygenRatio: 0.4, aimingDownSights: true });
 
     expect(strained.reticleSwayRadians).toBeGreaterThan(0.006);
-    expect(strained.weaponSwayRadians).toBeGreaterThan(0.02);
     expect(strained.reticleSwayRadians).toBeGreaterThan(rested.reticleSwayRadians);
-    expect(strained.weaponSwayRadians).toBeGreaterThan(rested.weaponSwayRadians);
+    expect("weaponSwayRadians" in strained).toBe(false);
   });
 
   it("suppresses reserve-driven aim sway while holding breath, then restores it with no O₂", () => {
@@ -80,15 +77,11 @@ describe("continuous O₂ stability response", () => {
     const unheldExhausted = resolveO2Stability({ oxygenRatio: 0, aimingDownSights: true });
 
     expect(controlled.reticleSwayRadians).toBeGreaterThan(0);
-    expect(controlled.weaponSwayRadians).toBeGreaterThan(0);
     expect(restedControlled.reticleSwayRadians).toBe(0);
-    expect(restedControlled.weaponSwayRadians).toBe(0);
     expect(controlled.reticleSwayRadians).toBeLessThan(strained.reticleSwayRadians);
-    expect(controlled.weaponSwayRadians).toBeLessThan(strained.weaponSwayRadians);
     expect(controlled.accuracyMultiplier).toBeLessThan(strained.accuracyMultiplier);
     expect(controlled.accuracyMultiplier).toBeGreaterThanOrEqual(1);
     expect(exhausted.reticleSwayRadians).toBe(unheldExhausted.reticleSwayRadians);
-    expect(exhausted.weaponSwayRadians).toBe(unheldExhausted.weaponSwayRadians);
   });
 
   it("stacks wall bracing and held breath into quarter instability", () => {
@@ -108,16 +101,11 @@ describe("continuous O₂ stability response", () => {
       O2_BRACED_STABILITY_FACTOR,
       8,
     );
-    expect(combined.weaponSwayRadians / held.weaponSwayRadians).toBeCloseTo(
-      O2_BRACED_STABILITY_FACTOR,
-      8,
-    );
     expect(combined.accuracyMultiplier - 1).toBeCloseTo(
       (held.accuracyMultiplier - 1) * O2_WALL_BRACE_STABILITY_FACTOR,
       8,
     );
     expect(combined.reticleSwayRadians).toBeLessThan(held.reticleSwayRadians);
-    expect(combined.weaponSwayRadians).toBeLessThan(held.weaponSwayRadians);
   });
 
   it("leaves one half of aim instability while braced against a wall", () => {
@@ -129,10 +117,6 @@ describe("continuous O₂ stability response", () => {
     const normal = resolveO2Stability({ oxygenRatio: 0, aimingDownSights: true });
 
     expect(braced.reticleSwayRadians / normal.reticleSwayRadians).toBeCloseTo(
-      O2_WALL_BRACE_STABILITY_FACTOR,
-      8,
-    );
-    expect(braced.weaponSwayRadians / normal.weaponSwayRadians).toBeCloseTo(
       O2_WALL_BRACE_STABILITY_FACTOR,
       8,
     );
@@ -156,10 +140,6 @@ describe("continuous O₂ stability response", () => {
       O2_CROUCH_STABILITY_FACTOR,
       8,
     );
-    expect(crouched.weaponSwayRadians / normal.weaponSwayRadians).toBeCloseTo(
-      O2_CROUCH_STABILITY_FACTOR,
-      8,
-    );
     expect(crouched.accuracyMultiplier - 1).toBeCloseTo(
       (normal.accuracyMultiplier - 1) * O2_CROUCH_STABILITY_FACTOR,
       8,
@@ -178,7 +158,6 @@ describe("continuous O₂ stability response", () => {
     const quarterFactor = O2_CROUCH_STABILITY_FACTOR * O2_WALL_BRACE_STABILITY_FACTOR;
 
     expect(combined.reticleSwayRadians / normal.reticleSwayRadians).toBeCloseTo(quarterFactor, 8);
-    expect(combined.weaponSwayRadians / normal.weaponSwayRadians).toBeCloseTo(quarterFactor, 8);
     expect(combined.accuracyMultiplier - 1).toBeCloseTo(
       (normal.accuracyMultiplier - 1) * quarterFactor,
       8,

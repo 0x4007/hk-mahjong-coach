@@ -320,6 +320,20 @@ describe("pure player movement controller", () => {
     expect(valid.events).toContainEqual({ kind: "ledge-grab", obstacleId: "ledge-1" });
   });
 
+  it("publishes the validated external traversal progress directly", () => {
+    const output = step(createPlayerMovementControllerState("movement-test", false), {
+      grounded: false,
+      externalTraversal: {
+        kind: "ledge-grab",
+        obstacleId: "ledge-1",
+        progress: 0.625,
+        contactValid: true,
+      },
+    });
+
+    expect(output.traversalProgress).toBeCloseTo(0.625, 12);
+  });
+
   it("cancels lost traversal contact and completes valid traversal explicitly", () => {
     const traversing: PlayerMovementControllerState = {
       ...createPlayerMovementControllerState("movement-test", false),

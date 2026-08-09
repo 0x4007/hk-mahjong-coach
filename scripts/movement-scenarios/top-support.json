@@ -1,22 +1,26 @@
 {
   "schemaVersion": 2,
   "name": "top-support",
-  "description": "Complete a low vault and retain named top support without capsule penetration.",
+  "description": "Complete a wall climb and retain named top support without capsule penetration.",
   "seed": "continuous-head-motion/top-support/v2",
   "physics": { "runtime": "rapier" },
-  "start": { "position": [0, 0.86, -0.1], "velocity": [0, 0, -2], "grounded": true, "o2": 100 },
+  "start": { "position": [0, 0.86, -2], "velocity": [0, 0, 0], "grounded": true, "o2": 100 },
   "staticBoxes": [
-    { "obstacleId": "support-box", "center": [0, 0.15, -1], "halfExtents": [0.9, 0.15, 0.7] }
+    { "obstacleId": "support-box", "center": [0, 2, -4], "halfExtents": [0.8, 2, 0.5] }
   ],
   "frames": [
-    { "duration": 0.12, "forward": 1, "jump": true, "label": "traverse" },
-    { "duration": 0.5, "label": "supported" }
+    { "duration": 0.35, "forward": 1, "sprint": true, "jump": true, "label": "catch" },
+    { "duration": 0.1, "label": "rearm" },
+    { "duration": 0.8, "jump": true, "label": "climb" },
+    { "duration": 0.25, "label": "supported" }
   ],
   "expect": {
     "requiredEvents": [
-      { "kind": "vault-start" },
-      { "kind": "traversal-complete", "traversal": "vault" }
+      { "kind": "wall-contact" },
+      { "kind": "wall-climb-request" },
+      { "kind": "traversal-complete", "traversal": "wall-climb" }
     ],
+    "requiredStates": ["wall-contact", "wall-climb", "landing-recovery"],
     "requiredContactKinds": ["support"],
     "finalGrounded": true,
     "ranges": [
@@ -25,7 +29,7 @@
         "field": "position.y",
         "at": "last",
         "label": "supported",
-        "equals": 1.16,
+        "equals": 4.86,
         "tolerance": 0.05
       },
       {

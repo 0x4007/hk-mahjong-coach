@@ -867,9 +867,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   recentering on a skinny wall. Wall detection runs only after ledge and low-vault rejection. The resolver also
   considers streamed static obstacle boxes, while knocked dynamic props remain ineligible. The climbing-gym preset
   starts close enough to the dedicated wall for a normal walk to reach it without a sprint double-tap.
-- The Bokeh/focus pass now follows the gaze ray and classifies tile, surface, and far-fallback targets. A tight
-  five-ray neighborhood assists tile focus when the reticule falls into a narrow gap, without selecting an
-  occluded tile. Accommodation uses separate near/far damping (about 0.4/0.65 seconds), and the blur envelope
+- The Bokeh/focus pass now follows the gaze ray and classifies tile, surface, and far-fallback targets. Focus uses
+  the exact centre-dot NDC; a nearby tile cannot pull it away from the reticle ray. Accommodation uses separate
+  near/far damping (about 0.4/0.65 seconds), and the blur envelope
   models a 17 mm eye with a 1 arcminute central acuity threshold instead of a fixed cinematic lens. A virtual
   2.5–6.5 mm pupil adapts slowly to the estimated room luminance, changing the hyperfocal distance and blur
   ceiling; ordinary focus stays restrained while close tile focus remains visible. Debug metrics expose focus
@@ -2214,33 +2214,43 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 
 ## 2026-08-09 — Continuous head-motion movement prototype
 
+- Canonical implementation base: `e88e650baa4f19877b30ab3b1a33f5ae7c37c3d6`. The audit corrections in this entry
+  are layered on checkpoint `3f7095f427a602ce1d175a9752ed2e0e63f64fe6`; the external handoff reports the exact
+  final audit commit and its post-commit test-bus receipt.
 - Added one pure typed movement controller for grounded, airborne, crouch/slide, vault, wall-contact, wall-climb,
   ledge-grab, and landing-recovery behavior. It accelerates toward bounded ground or air targets, preserves release
   momentum, brakes reversals more strongly, latches Jump input, and produces deterministic full or fallback jumps.
   Standing and crouching are free at zero O₂; only a full jump spends the 5-point jump cost.
 - Split contextual top traversal into low vaults through 0.9 m and ledge grab/pull-up through 2.0 m. Wall contact now
   requires an airborne validated contact; release Jump after attachment and make a fresh Jump press to request a climb.
-  Active traversal cancels on released input, lost contact, invalid destination clearance, or a source collider whose
-  stable ID now refers to changed centre, extent, or rotation geometry.
+  Active vault, ledge, and wall-climb arcs cancel on released input, lost contact, invalid destination clearance, or a
+  source collider whose stable ID now refers to changed centre, extent, or rotation geometry. Wall contact remains a
+  stable attachment while Jump is released so the fresh climb press can be latched deterministically.
 - Kept the physics capsule authoritative through every traversal arc and supported landing query. Source-only ascent
   contact is accepted, while unrelated blocking contact cancels the arc. Camera gait, acceleration, take-off, landing,
   breathing, recoil, and traversal response remain render-only outputs of the central damper. The acceleration
   target-and-response cascade is integrated exactly for held input, so sustained roll and pitch agree at 60 and 120 Hz
   and decay through the same two stages after acceleration stops.
-- Unified the visible ring, centre dot, aim ray, focus ray, and held viewmodel through the moving
+- Unified the visible ring, centre dot, exact centre focus ray, aim ray, and held viewmodel through the moving
   `ReticlePresentation`. A projectile or melee query keeps its pre-action ray; the rendered camera, held item, reticle,
   and later focus consumers immediately recompose one post-action damper snapshot without a second time step. The final
   vertical presentation offset is clamped to physics-derived support and ceiling clearance. Full-O₂ stationary
-  breathing and reserve-driven aim motion are exactly zero.
-- Replaced the legacy movement fixtures with 21 unique-seed schema-v2 scenarios. The simulator runs controller → O₂ →
+  breathing and reserve-driven aim motion are exactly zero. Delayed gun and held-prop melee impacts retain cloned
+  action rays and cancel them on completion, equipment changes, stash/drop, death, or disposal.
+- Replaced the legacy movement fixtures with 21 unique-seed schema-v2 scenarios. The top-support fixture now proves a
+  completed wall climb and named supported landing, while the separate release fixture proves cancellation. The simulator runs controller → O₂ →
   physics → contact feedback → vitals → camera damper and records full position, velocity, contact, traversal, event,
-  O₂, camera, and visible/aim/focus traces. On the final source candidate, all 21 scenarios pass their embedded
-  assertions twice with byte-identical JSON. Repository formatting, full lint, strict typecheck, the production build,
-  and `git diff --check` pass; the production web build reports only its existing large-chunk warning. Server-owned
-  test-bus run `1786257773809-36855-1053f1f4` matched dirty fingerprint
-  `5eea0031b5d8fcac2de239bdba906404678767fa4c7547187991c2d7cb143d18` and passed all 629 tests across 134 suites.
+  O₂, camera, and visible/aim/focus traces. On the final pre-commit audit candidate, all 21 scenarios passed their embedded
+  assertions twice through the CLI serializer: 42 runs, 310 passed assertions, and zero byte mismatches. `pnpm typecheck`,
+  `pnpm lint`, `pnpm format:check`, `pnpm build`, and `git diff --check` passed; the production web build reported only its
+  existing large-chunk warning. Historical server-owned run `1786257907110-37922-502a9c7a` matched clean checkpoint
+  `3f7095f427a602ce1d175a9752ed2e0e63f64fe6` and passed all 629 tests across 134 suites. The external handoff must use a
+  new clean receipt matching the final audit commit.
   Browser, HMR, Playwright, and computer-use validation were intentionally not run; browser acceptance remains with
   the user in one existing window.
 - The v2 hard cut retires the old wall-hang and vault fixture filenames. The required scenario matrix now covers the
   live catch/re-arm/climb-release flow, while focused scene regressions retain skinny-wall and rotated generated-wall
   geometry coverage.
+- Prototype limitations: wall running remains deferred, action-specific reload/melee poses remain mechanical viewmodel
+  animation layered after the shared player-perspective damper, and rendered browser behavior is reserved for the
+  user's one-window acceptance.

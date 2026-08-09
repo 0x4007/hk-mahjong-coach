@@ -7,6 +7,7 @@ import {
   CLIMBING_GYM_VAULT_HEIGHTS,
   collectScenePhysicsBoxes,
   createExplorationWorld,
+  DEFAULT_RETICLE_POSITION,
   EXPLORATION_CHUNK_SIZE,
   EXPLORATION_CHUNKS_PER_SIDE,
   EXPLORATION_PENTHOUSE_BOUNDS,
@@ -36,6 +37,7 @@ import {
   isExplorationRectOutsidePenthouse,
   readVisualDebugPreferences,
   readVisualSceneState,
+  resolveCancelledMeleeSwing,
   resolveFocusAccommodationDamping,
   resolveDofIntensityForPosture,
   resolveHumanEyeBokeh,
@@ -47,8 +49,12 @@ import {
   resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
   shouldInterruptReloadForMelee,
+  resolveFirstPersonPresentation,
   resolveReticlePresentation,
+  resolveReticleAimNdc,
   resolveReticleZoomViewOffset,
+  resolveViewmodelAimTargetLocal,
+  snapshotActionAimRay,
   resolveDesktopAimInput,
   resolveCoverLeanInput,
   resolveCoverModeFromAimTransition,
@@ -58,6 +64,7 @@ import {
   shouldAutoRearmOwnedGunAfterMeleeDrop,
   shouldAutoReloadOnWeaponEquip,
   shouldEquipWalkOverGun,
+  shouldResolveMeleeSwingImpact,
   shouldStashMeleeForGun,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
@@ -72,6 +79,7 @@ import {
   writeVisualDebugPreferences,
   writeVisualSceneState,
 } from "./mahjong-table.js";
+import { createCameraMotionDamper } from "./camera-motion.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
 import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
 import { createDebuggingTwoMap, DEBUGGING_TWO_BOX_STACK_PITCH } from "./debugging-two-map.js";
@@ -604,6 +612,130 @@ describe("shared reticle presentation", () => {
     expect(moved.dotOffsetCssPixels).toEqual(first.dotOffsetCssPixels);
     expect(moved.aimNdc.x - first.aimNdc.x).toBeCloseTo(-0.5, 12);
     expect(moved.aimNdc.y - first.aimNdc.y).toBeCloseTo(0.4, 12);
+  });
+
+  it("keeps the visible and aim offsets exactly zero at full-O₂ rest", () => {
+    const idleMotion = createCameraMotionDamper().update({
+      deltaSeconds: 1 / 60,
+      localAcceleration: { right: 0, forward: 0, up: 0 },
+      movementMagnitude: 0,
+      movementSpeedRatio: 0,
+      oxygenRatio: 1,
+      crouching: false,
+      shiftEnabled: true,
+      bobEnabled: true,
+    });
+    const presentation = resolveReticlePresentation(DEFAULT_RETICLE_POSITION, idleMotion, 800, 600);
+
+    expect(presentation.ringOffsetCssPixels).toEqual({ x: 0, y: 0 });
+    expect(presentation.dotOffsetCssPixels).toEqual({ x: 0, y: 0 });
+    expect(presentation.aimNdc).toEqual(
+      resolveReticleAimNdc(DEFAULT_RETICLE_POSITION, { x: 0, y: 0 }, 800, 600),
+    );
+  });
+
+  it("aims the held viewmodel at the same reticle ray without a second sway phase", () => {
+    const camera = new THREE.PerspectiveCamera(75, 4 / 3, 0.05, 100);
+    camera.position.set(2, 1.75, 3);
+    camera.lookAt(0, 1.2, -4);
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    const presentation = resolveReticlePresentation({ x: 0.44, y: 0.63 }, motion, 800, 600);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(
+      new THREE.Vector2(presentation.aimNdc.x, presentation.aimNdc.y),
+      camera,
+    );
+    const aimRay = {
+      origin: raycaster.ray.origin,
+      direction: raycaster.ray.direction,
+    } as const;
+    const firstTarget = resolveViewmodelAimTargetLocal(camera.matrixWorldInverse, aimRay, 64);
+    const secondTarget = resolveViewmodelAimTargetLocal(camera.matrixWorldInverse, aimRay, 64);
+    const projected = firstTarget.clone().applyMatrix4(camera.matrixWorld).project(camera);
+
+    expect(secondTarget).toEqual(firstTarget);
+    expect(projected.x).toBeCloseTo(presentation.aimNdc.x, 10);
+    expect(projected.y).toBeCloseTo(presentation.aimNdc.y, 10);
+  });
+
+  it("selects reticle and viewmodel consumers from one shot snapshot", () => {
+    const damper = createCameraMotionDamper();
+    damper.update({
+      deltaSeconds: 1 / 60,
+      localAcceleration: { right: 0, forward: 0, up: 0 },
+      movementMagnitude: 0,
+      movementSpeedRatio: 0,
+      oxygenRatio: 1,
+      crouching: false,
+      shiftEnabled: true,
+      bobEnabled: true,
+    });
+    const shotMotion = damper.applyWeaponShotImpulse({
+      damage: 100,
+      reticleOffset: { x: 24, y: -12 },
+    });
+    const presentation = resolveFirstPersonPresentation(
+      DEFAULT_RETICLE_POSITION,
+      shotMotion,
+      800,
+      600,
+    );
+
+    expect(Object.isFrozen(presentation)).toBe(true);
+    expect(presentation.reticle).toEqual(
+      resolveReticlePresentation(DEFAULT_RETICLE_POSITION, shotMotion, 800, 600),
+    );
+    expect(presentation.viewmodelOffset).toBe(shotMotion.viewmodelOffset);
+    expect(presentation.viewmodelRecoilDepth).toBe(shotMotion.viewmodelRecoilDepth);
+    expect(presentation.viewmodelTransition).toBe(shotMotion.viewmodelTransition);
+    expect(presentation.viewmodelRecoilDepth).toBeGreaterThan(0);
+    expect(Object.keys(presentation).sort()).toEqual(
+      ["reticle", "viewmodelOffset", "viewmodelRecoilDepth", "viewmodelTransition"].sort(),
+    );
+    expect(presentation).not.toHaveProperty("weaponSway");
+  });
+});
+
+describe("pre-action aim snapshots", () => {
+  it("retains ray A after the live aim vectors advance to ray B", () => {
+    const liveAimRay = {
+      origin: new THREE.Vector3(1, 2, 3),
+      direction: new THREE.Vector3(0.25, -0.5, -1),
+    };
+    const actionAimRay = snapshotActionAimRay(liveAimRay);
+
+    liveAimRay.origin.set(10, 20, 30);
+    liveAimRay.direction.set(-1, 0.5, 0.25);
+
+    expect(actionAimRay.origin).not.toBe(liveAimRay.origin);
+    expect(actionAimRay.direction).not.toBe(liveAimRay.direction);
+    expect(actionAimRay.origin.toArray()).toEqual([1, 2, 3]);
+    expect(actionAimRay.direction.toArray()).toEqual([0.25, -0.5, -1]);
+  });
+
+  it("prevents a retained pickup-melee ray from resolving after death", () => {
+    const cancelled = resolveCancelledMeleeSwing({
+      fireHeld: true,
+      swinging: true,
+      elapsedSeconds: 0.2,
+      durationSeconds: 0.8,
+      hitResolved: false,
+      aimRay: snapshotActionAimRay({
+        origin: new THREE.Vector3(1, 2, 3),
+        direction: new THREE.Vector3(0, 0, -1),
+      }),
+    });
+
+    expect(cancelled).toEqual({
+      fireHeld: false,
+      swinging: false,
+      elapsedSeconds: 0,
+      durationSeconds: 0,
+      hitResolved: false,
+      aimRay: null,
+    });
+    expect(shouldResolveMeleeSwingImpact(cancelled, 1)).toBe(false);
   });
 });
 

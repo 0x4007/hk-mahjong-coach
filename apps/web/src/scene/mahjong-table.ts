@@ -1849,6 +1849,89 @@ export const resolveReticlePresentation = (
   );
   return Object.freeze({ basePosition, ringOffsetCssPixels, dotOffsetCssPixels, aimNdc });
 };
+
+export interface FirstPersonPresentationSnapshot {
+  readonly reticle: ReticlePresentation;
+  readonly viewmodelOffset: CameraViewmodelOffset;
+  readonly viewmodelRecoilDepth: number;
+  readonly viewmodelTransition: CameraViewmodelTransition;
+}
+
+/** Select every reticle and held-viewmodel consumer from one damper snapshot. */
+export const resolveFirstPersonPresentation = (
+  position: ReticlePosition,
+  motion: ReticleMotionInput &
+    Pick<CameraMotionOffsets, "viewmodelOffset" | "viewmodelRecoilDepth" | "viewmodelTransition">,
+  viewportWidth: number,
+  viewportHeight: number,
+): FirstPersonPresentationSnapshot =>
+  Object.freeze({
+    reticle: resolveReticlePresentation(position, motion, viewportWidth, viewportHeight),
+    viewmodelOffset: motion.viewmodelOffset,
+    viewmodelRecoilDepth: motion.viewmodelRecoilDepth,
+    viewmodelTransition: motion.viewmodelTransition,
+  });
+
+/** Retain gameplay ray A while later presentation frames advance to ray B. */
+export const snapshotActionAimRay = (aimRay: {
+  readonly origin: THREE.Vector3;
+  readonly direction: THREE.Vector3;
+}): { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 } => ({
+  origin: aimRay.origin.clone(),
+  direction: aimRay.direction.clone(),
+});
+
+export interface MeleeSwingLifecycleState<TAimRay> {
+  readonly fireHeld: boolean;
+  readonly swinging: boolean;
+  readonly elapsedSeconds: number;
+  readonly durationSeconds: number;
+  readonly hitResolved: boolean;
+  readonly aimRay: TAimRay | null;
+}
+
+/** Cancel a delayed melee impact while preserving unrelated combat telemetry. */
+export const resolveCancelledMeleeSwing = <TAimRay>(
+  state: MeleeSwingLifecycleState<TAimRay>,
+): MeleeSwingLifecycleState<TAimRay> => ({
+  ...state,
+  fireHeld: false,
+  swinging: false,
+  elapsedSeconds: 0,
+  durationSeconds: 0,
+  hitResolved: false,
+  aimRay: null,
+});
+
+/** Require an active retained ray before the swing midpoint may resolve an impact. */
+export const shouldResolveMeleeSwingImpact = (
+  state: Pick<MeleeSwingLifecycleState<unknown>, "swinging" | "hitResolved" | "aimRay">,
+  progress: number,
+): boolean => state.swinging && !state.hitResolved && state.aimRay !== null && progress >= 0.5;
+
+/**
+ * Resolve the camera-local target used by a held viewmodel from the same live
+ * ray as the visible reticle. The caller supplies scratch storage so this
+ * shared-pose seam does not allocate in the animation loop.
+ */
+export const resolveViewmodelAimTargetLocal = (
+  cameraWorldInverse: THREE.Matrix4,
+  aimRay: {
+    readonly origin: Readonly<PhysicsVector>;
+    readonly direction: Readonly<PhysicsVector>;
+  },
+  distance: number,
+  target = new THREE.Vector3(),
+): THREE.Vector3 => {
+  const safeDistance = Number.isFinite(distance) ? Math.max(0, distance) : 0;
+  return target
+    .set(
+      aimRay.origin.x + aimRay.direction.x * safeDistance,
+      aimRay.origin.y + aimRay.direction.y * safeDistance,
+      aimRay.origin.z + aimRay.direction.z * safeDistance,
+    )
+    .applyMatrix4(cameraWorldInverse);
+};
 // Approximate the central human eye rather than a portrait lens: 17 mm focal
 // length, a 1 arcminute circle of confusion, and a 4 mm reference pupil. The
 // scene is authored in metre-like units, so photographic distances map
@@ -1900,7 +1983,6 @@ const BOKEH_DISTANCE_FALLOFF_POWER = 2.94;
 const BOKEH_NEAR_ACCOMMODATION_DAMPING = 3.5;
 const BOKEH_FAR_ACCOMMODATION_DAMPING = 4.5;
 const BOKEH_PUPIL_ADAPTATION_DAMPING = 2.4;
-const BOKEH_TILE_SAMPLE_OFFSET = 0.028;
 const shouldIncludeExplorationGateway = (): boolean => false;
 const FOCUS_CALIBRATION_START_X = PLAY_AREA_ORIGINS.lookingFocusRoom.x - PLAY_AREA_SIZE_METERS / 4;
 const FOCUS_CALIBRATION_HYPERFOCAL_DISTANCE = HUMAN_EYE_REFERENCE_HYPERFOCAL_DISTANCE;
@@ -5118,9 +5200,15 @@ interface WeaponRuntime {
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly setReticleEnabled: (enabled: boolean) => void;
-  readonly fire: () => void;
+  readonly fire: (aimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  }) => void;
   /** Swing the active gun as a melee weapon without consuming ammunition. */
-  readonly melee: () => boolean;
+  readonly melee: (aimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  }) => boolean;
   readonly fireFrom: (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
@@ -5247,7 +5335,11 @@ interface MeleeRuntime {
     viewmodelTransition: CameraViewmodelTransition,
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
-  readonly fire: () => boolean;
+  readonly recordDeath: () => void;
+  readonly fire: (aimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  }) => boolean;
   readonly interact: () => boolean;
   readonly isActive: () => boolean;
   /** Hide the carried prop without returning it to the world. */
@@ -5938,6 +6030,8 @@ const createWeaponRuntime = (
   let smokeAccumulatorWeapon: WeaponId | null = null;
   let latestAimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 } | null =
     null;
+  let meleeAimRay: { readonly origin: THREE.Vector3; readonly direction: THREE.Vector3 } | null =
+    null;
   let lastSnapshotSerialized = "";
   const shotRandom = createSeededRandom(`${roomSeed}|weapons|combat|v1`);
   const smokeRandom = createSeededRandom(`${roomSeed}|weapons|smoke|v1`);
@@ -5980,7 +6074,6 @@ const createWeaponRuntime = (
   const bloodSmearLocal = new THREE.Vector3();
   const bloodDecalQuaternion = new THREE.Quaternion();
   const weaponForward = new THREE.Vector3(0, 0, -1);
-  const weaponAimTargetWorld = new THREE.Vector3();
   const weaponAimTargetLocal = new THREE.Vector3();
   const weaponAimDirectionLocal = new THREE.Vector3();
   const weaponAimQuaternion = new THREE.Quaternion();
@@ -7110,6 +7203,7 @@ const createWeaponRuntime = (
     meleeSwinging = false;
     meleeSwingElapsedSeconds = 0;
     meleeSwingHitResolved = false;
+    meleeAimRay = null;
     reloadingSeconds = 0;
     burstShotsRemaining = 0;
     burstCooldownAfterCurrentBurstSeconds = 0;
@@ -7936,15 +8030,17 @@ const createWeaponRuntime = (
 
   /** Resolve one close-range gun strike through the normal ray/actor seam. */
   const resolveMeleeHit = (): void => {
-    if (activeWeapon === null || latestAimRay === null) {
+    const actionAimRay = meleeAimRay;
+    meleeAimRay = null;
+    if (activeWeapon === null || actionAimRay === null) {
       return;
     }
     const attributes = resolveWeaponMeleeAttributes(activeWeapon);
-    const direction = latestAimRay.direction.clone().normalize();
+    const direction = actionAimRay.direction.clone().normalize();
     if (direction.lengthSq() <= 0.0001) {
       return;
     }
-    const hit = findWeaponHit(latestAimRay.origin, direction, attributes.rangeMeters);
+    const hit = findWeaponHit(actionAimRay.origin, direction, attributes.rangeMeters);
     if (hit === undefined) {
       return;
     }
@@ -8005,6 +8101,7 @@ const createWeaponRuntime = (
       MELEE_SWING_RECOVERY_SECONDS;
     meleeSwingElapsedSeconds = 0;
     meleeSwingHitResolved = false;
+    meleeAimRay = snapshotActionAimRay(latestAimRay);
     meleeSwinging = true;
     // Gun melee uses the same exertion and shared camera/reticule impulse path
     // as a picked-up melee object. It does not consume ammunition or increment
@@ -8202,6 +8299,7 @@ const createWeaponRuntime = (
       if (progress >= 1) {
         meleeSwinging = false;
         meleeSwingElapsedSeconds = 0;
+        meleeAimRay = null;
       }
     }
     const presentationAimRay = getPresentationAimRay();
@@ -8236,10 +8334,12 @@ const createWeaponRuntime = (
       emitState();
     }
     muzzleFlashSeconds = Math.max(0, muzzleFlashSeconds - deltaSeconds);
-    weaponAimTargetWorld
-      .copy(presentationAimRay.origin)
-      .addScaledVector(presentationAimRay.direction, WEAPON_VIEWMODEL_AIM_DISTANCE);
-    weaponAimTargetLocal.copy(weaponAimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
+    resolveViewmodelAimTargetLocal(
+      camera.matrixWorldInverse,
+      presentationAimRay,
+      WEAPON_VIEWMODEL_AIM_DISTANCE,
+      weaponAimTargetLocal,
+    );
     const effectiveViewmodelTransition =
       viewmodelTransition.phase === "idle" &&
       switchStartedSinceLastUpdate &&
@@ -8416,12 +8516,14 @@ const createWeaponRuntime = (
     meleeSwinging = false;
     meleeSwingElapsedSeconds = 0;
     meleeSwingHitResolved = false;
+    meleeAimRay = null;
     triggerReleaseLocked = false;
     burstShotsRemaining = 0;
     burstCooldownAfterCurrentBurstSeconds = 0;
     interruptReload();
   };
   const dispose = (): void => {
+    meleeAimRay = null;
     pickupRoot.removeFromParent();
     effectsRoot.removeFromParent();
     worldSmokeRoot.removeFromParent();
@@ -8455,8 +8557,14 @@ const createWeaponRuntime = (
     update,
     setFireHeld,
     setReticleEnabled,
-    fire: () => tryFire(true),
-    melee: tryMelee,
+    fire: (aimRay) => {
+      latestAimRay = aimRay;
+      tryFire(true);
+    },
+    melee: (aimRay) => {
+      latestAimRay = aimRay;
+      return tryMelee();
+    },
     fireFrom: (origin, direction, weapon, options) => {
       fireFrom(origin, direction, weapon, options);
     },
@@ -8524,7 +8632,6 @@ const createMeleeRuntime = (
   const impactEffects: MeleeImpactEffect[] = [];
   const raycaster = new THREE.Raycaster();
   raycaster.camera = camera;
-  const aimTargetWorld = new THREE.Vector3();
   const aimTargetLocal = new THREE.Vector3();
   const aimDirectionLocal = new THREE.Vector3();
   const aimQuaternion = new THREE.Quaternion();
@@ -8555,6 +8662,10 @@ const createMeleeRuntime = (
   let controlsActive = false;
   let viewActive = false;
   let latestAimRay: {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  } | null = null;
+  let swingAimRay: {
     readonly origin: THREE.Vector3;
     readonly direction: THREE.Vector3;
   } | null = null;
@@ -8711,11 +8822,13 @@ const createMeleeRuntime = (
   };
 
   const resolveSwingHit = (): void => {
-    if (activePickup === null || latestAimRay === null) {
+    const actionAimRay = swingAimRay;
+    swingAimRay = null;
+    if (activePickup === null || actionAimRay === null) {
       return;
     }
     scene.updateMatrixWorld(true);
-    raycaster.set(latestAimRay.origin, latestAimRay.direction);
+    raycaster.set(actionAimRay.origin, actionAimRay.direction);
     raycaster.near = 0.12;
     raycaster.far = activePickup.snapshot.rangeMeters;
     const hit = scene.children
@@ -8737,9 +8850,9 @@ const createMeleeRuntime = (
         z: hit.point.z,
       },
       attackDirection: {
-        x: latestAimRay.direction.x,
-        y: latestAimRay.direction.y,
-        z: latestAimRay.direction.z,
+        x: actionAimRay.direction.x,
+        y: actionAimRay.direction.y,
+        z: actionAimRay.direction.z,
       },
       attackerVelocity: latestWorldVelocity,
       attackerAirborne: latestAirborne,
@@ -8762,9 +8875,9 @@ const createMeleeRuntime = (
     const didApply = explorationWorld.applyMeleeHit(
       objectId,
       {
-        x: latestAimRay.direction.x,
-        y: latestAimRay.direction.y,
-        z: latestAimRay.direction.z,
+        x: actionAimRay.direction.x,
+        y: actionAimRay.direction.y,
+        z: actionAimRay.direction.z,
       },
       activePickup.snapshot.swingSpeedRadiansPerSecond,
       activePickup.snapshot.stoppingPower,
@@ -8793,6 +8906,7 @@ const createMeleeRuntime = (
     swingDurationSeconds = swing.swingDurationSeconds;
     swingElapsedSeconds = 0;
     swingHitResolved = false;
+    swingAimRay = snapshotActionAimRay(latestAimRay);
     swinging = true;
     idleElapsedSeconds = 0;
     swings += 1;
@@ -8840,6 +8954,7 @@ const createMeleeRuntime = (
     }
     drawn = false;
     swinging = false;
+    swingAimRay = null;
     swingElapsedSeconds = 0;
     idleElapsedSeconds = 0;
     fireHeld = false;
@@ -8872,6 +8987,7 @@ const createMeleeRuntime = (
       return false;
     }
     swinging = false;
+    swingAimRay = null;
     swingElapsedSeconds = 0;
     idleElapsedSeconds = 0;
     drawn = false;
@@ -8937,12 +9053,18 @@ const createMeleeRuntime = (
     if (swinging) {
       swingElapsedSeconds += safeDelta;
       const progress = Math.min(1, swingElapsedSeconds / Math.max(0.001, swingDurationSeconds));
-      if (!swingHitResolved && progress >= 0.5) {
+      if (
+        shouldResolveMeleeSwingImpact(
+          { swinging, hitResolved: swingHitResolved, aimRay: swingAimRay },
+          progress,
+        )
+      ) {
         swingHitResolved = true;
         resolveSwingHit();
       }
       if (progress >= 1) {
         swinging = false;
+        swingAimRay = null;
         swingElapsedSeconds = 0;
         // The follow-through ends in the mirrored high-ready pose for the
         // next alternating swing, so the bat does not snap back across the
@@ -9002,10 +9124,12 @@ const createMeleeRuntime = (
         : swingDirection === "left-to-right"
           ? resolveMeleeIdleResetPose(resolveMeleeIdleResetProgress(idleElapsedSeconds))
           : resolveMeleeSwingPose(0, swingDirection);
-      aimTargetWorld
-        .copy(presentationAimRay.origin)
-        .addScaledVector(presentationAimRay.direction, 32);
-      aimTargetLocal.copy(aimTargetWorld).applyMatrix4(camera.matrixWorldInverse);
+      resolveViewmodelAimTargetLocal(
+        camera.matrixWorldInverse,
+        presentationAimRay,
+        32,
+        aimTargetLocal,
+      );
       viewModel.root.position.set(
         latestViewmodelOffset.x + pose.offsetX + latestViewmodelTransition.offset.x,
         latestViewmodelOffset.y + pose.offsetY + latestViewmodelTransition.offset.y,
@@ -9047,8 +9171,27 @@ const createMeleeRuntime = (
   const setFireHeld = (held: boolean): void => {
     fireHeld = held;
   };
+  const recordDeath = (): void => {
+    const cancelled = resolveCancelledMeleeSwing({
+      fireHeld,
+      swinging,
+      elapsedSeconds: swingElapsedSeconds,
+      durationSeconds: swingDurationSeconds,
+      hitResolved: swingHitResolved,
+      aimRay: swingAimRay,
+    });
+    fireHeld = cancelled.fireHeld;
+    swinging = cancelled.swinging;
+    swingElapsedSeconds = cancelled.elapsedSeconds;
+    swingDurationSeconds = cancelled.durationSeconds;
+    swingHitResolved = cancelled.hitResolved;
+    swingAimRay = cancelled.aimRay;
+    idleElapsedSeconds = 0;
+    emitState(true);
+  };
   const holster = (): boolean => dropActiveObject();
   const dispose = (): void => {
+    swingAimRay = null;
     disposeViewModel();
     for (const effect of impactEffects) {
       effect.object.removeFromParent();
@@ -9062,7 +9205,12 @@ const createMeleeRuntime = (
   return {
     update,
     setFireHeld,
-    fire: trySwing,
+    recordDeath,
+    fire: (aimRay) => {
+      latestAimRay = aimRay;
+      latestAimDirection.copy(aimRay.direction);
+      return trySwing();
+    },
     interact,
     isActive: () => drawn && activePickup !== null,
     stash,
@@ -14179,19 +14327,21 @@ export const createMahjongTableScene = (
   const playerKnockbackVelocity = new THREE.Vector3();
   const cameraMotion = createCameraMotionDamper();
   let activeFirstPersonBaseCameraY: number | null = null;
-  let reticlePresentation = resolveReticlePresentation(
+  let firstPersonPresentation = resolveFirstPersonPresentation(
     reticlePosition,
     cameraMotion.getOffsets(),
     container.clientWidth,
     container.clientHeight,
   );
+  let reticlePresentation = firstPersonPresentation.reticle;
   const refreshReticlePresentation = (): ReticlePresentation => {
-    reticlePresentation = resolveReticlePresentation(
+    firstPersonPresentation = resolveFirstPersonPresentation(
       reticlePosition,
       cameraMotion.getOffsets(),
       container.clientWidth,
       container.clientHeight,
     );
+    reticlePresentation = firstPersonPresentation.reticle;
     return reticlePresentation;
   };
   const publishActionCameraMotion = (motion: CameraMotionOffsets): void => {
@@ -14467,7 +14617,7 @@ export const createMahjongTableScene = (
     verticalVelocity = 0;
     movementControllerState = createPlayerMovementControllerState(movementControllerSeed, false);
     slideRequested = false;
-    meleeRuntime?.setFireHeld(false);
+    meleeRuntime?.recordDeath();
     weaponRuntime?.setFireHeld(false);
     scheduleDeathRespawn();
   };
@@ -15080,9 +15230,10 @@ export const createMahjongTableScene = (
     return succeeded;
   };
   const triggerMeleeAttack = (): boolean => {
+    const aimRay = capturePreActionAimRay();
     const started = meleeRuntime?.isActive()
-      ? meleeRuntime.fire()
-      : (weaponRuntime?.melee() ?? false);
+      ? meleeRuntime.fire(aimRay)
+      : (weaponRuntime?.melee(aimRay) ?? false);
     if (started) {
       cancelZoomForMelee();
     }
@@ -15364,7 +15515,7 @@ export const createMahjongTableScene = (
       }
     } else {
       weaponRuntime?.setFireHeld(true);
-      weaponRuntime?.fire();
+      weaponRuntime?.fire(capturePreActionAimRay());
     }
   };
   const onWindowMouseUp = (event: MouseEvent): void => {
@@ -17436,12 +17587,6 @@ export const createMahjongTableScene = (
   let documentVisible = document.visibilityState !== "hidden";
   const timer = new THREE.Timer();
   timer.connect(document);
-  const focusTileSampleOffsets: readonly THREE.Vector2[] = [
-    new THREE.Vector2(BOKEH_TILE_SAMPLE_OFFSET, 0),
-    new THREE.Vector2(-BOKEH_TILE_SAMPLE_OFFSET, 0),
-    new THREE.Vector2(0, BOKEH_TILE_SAMPLE_OFFSET),
-    new THREE.Vector2(0, -BOKEH_TILE_SAMPLE_OFFSET),
-  ];
   const findVisibleFocusIntersection = (ndc: THREE.Vector2): THREE.Intersection | undefined => {
     focusRaycaster.setFromCamera(ndc, camera);
     return focusRaycaster
@@ -17513,6 +17658,17 @@ export const createMahjongTableScene = (
     baseCameraY: number,
     input: CameraMotionUpdateInput,
   ): CameraMotionOffsets => composeFirstPersonCameraMotion(baseCameraY, cameraMotion.update(input));
+  /** Recompose the current snapshot before an input event captures gameplay ray A. */
+  const capturePreActionAimRay = (): {
+    readonly origin: THREE.Vector3;
+    readonly direction: THREE.Vector3;
+  } => {
+    if (activeFirstPersonBaseCameraY !== null) {
+      composeFirstPersonCameraMotion(activeFirstPersonBaseCameraY, cameraMotion.getOffsets());
+    }
+    camera.updateMatrixWorld(true);
+    return getAimRay();
+  };
   const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
   const COLLISION_DAMAGE_COOLDOWN_SECONDS = 0.8;
   const onVisibilityChange = (): void => {
@@ -19238,9 +19394,9 @@ export const createMahjongTableScene = (
       getAimRay,
       firstPersonActive,
       activeView === "seat" && firstPersonControls.enabled,
-      cameraMotion.getOffsets().viewmodelOffset,
-      () => cameraMotion.getOffsets().viewmodelRecoilDepth,
-      cameraMotion.getOffsets().viewmodelTransition,
+      firstPersonPresentation.viewmodelOffset,
+      () => firstPersonPresentation.viewmodelRecoilDepth,
+      firstPersonPresentation.viewmodelTransition,
       meleeRuntime?.isActive() ?? false,
       presentationWorldVelocity,
       !grounded,
@@ -19254,8 +19410,8 @@ export const createMahjongTableScene = (
       activeView === "seat" && firstPersonControls.enabled,
       presentationWorldVelocity,
       !grounded,
-      cameraMotion.getOffsets().viewmodelOffset,
-      cameraMotion.getOffsets().viewmodelTransition,
+      firstPersonPresentation.viewmodelOffset,
+      firstPersonPresentation.viewmodelTransition,
     );
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
@@ -19338,25 +19494,9 @@ export const createMahjongTableScene = (
         centerFocusHit !== undefined && isDofFocusTarget(centerFocusHit.object)
           ? centerFocusHit
           : undefined;
-      let tileFocusOffset = Number.POSITIVE_INFINITY;
-      if (tileFocusHit === undefined) {
-        for (const offset of focusTileSampleOffsets) {
-          const sampleNdc = reticleAimNdc.clone().add(offset);
-          const sampleHit = findVisibleFocusIntersection(sampleNdc);
-          if (sampleHit === undefined || !isDofFocusTarget(sampleHit.object)) {
-            continue;
-          }
-          const sampleOffset = offset.lengthSq();
-          if (sampleOffset < tileFocusOffset) {
-            tileFocusHit = sampleHit;
-            tileFocusOffset = sampleOffset;
-          }
-        }
-      }
     }
-    // Keep the original nearest-surface behavior when the reticule is not on
-    // a tile, but allow a tile immediately around the reticule to become the
-    // subject when the center falls in a narrow gap between tile faces.
+    // Focus uses the exact same NDC as the visible centre dot and gameplay
+    // ray. A nearby tile must not pull focus away from the reticle ray.
     const focusHit = tileFocusHit ?? centerFocusHit;
     const baseFocusDistance = focusHit?.distance ?? BOKEH_FOCUS_FALLBACK_DISTANCE;
     const nextFocusDistance = resolveMeleeImpactFocusDistance(
@@ -19456,7 +19596,7 @@ export const createMahjongTableScene = (
         }
         return;
       }
-      weaponRuntime?.fire();
+      weaponRuntime?.fire(capturePreActionAimRay());
     },
     melee: () => {
       triggerMeleeAttack();

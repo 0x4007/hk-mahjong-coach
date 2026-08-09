@@ -11,6 +11,7 @@ import {
 import {
   createFallbackMahjongPhysics,
   createMahjongPhysics,
+  resolvePhysicsBoxGeometrySignature,
   resolvePhysicsBoxObstacleId,
   type MahjongPhysicsRuntime,
   type PhysicsBox,
@@ -268,6 +269,7 @@ interface ActiveTraversal {
   readonly kind: PlayerTraversalKind;
   readonly obstacleId: string;
   readonly sourceBox: PhysicsBox;
+  readonly sourceGeometryKey: string;
   readonly start: PhysicsVector;
   readonly target: PhysicsVector;
   readonly duration: number;
@@ -610,6 +612,22 @@ const sourceBoxForTraversal = (
 ): PhysicsBox | null =>
   boxes.find((box) => resolvePhysicsBoxObstacleId(box) === obstacleId) ?? null;
 
+/** Match the live source-identity and destination-clearance cancellation gate. */
+export const isMovementTraversalGeometryValid = (
+  kind: PlayerTraversalKind,
+  obstacleId: string,
+  sourceGeometryKey: string,
+  target: PhysicsVector,
+  boxes: readonly PhysicsBox[],
+): boolean => {
+  const sourceBox = sourceBoxForTraversal(boxes, obstacleId);
+  return (
+    sourceBox !== null &&
+    resolvePhysicsBoxGeometrySignature(sourceBox) === sourceGeometryKey &&
+    (kind === "wall-contact" || isPlayerCapsulePositionClear(target, boxes))
+  );
+};
+
 const activeExternalTraversal = (
   traversal: ActiveTraversal | null,
   boxes: readonly PhysicsBox[],
@@ -618,9 +636,15 @@ const activeExternalTraversal = (
   if (traversal === null) {
     return null;
   }
-  const sourcePresent = sourceBoxForTraversal(boxes, traversal.obstacleId) !== null;
+  const geometryValid = isMovementTraversalGeometryValid(
+    traversal.kind,
+    traversal.obstacleId,
+    traversal.sourceGeometryKey,
+    traversal.target,
+    boxes,
+  );
   const releasedActiveMotion = traversal.kind !== "wall-contact" && !jump;
-  const contactValid = sourcePresent && !releasedActiveMotion && traversal.terminal !== "cancelled";
+  const contactValid = geometryValid && !releasedActiveMotion && traversal.terminal !== "cancelled";
   return {
     kind: traversal.kind,
     obstacleId: traversal.obstacleId,
@@ -805,6 +829,7 @@ const startRequestedTraversal = (
         kind: "wall-contact",
         obstacleId: request.obstacle.id,
         sourceBox: wall.box,
+        sourceGeometryKey: resolvePhysicsBoxGeometrySignature(wall.box),
         start: { ...position },
         target: { ...wall.target },
         duration: 0.14,
@@ -841,6 +866,7 @@ const startRequestedTraversal = (
       kind: request.kind,
       obstacleId: resolution.obstacleId,
       sourceBox: resolution.box,
+      sourceGeometryKey: resolvePhysicsBoxGeometrySignature(resolution.box),
       start: { ...position },
       target: { ...resolution.target },
       duration: resolveO2ScaledTraversalDuration(
@@ -885,6 +911,7 @@ const startWallClimb = (
       kind: "wall-climb",
       obstacleId: traversal.obstacleId,
       sourceBox,
+      sourceGeometryKey: resolvePhysicsBoxGeometrySignature(sourceBox),
       start: { ...position },
       target,
       duration: resolveO2ScaledTraversalDuration(
@@ -1461,6 +1488,10 @@ export const runMovementScenario = async (
 export const runMovementScenarioFile = async (path: string): Promise<MovementSimulationResult> =>
   runMovementScenario(await readMovementScenarioFile(path));
 
+/** Exact serializer shared by the CLI and byte-level determinism coverage. */
+export const formatMovementSimulationJson = (result: MovementSimulationResult): string =>
+  `${JSON.stringify(result, null, 2)}\n`;
+
 const formatSummary = (result: MovementSimulationResult): string => {
   const passed = result.assertions.filter((assertion) => assertion.passed).length;
   const eventNames = result.orderedEvents.map(({ event }) => event.kind).join(", ");
@@ -1502,7 +1533,7 @@ const main = async (): Promise<void> => {
   const { scenarioPath, emitJson } = parseArgs();
   const result = await runMovementScenarioFile(scenarioPath);
   if (emitJson) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(formatMovementSimulationJson(result));
   } else {
     process.stdout.write(`${formatSummary(result)}\n`);
   }

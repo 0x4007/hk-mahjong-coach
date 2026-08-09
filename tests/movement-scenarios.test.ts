@@ -4,12 +4,18 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import {
+  formatMovementSimulationJson,
+  isMovementTraversalGeometryValid,
   parseMovementScenario,
   runMovementScenario,
   type MovementFrameTrace,
   type MovementScenario,
   type MovementSimulationResult,
 } from "../scripts/movement-simulate.js";
+import {
+  resolvePhysicsBoxGeometrySignature,
+  type PhysicsBox,
+} from "../apps/web/src/scene/mahjong-physics.js";
 import { PLAYER_MOVEMENT_MAX_STEP_SECONDS } from "../apps/web/src/scene/player-movement.js";
 
 const scenarioDirectory = fileURLToPath(new URL("../scripts/movement-scenarios/", import.meta.url));
@@ -108,6 +114,7 @@ describe("continuous head-motion movement scenarios", () => {
       const first = await runMovementScenario(scenario);
       const second = await runMovementScenario(scenario);
       expect(second).toEqual(first);
+      expect(formatMovementSimulationJson(second)).toBe(formatMovementSimulationJson(first));
       results.set(scenario.name, first);
     }
   }, 60_000);
@@ -133,6 +140,35 @@ describe("continuous head-motion movement scenarios", () => {
     expect(
       Math.max(...result.trace.map((sample) => sample.camera.input.deltaSeconds)),
     ).toBeLessThanOrEqual(PLAYER_MOVEMENT_MAX_STEP_SECONDS + 1e-9);
+  });
+
+  it("cancels traversal when source geometry changes or destination clearance closes", () => {
+    const source: PhysicsBox = {
+      obstacleId: "source",
+      center: { x: 0, y: 1, z: 0 },
+      halfExtents: { x: 0.5, y: 1, z: 0.5 },
+    };
+    const target = { x: 3, y: 0.86, z: 0 } as const;
+    const sourceGeometryKey = resolvePhysicsBoxGeometrySignature(source);
+
+    expect(
+      isMovementTraversalGeometryValid("wall-climb", "source", sourceGeometryKey, target, [source]),
+    ).toBe(true);
+    expect(
+      isMovementTraversalGeometryValid("wall-climb", "source", sourceGeometryKey, target, [
+        { ...source, center: { ...source.center, x: 0.25 } },
+      ]),
+    ).toBe(false);
+    expect(
+      isMovementTraversalGeometryValid("wall-climb", "source", sourceGeometryKey, target, [
+        source,
+        {
+          obstacleId: "destination-blocker",
+          center: { ...target },
+          halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
+        },
+      ]),
+    ).toBe(false);
   });
 
   it.each(expectedScenarioNames)("validates %s through the shared frame pipeline", (name) => {
@@ -247,7 +283,13 @@ describe("continuous head-motion movement scenarios", () => {
   });
 
   it("keeps traversal progress monotonic until completion or cancellation", () => {
-    for (const name of ["low-vault", "ledge-grab", "ledge-contact-loss", "wall-climb-release"]) {
+    for (const name of [
+      "low-vault",
+      "ledge-grab",
+      "ledge-contact-loss",
+      "wall-climb-release",
+      "top-support",
+    ]) {
       let previous: MovementFrameTrace | undefined;
       for (const current of resultFor(name).trace) {
         const sameContiguousPhase =
@@ -297,6 +339,27 @@ describe("continuous head-motion movement scenarios", () => {
       ),
     ).toHaveLength(1);
 
+    const completedWall = resultFor("top-support");
+    expect(
+      completedWall.trace.some(
+        (sample) =>
+          sample.movement.state === "wall-climb" &&
+          sample.movement.traversalProgress > 0 &&
+          sample.movement.traversalProgress < 1,
+      ),
+    ).toBe(true);
+    expect(
+      completedWall.orderedEvents.filter(({ event }) => event.kind === "wall-contact"),
+    ).toHaveLength(1);
+    expect(
+      completedWall.orderedEvents.filter(({ event }) => event.kind === "wall-climb-request"),
+    ).toHaveLength(1);
+    expect(
+      completedWall.orderedEvents.filter(
+        ({ event }) => event.kind === "traversal-complete" && event.traversal === "wall-climb",
+      ),
+    ).toHaveLength(1);
+
     const slide = resultFor("slide-start-stop");
     expect(slide.orderedEvents.filter(({ event }) => event.kind === "slide-start")).toHaveLength(1);
     expect(slide.orderedEvents.filter(({ event }) => event.kind === "slide-end")).toHaveLength(1);
@@ -325,9 +388,17 @@ describe("continuous head-motion movement scenarios", () => {
     expect(landing).toBeGreaterThan(sourceSupport);
 
     const wallContactSamples = resultFor("airborne-wall-contact").trace.filter(
-      (sample) => sample.movement.state === "wall-contact",
+      (sample) => sample.stepLabel === "release-on-wall",
     );
-    expect(wallContactSamples.length).toBeGreaterThan(0);
+    expect(wallContactSamples.length).toBeGreaterThanOrEqual(12);
+    expect(
+      wallContactSamples.every(
+        (sample) =>
+          sample.movement.state === "wall-contact" &&
+          !sample.grounded &&
+          Math.abs(sample.velocity.y) <= 0.05,
+      ),
+    ).toBe(true);
     expect(
       Math.max(
         ...wallContactSamples.map((sample) =>

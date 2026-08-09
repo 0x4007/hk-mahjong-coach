@@ -31,8 +31,6 @@ export interface O2StabilityResponse {
   readonly screenContrastMultiplier: number;
   /** Reticle angular sway amplitude in radians. */
   readonly reticleSwayRadians: number;
-  /** First-person weapon angular sway amplitude in radians. */
-  readonly weaponSwayRadians: number;
   /** Multiplicative weapon spread/accuracy response. */
   readonly accuracyMultiplier: number;
 }
@@ -50,8 +48,6 @@ export const O2_SCREEN_VIGNETTE_MAX_STRENGTH = 1;
 export const O2_SCREEN_CONTRAST_MAX_MULTIPLIER = 1;
 export const O2_RETICLE_SWAY_BASE_RADIANS = 0.00035;
 export const O2_RETICLE_SWAY_MAX_RADIANS = 0.012;
-export const O2_WEAPON_SWAY_BASE_RADIANS = 0.0012;
-export const O2_WEAPON_SWAY_MAX_RADIANS = 0.034;
 export const O2_ACCURACY_PENALTY_MAX = 1.35;
 /** Zoom keeps the same base sway as hip fire; crouch, breath, or wall support reduces it. */
 export const O2_AIM_SWAY_FACTOR = 1;
@@ -107,11 +103,6 @@ export const resolveO2Stability = (input: O2StabilityInput): O2StabilityResponse
     reticleSwayRadians:
       (O2_RETICLE_SWAY_BASE_RADIANS * breathlessness +
         O2_RETICLE_SWAY_MAX_RADIANS * destabilization) *
-      postureFactor *
-      breathControlFactor,
-    weaponSwayRadians:
-      (O2_WEAPON_SWAY_BASE_RADIANS * breathlessness +
-        O2_WEAPON_SWAY_MAX_RADIANS * destabilization) *
       postureFactor *
       breathControlFactor,
     accuracyMultiplier:

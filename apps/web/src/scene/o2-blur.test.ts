@@ -4,11 +4,32 @@ import * as THREE from "three";
 import {
   DAMAGE_VIGNETTE_PULSE_DURATION_SECONDS,
   createDamageVignettePass,
+  createO2BlurPass,
   resolveDamageVignetteOpacityFromDelta,
   resolveDamageVignettePulseOpacity,
   setDamageVignettePassCenter,
   setDamageVignettePassSize,
+  setO2BlurPassPixels,
+  setO2BlurPassVignette,
 } from "./o2-blur.js";
+import { resolveO2Stability } from "./o2-stability.js";
+
+describe("O₂ fatigue pass", () => {
+  it("binds the pure reserve response to the live shader controls", () => {
+    const pass = createO2BlurPass();
+    const exhausted = resolveO2Stability({ oxygenRatio: 0 });
+    const uniforms = pass.uniforms as Record<string, { value?: unknown } | undefined>;
+
+    setO2BlurPassPixels(pass, exhausted.screenBlurPixels);
+    setO2BlurPassVignette(pass, exhausted.screenVignetteStrength);
+
+    expect(uniforms.uBlurPixels?.value).toBe(exhausted.screenBlurPixels);
+    expect(uniforms.uVignetteStrength?.value).toBe(exhausted.screenVignetteStrength);
+    expect(pass.enabled).toBe(true);
+
+    pass.dispose();
+  });
+});
 
 describe("damage vignette response", () => {
   it("maps each lost point to one percentage point of opacity", () => {
