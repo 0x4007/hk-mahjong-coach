@@ -2243,9 +2243,9 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   O₂, camera, and visible/aim/focus traces. On the final pre-commit audit candidate, all 21 scenarios passed their embedded
   assertions twice through the CLI serializer: 42 runs, 310 passed assertions, and zero byte mismatches. `pnpm typecheck`,
   `pnpm lint`, `pnpm format:check`, `pnpm build`, and `git diff --check` passed; the production web build reported only its
-  existing large-chunk warning. Historical server-owned run `1786257907110-37922-502a9c7a` matched clean checkpoint
-  `3f7095f427a602ce1d175a9752ed2e0e63f64fe6` and passed all 629 tests across 134 suites. The external handoff must use a
-  new clean receipt matching the final audit commit.
+  existing large-chunk warning. Server-owned run `1786263732647-95115-730879b5` matched clean code/test candidate
+  `cb89667ba8b2188634cab8e6fe121ec90f10a963` and passed all 639 tests across 136 suites. The external handoff records
+  the matching clean receipt for the final documentation commit as well.
   Browser, HMR, Playwright, and computer-use validation were intentionally not run; browser acceptance remains with
   the user in one existing window.
 - The v2 hard cut retires the old wall-hang and vault fixture filenames. The required scenario matrix now covers the

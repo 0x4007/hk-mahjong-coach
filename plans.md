@@ -138,9 +138,9 @@ Experimental continuous head-motion prototype evidence recorded 2026-08-09 (does
   byte-identical with no failed embedded assertion. The final pre-commit audit candidate passed 42 runs and 310
   assertions with zero byte mismatches.
 - Repository formatting, full lint, strict typecheck, the production build, and `git diff --check` pass. Server-owned
-  clean pre-audit test-bus run `1786257907110-37922-502a9c7a` matched commit
-  `3f7095f427a602ce1d175a9752ed2e0e63f64fe6` and passed all 629 tests across 134 suites. Audit corrections require a new
-  clean matching receipt against the final audit commit before handoff.
+  clean test-bus run `1786263732647-95115-730879b5` matched code/test candidate
+  `cb89667ba8b2188634cab8e6fe121ec90f10a963` and passed all 639 tests across 136 suites. The external handoff records
+  the matching clean receipt for the final documentation commit as well.
   Browser, HMR, Playwright, and computer-use validation are excluded from this implementation run. The user must still
   complete the real one-window browser acceptance, so the visual-table milestone remains pending.
 
