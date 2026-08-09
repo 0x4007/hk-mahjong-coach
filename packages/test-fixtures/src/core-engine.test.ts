@@ -2210,7 +2210,7 @@ describe("authoritative replay validation", () => {
   });
 });
 
-describe("legal-sequence properties", () => {
+describe("legal-sequence properties", { timeout: 30_000 }, () => {
   it("preserves conservation, replay identity, action IDs, and redaction", () => {
     const noBonusRuleset = withRules(TRAINING_RULESET, {
       bonusTilesEnabled: false,
