@@ -141,6 +141,7 @@ export type MovementTraceNumericField =
   | "camera.offsets.headBobDepth"
   | "camera.offsets.headBobPitch"
   | "camera.offsets.verticalOffset"
+  | "camera.visibleEyeHeight"
   | "camera.offsets.aimSwayX"
   | "camera.offsets.aimSwayY"
   | "camera.headMotion.translation.right"
@@ -233,6 +234,8 @@ export interface MovementFrameTrace {
     readonly input: MovementCameraInputTrace;
     readonly offsets: CameraMotionOffsets;
     readonly headMotion: HeadMotionSnapshot;
+    /** Eye height after the shared presentation offset, measured above support. */
+    readonly visibleEyeHeight: number;
   };
   readonly presentation: {
     readonly visibleReticleNdc: Readonly<{ x: number; y: number }>;
@@ -421,6 +424,7 @@ const traceFields = new Set<MovementTraceNumericField>([
   "camera.offsets.headBobDepth",
   "camera.offsets.headBobPitch",
   "camera.offsets.verticalOffset",
+  "camera.visibleEyeHeight",
   "camera.offsets.aimSwayX",
   "camera.offsets.aimSwayY",
   "camera.headMotion.translation.right",
@@ -1023,6 +1027,8 @@ const traceNumber = (sample: MovementFrameTrace, field: MovementTraceNumericFiel
       return sample.camera.offsets.headBobPitch;
     case "camera.offsets.verticalOffset":
       return sample.camera.offsets.verticalOffset;
+    case "camera.visibleEyeHeight":
+      return sample.camera.visibleEyeHeight;
     case "camera.offsets.aimSwayX":
       return sample.camera.offsets.aimSwayX;
     case "camera.offsets.aimSwayY":
@@ -1469,6 +1475,9 @@ export const runMovementScenario = async (
           verticalOffsetBounds,
         };
         const cameraOffsets = cameraDamper.update(cameraInput);
+        const visibleEyeHeight =
+          (posture === "crouching" ? PLAYER_CROUCH_EYE_HEIGHT : PLAYER_STANDING_EYE_HEIGHT) +
+          cameraOffsets.verticalOffset;
         const reticle = resolveReticlePresentation(
           { x: 0.5, y: 0.5 },
           cameraOffsets,
@@ -1522,6 +1531,7 @@ export const runMovementScenario = async (
             input: cameraInputTrace,
             offsets: cameraOffsets,
             headMotion: cameraDamper.getHeadMotionSnapshot(),
+            visibleEyeHeight,
           },
           presentation: {
             visibleReticleNdc: reticle.aimNdc,

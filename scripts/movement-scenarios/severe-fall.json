@@ -43,6 +43,15 @@
         "min": -0.9,
         "max": -0.6,
         "tolerance": 0.02
+      },
+      {
+        "id": "severe-visible-eye-height",
+        "field": "camera.visibleEyeHeight",
+        "at": "min",
+        "label": "severe-fall",
+        "min": 0.85,
+        "max": 1.15,
+        "tolerance": 0.02
       }
     ]
   }

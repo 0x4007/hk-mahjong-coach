@@ -168,6 +168,9 @@ airborne gravity. The severe-fall fixture reaches a minimum shared head/camera o
 `1.75 m` eye, which places the eye at about `0.87 m` above the support surface, and the capsule remains at the support
 height while the response returns toward zero.
 
+The trace now records `camera.visibleEyeHeight` directly; the severe-fall fixture bounds its minimum to `0.85–1.15 m`
+to make the one-metre acceptance observable without converting an offset by hand.
+
 The server-owned bus run `1786340058047-43196-d49e1c72` recorded the new smooth-recovery assertion as passed. Its six
 other failures are pre-existing dirty-lane core-engine, simulation, Warehouse, and map-catalog failures; their exact
 result files are listed in that manifest. Browser, HMR, Playwright, and rendered one-window acceptance remain pending

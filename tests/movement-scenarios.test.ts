@@ -83,6 +83,7 @@ const numericTraceValues = (sample: MovementFrameTrace): readonly number[] => [
   sample.camera.offsets.headBobDepth,
   sample.camera.offsets.headBobPitch,
   sample.camera.offsets.verticalOffset,
+  sample.camera.visibleEyeHeight,
   sample.camera.offsets.aimSwayX,
   sample.camera.offsets.aimSwayY,
 ];
@@ -504,9 +505,14 @@ describe("continuous head-motion movement scenarios", () => {
     const severe = resultFor("severe-fall");
     const severeMinimum = minimumVerticalOffset(severe);
     const airborneSevere = severe.trace.filter((sample) => !sample.grounded);
+    const severeVisibleEyeMinimum = Math.min(
+      ...severe.trace.map((sample) => sample.camera.visibleEyeHeight),
+    );
 
     expect(severeMinimum).toBeGreaterThanOrEqual(-0.9);
     expect(severeMinimum).toBeLessThanOrEqual(-0.6);
+    expect(severeVisibleEyeMinimum).toBeGreaterThanOrEqual(0.85);
+    expect(severeVisibleEyeMinimum).toBeLessThanOrEqual(1.15);
     expect(Math.abs(minimumVerticalOffset(normal))).toBeLessThan(0.6);
     expect(
       Math.max(

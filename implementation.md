@@ -7,8 +7,8 @@
 - Camera gait and breathing targets, physics take-off/support-stop/traversal events, and live/simulated locomotion now
   enter that shared stream. Free-fall gravity is omitted unless physics reports an explicit action or contact event.
 - The movement simulator records the complete head snapshot and the severe-fall fixture checks a `-0.60` to `-0.90 m`
-  eye-height compression, no airborne translation bias, and a weaker normal-jump response. Reticle, aim-ray, and focus-ray
-  traces remain identical.
+  eye-height compression, an explicit visible-eye-height range around `1.0 m`, no airborne translation bias, and a
+  weaker normal-jump response. Reticle, aim-ray, and focus-ray traces remain identical.
 - Added a regression that follows the severe-fall minimum through recovery: the supported capsule stays fixed while the
   shared eye offset returns smoothly to standing height.
 - Validation is in progress on the canonical `continuous-head-motion-3` worktree. Browser, HMR, Playwright, and rendered

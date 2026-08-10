@@ -18,6 +18,9 @@ impact response as a `0.60–0.90 m` downward camera offset from the `1.75 m` st
 shallower and airborne frames remain unbiased. This is an experimental visual-table prototype; it does not complete the
 visual-table milestone or provide browser/HMR/Playwright acceptance.
 
+Each movement trace also records `camera.visibleEyeHeight`; the severe-fall fixture bounds its minimum to `0.85–1.15 m`
+so the requested approximately one-metre eye height is tested directly, not inferred only from an offset.
+
 The severe-fall regression also checks the post-impact recovery: after the minimum offset, the capsule remains at the
 support height while the shared head response returns smoothly toward the standing eye height.
 
