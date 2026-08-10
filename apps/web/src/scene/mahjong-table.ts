@@ -489,6 +489,7 @@ export type VisualCameraPreset =
   | "assetReview"
   | "focusCalibration"
   | "climbingGym"
+  | "ledgeFall"
   | "parametricBarracks"
   | "targetRange";
 
@@ -723,6 +724,7 @@ const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "assetReview" ||
   value === "focusCalibration" ||
   value === "climbingGym" ||
+  value === "ledgeFall" ||
   value === "parametricBarracks" ||
   value === "targetRange";
 
@@ -1599,6 +1601,18 @@ const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, Camera
       CLIMBING_GYM_PRESET_TARGET_Z,
     ),
   },
+  ledgeFall: {
+    position: new THREE.Vector3(
+      CLIMBING_GYM_LEDGE_FALL_SPAWN_X,
+      CLIMBING_GYM_LEDGE_FALL_TOP_Y + CLIMBING_GYM_STANDING_EYE_HEIGHT,
+      CLIMBING_GYM_LEDGE_FALL_BLOCK_Z,
+    ),
+    target: new THREE.Vector3(
+      CLIMBING_GYM_LEDGE_FALL_BLOCK_X + 3,
+      CLIMBING_GYM_LEDGE_FALL_TOP_Y + CLIMBING_GYM_STANDING_EYE_HEIGHT,
+      CLIMBING_GYM_LEDGE_FALL_BLOCK_Z,
+    ),
+  },
   parametricBarracks: {
     position: new THREE.Vector3(
       PLAY_AREA_ORIGINS.parametricBarracks.x,
@@ -2068,6 +2082,14 @@ const CLIMBING_GYM_VAULT_ROW_START_Z = CLIMBING_GYM_ZONE_ORIGIN_Z + 12;
 const CLIMBING_GYM_VAULT_ROW_SPACING = 0.96;
 const CLIMBING_GYM_VAULT_BLOCK_WIDTH = 1.2;
 const CLIMBING_GYM_VAULT_BLOCK_DEPTH = 0.8;
+/** Spawn on the five-metre test block so the requested fall is reproducible. */
+const CLIMBING_GYM_LEDGE_FALL_BLOCK_X = CLIMBING_GYM_VAULT_ROW_X;
+const CLIMBING_GYM_LEDGE_FALL_BLOCK_Z =
+  CLIMBING_GYM_VAULT_ROW_START_Z +
+  ((CLIMBING_GYM_VAULT_MAX_HEIGHT_METERS / CLIMBING_GYM_VAULT_HEIGHT_STEP_METERS - 1) / 2) *
+    CLIMBING_GYM_VAULT_ROW_SPACING;
+const CLIMBING_GYM_LEDGE_FALL_TOP_Y = CLIMBING_GYM_VAULT_MAX_HEIGHT_METERS;
+const CLIMBING_GYM_LEDGE_FALL_SPAWN_X = CLIMBING_GYM_LEDGE_FALL_BLOCK_X - 0.16;
 const CLIMBING_GYM_VAULT_BLOCKS: readonly ClimbingGymVaultObstacle[] =
   CLIMBING_GYM_VAULT_HEIGHTS.map((topY, index) => ({
     name: `ClimbingGymVaultBlock${String(Math.round(topY * 100)).padStart(3, "0")}`,
@@ -16305,6 +16327,7 @@ export const createMahjongTableScene = (
       isCleanSlateMap &&
       (preset === "focusCalibration" ||
         preset === "climbingGym" ||
+        preset === "ledgeFall" ||
         preset === "parametricBarracks" ||
         preset === "targetRange")
     ) {
@@ -16318,11 +16341,13 @@ export const createMahjongTableScene = (
         ? "focusCalibration"
         : preset === "climbingGym"
           ? "climbingGym"
-          : preset === "parametricBarracks"
-            ? "parametricBarracks"
-            : preset === "targetRange"
-              ? "targetRange"
-              : "penthouse";
+          : preset === "ledgeFall"
+            ? "climbingGym"
+            : preset === "parametricBarracks"
+              ? "parametricBarracks"
+              : preset === "targetRange"
+                ? "targetRange"
+                : "penthouse";
     if (presetArea !== null && !isAreaEnabled(presetArea)) {
       activeDebugPreset = null;
       setView("seat");
@@ -16377,9 +16402,10 @@ export const createMahjongTableScene = (
       persistDebugPreferences();
       return;
     }
-    if (preset === "climbingGym") {
+    if (preset === "climbingGym" || preset === "ledgeFall") {
       // The climbing section is an active parkour test target and remains in
       // seat mode so movement and edge logic continue to run.
+      const ledgeFallPreset = preset === "ledgeFall";
       activeView = "seat";
       orbitControls.enabled = false;
       firstPersonControls.enabled = true;
@@ -16387,7 +16413,7 @@ export const createMahjongTableScene = (
         firstPersonControls.unlock();
       }
       onWindowBlur();
-      firstPersonGroundY = CLIMBING_GYM_RUN_Y;
+      firstPersonGroundY = ledgeFallPreset ? CLIMBING_GYM_LEDGE_FALL_TOP_Y : CLIMBING_GYM_RUN_Y;
       eyeHeight = CLIMBING_GYM_STANDING_EYE_HEIGHT;
       isCrouched = false;
       isWalkingMode = false;
@@ -16402,16 +16428,9 @@ export const createMahjongTableScene = (
       lastMovementTapAtByKey.clear();
       resetCameraMotion();
       physicsCharacterPosition = null;
-      camera.position.set(
-        CLIMBING_GYM_PRESET_START_X + 0.55,
-        CLIMBING_GYM_RUN_Y + CLIMBING_GYM_STANDING_EYE_HEIGHT,
-        CLIMBING_GYM_PRESET_START_Z,
-      );
-      camera.lookAt(
-        CLIMBING_GYM_PRESET_TARGET_X,
-        CLIMBING_GYM_RUN_Y + CLIMBING_GYM_STANDING_EYE_HEIGHT,
-        CLIMBING_GYM_PRESET_TARGET_Z,
-      );
+      const cameraPreset = activeVisualCameraPresets[preset];
+      camera.position.copy(cameraPreset.position);
+      camera.lookAt(cameraPreset.target);
       debugFovOverride = DEBUG_STANDING_FOV;
       camera.fov = debugFovOverride;
       camera.updateProjectionMatrix();
@@ -16503,18 +16522,19 @@ export const createMahjongTableScene = (
       syncPhysicsCharacterToCamera();
       return;
     }
-    if (state.activeDebugPreset === "climbingGym") {
+    if (state.activeDebugPreset === "climbingGym" || state.activeDebugPreset === "ledgeFall") {
       if (!debugEnabled) {
         return;
       }
-      setDebugCameraPreset("climbingGym");
-      firstPersonGroundY = CLIMBING_GYM_RUN_Y;
+      const ledgeFallPreset = state.activeDebugPreset === "ledgeFall";
+      setDebugCameraPreset(state.activeDebugPreset);
+      firstPersonGroundY = ledgeFallPreset ? CLIMBING_GYM_LEDGE_FALL_TOP_Y : CLIMBING_GYM_RUN_Y;
       isCrouched = state.isCrouched;
       isWalkingMode = isCrouched;
       ledgeClimbTransition = null;
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : CLIMBING_GYM_STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
-      camera.position.y = CLIMBING_GYM_RUN_Y + eyeHeight;
+      camera.position.y = firstPersonGroundY + eyeHeight;
       camera.quaternion.fromArray(state.cameraQuaternion).normalize();
       camera.fov = THREE.MathUtils.clamp(state.cameraFov, 30, 100);
       debugFovOverride = camera.fov;
@@ -18145,7 +18165,7 @@ export const createMahjongTableScene = (
       }
       let crouching = isCrouched;
       const standingEyeHeight =
-        activeDebugPreset === "climbingGym"
+        activeDebugPreset === "climbingGym" || activeDebugPreset === "ledgeFall"
           ? CLIMBING_GYM_STANDING_EYE_HEIGHT
           : STANDING_EYE_HEIGHT;
       const targetEyeHeight = crouching ? SEATED_EYE_HEIGHT : standingEyeHeight;

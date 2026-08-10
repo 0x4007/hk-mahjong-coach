@@ -67,6 +67,7 @@ const debugCameraPresets: readonly {
   { value: "assetReview", label: "Asset review" },
   { value: "focusCalibration", label: "Focus test zone" },
   { value: "climbingGym", label: "Climbing gym" },
+  { value: "ledgeFall", label: "5 m ledge fall" },
   { value: "parametricBarracks", label: "Parametric barracks" },
   { value: "targetRange", label: "Target range" },
 ];
@@ -84,7 +85,7 @@ const debugSceneAreas: readonly {
 
 const debugCameraPresetArea = (preset: VisualCameraPreset): VisualSceneAreaId => {
   if (preset === "focusCalibration") return "focusCalibration";
-  if (preset === "climbingGym") return "climbingGym";
+  if (preset === "climbingGym" || preset === "ledgeFall") return "climbingGym";
   if (preset === "parametricBarracks") return "parametricBarracks";
   if (preset === "targetRange") return "targetRange";
   return "penthouse";
@@ -212,6 +213,7 @@ const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "assetReview" ||
   value === "focusCalibration" ||
   value === "climbingGym" ||
+  value === "ledgeFall" ||
   value === "parametricBarracks" ||
   value === "targetRange";
 
@@ -714,6 +716,13 @@ const VisualDebugPanel = ({
     setCameraPreset("climbingGym");
     setPanelExpanded(true);
   };
+  const openLedgeFall = (): void => {
+    if (!snapshot.enabledAreas.climbingGym) {
+      return;
+    }
+    setCameraPreset("ledgeFall");
+    setPanelExpanded(true);
+  };
   const openParametricBarracks = (): void => {
     if (!snapshot.enabledAreas.parametricBarracks) {
       return;
@@ -769,6 +778,14 @@ const VisualDebugPanel = ({
               type="button"
             >
               Open climbing gym
+            </button>
+            <button
+              className="scene-debug-focus-quick-action"
+              disabled={!snapshot.enabledAreas.climbingGym}
+              onClick={openLedgeFall}
+              type="button"
+            >
+              Start 5 m ledge fall
             </button>
             <button
               className="scene-debug-focus-quick-action"
