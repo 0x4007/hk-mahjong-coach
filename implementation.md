@@ -18,6 +18,8 @@
   snapshot, pending return impulses re-enter the shared solver, and event-time presentation advances only axes touched
   by the action so a yaw-only impact cannot disturb an existing pitch response. Camera, viewmodel, reticule, aim ray,
   and focus ray therefore read one recoil response without a second camera state machine or double-counted pitch.
+- Added the `5 m ledge fall` debug preset. It starts on the top of the measured five-metre climbing-gym block and faces
+  the open edge, making the required rendered landing dip reproducible without relying on an unreachable wall climb.
 - Server-owned bus run `1786347257563-43196-683152f9` passes all 652 assertions across 138 suites on committed
   `083205e35153d45681d12a6f257c84395d11a126`. The 21 deterministic movement scenarios pass 160/160 assertions;
   strict lint, typecheck, formatting, `git diff --check`, and the production build also pass. Browser, HMR, Playwright,

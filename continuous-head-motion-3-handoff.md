@@ -168,6 +168,11 @@ capsule authority and omit repeated airborne gravity. The severe-fall fixture re
 offset of about `-0.8793 m` from the standing `1.75 m` eye, which places the eye at about `0.87 m` above the support
 surface; the capsule remains at support height while the response recovers toward zero.
 
+The debug panel now includes `5 m ledge fall`. It starts the capsule on the measured top of the five-metre climbing-gym
+block, points toward the open edge, and keeps the climbing-gym physics area active. The user acceptance action is to
+select that preset in the existing browser window and walk forward off the edge, then observe the near-one-metre impact
+eye height and smooth return to the standing view.
+
 Weapon and melee recoil are part of the same angular state. Action callbacks publish an immediate bounded snapshot,
 delayed return impulses are accumulated with the next frame, and event-time presentation advances only axes touched by
 the action. Camera, viewmodel, reticule, aim ray, and focus ray therefore consume one response without a parallel

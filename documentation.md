@@ -35,6 +35,10 @@ the analytic integration pass. The event callback advances only the axes touched
 does not move a pre-existing pitch response. The camera, held viewmodel, reticule, aim ray, and focus ray consume the
 single composed snapshot; no separate camera recoil state or second pitch composition remains.
 
+The debug panel's `5 m ledge fall` preset starts the first-person capsule on the measured top of the five-metre climbing-gym
+test block and faces the open edge. This keeps the rendered acceptance path reproducible: select that preset, walk forward
+off the block, and observe the landing dip and smooth recovery without changing the physics-authoritative capsule height.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the
