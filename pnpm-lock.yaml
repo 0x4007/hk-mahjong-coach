@@ -119,6 +119,9 @@ importers:
       '@hk-mahjong/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@hk-mahjong/fps':
+        specifier: workspace:*
+        version: link:../../packages/fps
       '@hk-mahjong/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -185,6 +188,12 @@ importers:
         version: 4.4.3
 
   packages/core: {}
+
+  packages/fps:
+    dependencies:
+      '@hk-mahjong/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/hk-rules:
     dependencies:

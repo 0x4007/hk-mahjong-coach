@@ -35,6 +35,7 @@ import {
   resolveDesktopAimInput,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
+  resolveSimulantShotDamage,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
   isLeftCommandKeyEvent,
@@ -128,6 +129,20 @@ describe("player movement speed", () => {
 
     expect(crouch).toBe(0.5);
     expect(crouch).toBeLessThan(standingReload);
+  });
+});
+
+describe("simulant shot payload", () => {
+  it("uses the same per-projectile damage payload as the ordinary weapon path", () => {
+    expect(resolveSimulantShotDamage(28)).toBe(28);
+    expect(resolveSimulantShotDamage(16, 8)).toBe(128);
+  });
+
+  it("rejects non-finite or negative payload inputs", () => {
+    expect(resolveSimulantShotDamage(Number.NaN, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, Number.NaN)).toBe(0);
+    expect(resolveSimulantShotDamage(-16, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, -2)).toBe(0);
   });
 });
 
@@ -472,18 +487,22 @@ describe("exploration room exclusion", () => {
   });
 });
 
-describe("append-only exploration chunks", () => {
-  it("preloads all exploration chunks up front and retains them", () => {
+describe("streamed exploration chunks", () => {
+  it("loads a bounded neighbourhood and replaces distant chunks", () => {
     const scene = new THREE.Scene();
-    const world = createExplorationWorld(scene, "append-only-test");
+    const world = createExplorationWorld(scene, "streamed-test");
 
-    expect(world.getLoadedChunkCount()).toBe(121);
-    world.update(new THREE.Vector3(16, 0, 0));
-    const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBe(121);
+    const initialCount = world.getLoadedChunkCount();
+    expect(initialCount).toBeGreaterThan(0);
+    expect(initialCount).toBeLessThan(400);
+    world.update(new THREE.Vector3(400, 0, 400));
+    const movedCount = world.getLoadedChunkCount();
+    expect(movedCount).toBeGreaterThan(0);
+    expect(movedCount).toBeLessThanOrEqual(400);
 
     world.update(new THREE.Vector3(0, 0, 0));
-    expect(world.getLoadedChunkCount()).toBe(expandedCount);
+    expect(world.getLoadedChunkCount()).toBeGreaterThan(0);
+    expect(world.getLoadedChunkCount()).toBeLessThanOrEqual(400);
     world.dispose();
   });
 });

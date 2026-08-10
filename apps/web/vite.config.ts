@@ -225,6 +225,8 @@ export default defineConfig(({ command }) => ({
     alias: {
       "@hk-mahjong/core/public": fromRoot("../../packages/core/src/public.ts"),
       "@hk-mahjong/core": fromRoot("../../packages/core/src/index.ts"),
+      "@hk-mahjong/fps/world": fromRoot("../../packages/fps/src/world/index.ts"),
+      "@hk-mahjong/fps": fromRoot("../../packages/fps/src/index.ts"),
       "@hk-mahjong/protocol": fromRoot("../../packages/protocol/src/index.ts"),
       "@hk-mahjong/tile-ui": fromRoot("../../packages/tile-ui/src/index.tsx"),
     },

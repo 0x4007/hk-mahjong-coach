@@ -46,6 +46,32 @@ export const WEAPON_BULLET_HOLE_MAX_COUNT = 256;
 export type WeaponShotSoundWaveform = OscillatorType | "whiteNoise";
 /** One deliberately static white-noise timbre for every trigger pull. */
 export const WEAPON_SHOT_SOUND_WAVEFORM: WeaponShotSoundWaveform = "whiteNoise";
+/** Distance at which a weapon sound is heard at full proximity gain. */
+export const WEAPON_AUDIO_REFERENCE_DISTANCE_METERS = 1;
+/** Distance at which a weapon sound fades out completely. */
+export const WEAPON_AUDIO_MAX_DISTANCE_METERS = 32;
+/** Inverse-distance rolloff used by the Web Audio spatializer. */
+export const WEAPON_AUDIO_ROLLOFF_FACTOR = 0.65;
+
+/**
+ * Resolve the distance envelope shared by every weapon sound layer.
+ *
+ * The spatializer supplies directional placement and inverse-distance rolloff;
+ * this bounded envelope guarantees that the fallback gain path is still quiet
+ * at the edge of the audible weapon range.
+ */
+export const resolveWeaponAudioProximity = (distanceMeters: number): number => {
+  if (!Number.isFinite(distanceMeters)) {
+    return 0;
+  }
+  const safeDistance = Math.max(0, distanceMeters);
+  if (safeDistance >= WEAPON_AUDIO_MAX_DISTANCE_METERS) {
+    return 0;
+  }
+  const remainingRange = 1 - safeDistance / WEAPON_AUDIO_MAX_DISTANCE_METERS;
+  return remainingRange * remainingRange;
+};
+
 export interface GunAudioParameters {
   readonly damage: number;
   readonly barrelLength: number;
@@ -59,6 +85,8 @@ export interface GunAudioProfile {
   readonly tailDurationSeconds: number;
   readonly tailVolume: number;
   readonly tailCutoffFrequencyHz: number;
+  /** Projectile velocity used to schedule the pass-by arrival. */
+  readonly bulletSpeedMetersPerSecond: number;
 }
 
 /** Damage bounds used by the continuous procedural gunshot curve. */
@@ -67,10 +95,15 @@ export const GUN_AUDIO_MAX_DAMAGE = 100;
 /** Barrel bounds used by the continuous resonance curve. */
 export const GUN_AUDIO_MIN_BARREL_LENGTH_METERS = 0.34;
 export const GUN_AUDIO_MAX_BARREL_LENGTH_METERS = 1.35;
+/** Projectile speed bounds for the continuous damage/barrel model. */
+export const GUN_AUDIO_MIN_BULLET_SPEED_METERS_PER_SECOND = 280;
+export const GUN_AUDIO_MAX_BULLET_SPEED_METERS_PER_SECOND = 900;
+const GUN_AUDIO_BULLET_SPEED_DAMAGE_WEIGHT = 0.72;
+const GUN_AUDIO_BULLET_SPEED_BARREL_WEIGHT = 0.28;
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
-/** Resolve the four-layer gunshot controls from damage and barrel length only. */
+/** Resolve gunshot and projectile controls from damage and barrel length only. */
 export const resolveGunAudioProfile = ({
   damage,
   barrelLength,
@@ -87,6 +120,10 @@ export const resolveGunAudioProfile = ({
     (safeBarrelLength - GUN_AUDIO_MIN_BARREL_LENGTH_METERS) /
       (GUN_AUDIO_MAX_BARREL_LENGTH_METERS - GUN_AUDIO_MIN_BARREL_LENGTH_METERS),
   );
+  const bulletSpeedRatio = clamp01(
+    damageCurve * GUN_AUDIO_BULLET_SPEED_DAMAGE_WEIGHT +
+      barrelRatio * GUN_AUDIO_BULLET_SPEED_BARREL_WEIGHT,
+  );
   return {
     damagePitch: 1.15 - damageCurve * 0.4,
     damageVolume: 0.8 + damageCurve * 0.5,
@@ -95,6 +132,11 @@ export const resolveGunAudioProfile = ({
     tailDurationSeconds: 0.08 + barrelRatio * 0.17,
     tailVolume: 0.5 - barrelRatio * 0.1,
     tailCutoffFrequencyHz: 3600 - barrelRatio * 2200,
+    bulletSpeedMetersPerSecond:
+      GUN_AUDIO_MIN_BULLET_SPEED_METERS_PER_SECOND +
+      bulletSpeedRatio *
+        (GUN_AUDIO_MAX_BULLET_SPEED_METERS_PER_SECOND -
+          GUN_AUDIO_MIN_BULLET_SPEED_METERS_PER_SECOND),
   };
 };
 
@@ -735,8 +777,6 @@ export interface WeaponPickupSpawn {
   readonly position: readonly [number, number, number];
   readonly rotation: number;
   readonly starter?: boolean;
-  /** True when the pickup is staged in the penthouse beside the mahjong table. */
-  readonly nearTable?: boolean;
 }
 
 export interface GenerateWeaponPickupOptions {
@@ -749,55 +789,100 @@ export interface GenerateWeaponPickupOptions {
 
 const DEFAULT_WORLD_HALF_SIZE = 500;
 const WORLD_EDGE_MARGIN = 5;
-const DEFAULT_PICKUP_COUNT_PER_WEAPON = 3;
+/** Dense map-wide baseline: six weapon types × 24 copies = 144 pickups. */
+const DEFAULT_PICKUP_COUNT_PER_WEAPON = 24;
 const DEFAULT_MINIMUM_DISTANCE = 7;
 const PICKUP_HEIGHT = 0.72;
 const OBSTACLE_CLEARANCE = 0.9;
 const MAX_CANDIDATE_ATTEMPTS_PER_PICKUP = 240;
+const PROCEDURAL_SPAWN_REGION_COUNT = 4;
+const PROCEDURAL_SPAWN_GRID_SIDE = 8;
+const PROCEDURAL_SPAWN_CELL_INSET_RATIO = 0.15;
 /** Radius used by both walk-over pickup and the manual E interaction. */
 export const WEAPON_PICKUP_RANGE_METERS = 3.5;
 
-/**
- * Keep one readable pickup for every weapon in the table-first penthouse
- * composition. The six pads sit outside the table footprint, with the
- * starter pistol closest to the initial south-seat camera.
- */
-const TABLE_SIDE_PICKUP_LAYOUT = [
-  {
-    weapon: "pistol",
-    position: [2.65, PICKUP_HEIGHT, 3.55],
-    rotation: -0.32,
-  },
-  {
-    weapon: "shotgun",
-    position: [-2.65, PICKUP_HEIGHT, 3.55],
-    rotation: 0.32,
-  },
-  {
-    weapon: "machineGun",
-    position: [2.65, PICKUP_HEIGHT, -3.55],
-    rotation: Math.PI - 0.32,
-  },
-  {
-    weapon: "sniper",
-    position: [-2.65, PICKUP_HEIGHT, -3.55],
-    rotation: Math.PI + 0.32,
-  },
-  {
-    weapon: "carbine",
-    position: [4.25, PICKUP_HEIGHT, 0],
-    rotation: -Math.PI / 2,
-  },
-  {
-    weapon: "submachineGun",
-    position: [-4.25, PICKUP_HEIGHT, 0],
-    rotation: Math.PI / 2,
-  },
-] as const satisfies readonly {
-  readonly weapon: WeaponId;
-  readonly position: readonly [number, number, number];
-  readonly rotation: number;
-}[];
+interface WeaponSpawnCell {
+  readonly minX: number;
+  readonly maxX: number;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+type WeaponPlacementRandom = ReturnType<typeof createSeededRandom>;
+
+const shuffleValues = (
+  values: (WeaponSpawnCell | number)[],
+  random: WeaponPlacementRandom,
+): void => {
+  for (let index = values.length - 1; index > 0; index -= 1) {
+    const otherIndex = random.nextInt(index + 1);
+    const current = values[index];
+    const other = values[otherIndex];
+    if (current === undefined || other === undefined) {
+      continue;
+    }
+    values[index] = other;
+    values[otherIndex] = current;
+  }
+};
+
+/** Build four seeded map sectors, each with enough cells for every pickup copy. */
+const createProceduralSpawnCells = (
+  worldHalfSize: number,
+  random: WeaponPlacementRandom,
+): WeaponSpawnCell[][] => {
+  const cellsByRegion = Array.from(
+    { length: PROCEDURAL_SPAWN_REGION_COUNT },
+    (): WeaponSpawnCell[] => [],
+  );
+  const regionHalfSize = worldHalfSize / 2;
+  const cellSize = regionHalfSize / PROCEDURAL_SPAWN_GRID_SIDE;
+  const regionCoordinates = [
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+  ] as const;
+  regionCoordinates.forEach(([regionX, regionZ], regionIndex) => {
+    const regionCells = cellsByRegion[regionIndex];
+    if (regionCells === undefined) {
+      return;
+    }
+    const regionMinX = regionX < 0 ? -worldHalfSize : 0;
+    const regionMinZ = regionZ < 0 ? -worldHalfSize : 0;
+    for (let row = 0; row < PROCEDURAL_SPAWN_GRID_SIDE; row += 1) {
+      for (let column = 0; column < PROCEDURAL_SPAWN_GRID_SIDE; column += 1) {
+        regionCells.push({
+          minX: regionMinX + column * cellSize,
+          maxX: regionMinX + (column + 1) * cellSize,
+          minZ: regionMinZ + row * cellSize,
+          maxZ: regionMinZ + (row + 1) * cellSize,
+        });
+      }
+    }
+    shuffleValues(regionCells, random);
+  });
+  return cellsByRegion;
+};
+
+const sampleProceduralSpawnCell = (
+  cell: WeaponSpawnCell,
+  worldHalfSize: number,
+  random: WeaponPlacementRandom,
+): readonly [number, number] => {
+  const insetX = (cell.maxX - cell.minX) * PROCEDURAL_SPAWN_CELL_INSET_RATIO;
+  const insetZ = (cell.maxZ - cell.minZ) * PROCEDURAL_SPAWN_CELL_INSET_RATIO;
+  const x =
+    cell.minX + insetX + random.nextFloat() * Math.max(0, cell.maxX - cell.minX - insetX * 2);
+  const z =
+    cell.minZ + insetZ + random.nextFloat() * Math.max(0, cell.maxZ - cell.minZ - insetZ * 2);
+  const edgeMin = -Math.max(0, worldHalfSize - WORLD_EDGE_MARGIN);
+  const edgeMax = Math.max(0, worldHalfSize - WORLD_EDGE_MARGIN);
+  return [
+    Math.min(edgeMax, Math.max(edgeMin, Math.round(x / 0.5) * 0.5)),
+    Math.min(edgeMax, Math.max(edgeMin, Math.round(z / 0.5) * 0.5)),
+  ];
+};
 
 const isInsideRect = (x: number, z: number, rect: WeaponSpawnRect, clearance: number): boolean =>
   x >= rect.minX - clearance &&
@@ -869,11 +954,9 @@ const fallbackCandidate = (
 /**
  * Generate deterministic weapon pickups for one room seed.
  *
- * One pickup for each weapon is staged beside the penthouse mahjong table so
- * all weapon types are visible and immediately testable. Remaining
- * pickups are seeded across the streamed world. Reserved authored play areas
- * and coarse scene obstacles apply to those outdoor placements; the deliberate
- * table-side set is the only placement inside the penthouse reservation.
+ * Keep all weapon pickups in the full procedural world so every placement is
+ * visible by traversal. Reserved authored play areas and coarse scene obstacles
+ * protect the stream; all seeds remain deterministic per room and spawn index.
  */
 export const generateWeaponPickups = (
   roomSeed: string,
@@ -883,38 +966,67 @@ export const generateWeaponPickups = (
   const worldHalfSize = Math.max(12, options.worldHalfSize ?? DEFAULT_WORLD_HALF_SIZE);
   const pickupCountPerWeapon = Math.max(
     1,
-    Math.min(8, Math.floor(options.pickupCountPerWeapon ?? DEFAULT_PICKUP_COUNT_PER_WEAPON)),
+    Math.min(32, Math.floor(options.pickupCountPerWeapon ?? DEFAULT_PICKUP_COUNT_PER_WEAPON)),
   );
   const minimumDistance = Math.max(1.5, options.minimumDistance ?? DEFAULT_MINIMUM_DISTANCE);
   const reservedRects = options.reservedRects ?? [];
   const obstacles = options.obstacles ?? [];
   const random = createSeededRandom(`${normalizedSeed}|weapons|placements|v1`);
-  const placements: WeaponPickupSpawn[] = TABLE_SIDE_PICKUP_LAYOUT.map(
-    ({ weapon, position, rotation }) => ({
-      id: `weapon-${weapon}-table`,
-      weapon,
-      position,
-      rotation,
-      nearTable: true,
-      ...(weapon === "pistol" ? { starter: true } : {}),
-    }),
-  );
+  const placements: WeaponPickupSpawn[] = [];
+  const cellsByRegion = createProceduralSpawnCells(worldHalfSize, random);
+  const regionOrder = Array.from({ length: PROCEDURAL_SPAWN_REGION_COUNT }, (_, index) => index);
+  shuffleValues(regionOrder, random);
   const spawnOrder = WEAPON_IDS.flatMap((weapon) =>
-    Array.from(
-      {
-        // The table-side set counts as one pickup for every non-pistol type.
-        // Keep the existing public count semantics: the starter pistol is in
-        // addition to its configured outdoor count, while other types have
-        // the table-side pickup in place of one outdoor spawn.
-        length: weapon === "pistol" ? pickupCountPerWeapon : pickupCountPerWeapon - 1,
-      },
-      () => weapon,
-    ),
+    Array.from({ length: pickupCountPerWeapon }, () => weapon),
   );
 
   spawnOrder.forEach((weapon, index) => {
     let candidate: readonly [number, number] | null = null;
+    const preferredRegion = regionOrder[index % regionOrder.length] ?? 0;
+    const regionCandidates = [
+      preferredRegion,
+      ...regionOrder.filter((regionIndex) => regionIndex !== preferredRegion),
+    ];
+    for (const regionIndex of regionCandidates) {
+      const cells = cellsByRegion[regionIndex];
+      if (cells === undefined) {
+        continue;
+      }
+      let cellIndex = 0;
+      while (cellIndex < cells.length) {
+        const cell = cells[cellIndex];
+        if (cell === undefined) {
+          cellIndex += 1;
+          continue;
+        }
+        const cellCandidate = sampleProceduralSpawnCell(cell, worldHalfSize, random);
+        if (
+          isValidCandidate(
+            cellCandidate[0],
+            cellCandidate[1],
+            reservedRects,
+            obstacles,
+            placements,
+            minimumDistance,
+          )
+        ) {
+          candidate = cellCandidate;
+          cells.splice(cellIndex, 1);
+          break;
+        }
+        // A rejected cell cannot become valid later: authored reservations,
+        // obstacles, and the minimum-distance constraint only become stricter
+        // as more pickups are accepted.
+        cells.splice(cellIndex, 1);
+      }
+      if (candidate !== null) {
+        break;
+      }
+    }
     for (let attempt = 0; attempt < MAX_CANDIDATE_ATTEMPTS_PER_PICKUP; attempt += 1) {
+      if (candidate !== null) {
+        break;
+      }
       const x =
         Math.round(((random.nextFloat() * 2 - 1) * (worldHalfSize - WORLD_EDGE_MARGIN)) / 0.5) *
         0.5;
@@ -957,6 +1069,7 @@ export const generateWeaponPickups = (
       weapon,
       position: [x, PICKUP_HEIGHT, z],
       rotation: random.nextFloat() * Math.PI * 2,
+      ...(index === 0 && weapon === "pistol" ? { starter: true } : {}),
     });
   });
   return placements;

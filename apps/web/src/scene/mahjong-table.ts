@@ -42,6 +42,10 @@ import {
   resolveWeaponHotkey,
   resolveGunAudioProfile,
   GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+  resolveWeaponAudioProximity,
+  WEAPON_AUDIO_MAX_DISTANCE_METERS,
+  WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
+  WEAPON_AUDIO_ROLLOFF_FACTOR,
   resolveWeaponBarrelTemperatureC,
   resolveWeaponBarrelGlowRatio,
   type WeaponSpawnRect,
@@ -110,8 +114,30 @@ import {
   shouldRenderSniperScopeObject,
   shouldEnableSniperScope,
 } from "./sniper-scope.js";
+import {
+  ChunkManager,
+  DEFAULT_WORLD_CONFIG,
+  DEFAULT_CHUNK_STREAMING_CONFIG,
+  buildChunkGeometry,
+  chunkBounds,
+  createWorldDebugState,
+  deriveChunkPlan,
+  generateWorldPlan,
+  worldBounds,
+  worldToChunkCoord,
+  type Bounds2,
+  type BuildingStairwell,
+  type BuildingWindow,
+  type ChunkGeometry,
+  type ChunkLod,
+  type ChunkPlan,
+  type WorldDebugLayer,
+  type WorldDebugState,
+  type WorldPlan,
+} from "@hk-mahjong/fps/world";
 
 export type { PlayerVitalsDamageResult, PlayerVitalsState } from "./player-vitals.js";
+export type { WorldDebugLayer } from "@hk-mahjong/fps/world";
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
@@ -240,7 +266,7 @@ export interface VisualSceneState {
 }
 
 export type VisualCameraPreset =
-  "table" | "roomReveal" | "assetReview" | "focusCalibration" | "climbingGym";
+  "table" | "roomReveal" | "assetReview" | "worldPlanner" | "focusCalibration" | "climbingGym";
 
 export type VisualToneMapper = "agx" | "neutral" | "cineon" | "linear";
 
@@ -270,21 +296,35 @@ export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
 
 const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
 const VISUAL_SCENE_FALL_RESET_Y = -2;
-// Keep the 1 km FPS world bounded to five coarse chunks from the origin in
-// each direction. The larger chunk preserves long traversal sightlines while
-// keeping the resident grid at a manageable 11 × 11 chunks.
-const EXPLORATION_CHUNK_SIZE = 100;
-const EXPLORATION_CHUNKS_PER_SIDE = 5;
-const EXPLORATION_DENSITY_MULTIPLIER = 2;
+const WORLD_SPAWN_MARGIN = 1;
+const WORLD_SPAWN_ATTEMPTS = 24;
+const WORLD_SPAWN_DROP_HEIGHT = 80;
+const WORLD_SPAWN_DROP_DISTANCE = WORLD_SPAWN_DROP_HEIGHT * 2;
+const PLAYER_DEATH_RESPAWN_DELAY_MS = 3_000;
+const PLAYER_DEATH_FADE_DURATION_MS = 650;
+const PLAYER_RESPAWN_FADE_IN_DURATION_MS = 260;
+const SIMULANT_START_COOLDOWN_SECONDS = 2;
+// The visual-table backdrop uses the same bounded dimensions as the future
+// multiplayer FPS world. The planner creates the complete city once, then
+// each renderer chunk materializes only its intersecting plan slices.
+const EXPLORATION_WORLD_CONFIG = DEFAULT_WORLD_CONFIG;
+const EXPLORATION_CHUNK_SIZE = EXPLORATION_WORLD_CONFIG.chunkSizeM;
+const EXPLORATION_CHUNKS_PER_SIDE = Math.round(
+  EXPLORATION_WORLD_CONFIG.worldSizeM / EXPLORATION_WORLD_CONFIG.chunkSizeM,
+);
+const EXPLORATION_DENSITY_MULTIPLIER = 2.85;
 const EXPLORATION_DENSITY_SCALE =
   EXPLORATION_DENSITY_MULTIPLIER * Math.sqrt(EXPLORATION_CHUNK_SIZE / 8);
-const EXPLORATION_WORLD_HALF_SIZE = EXPLORATION_CHUNK_SIZE * EXPLORATION_CHUNKS_PER_SIDE;
-const WORLD_BOUNDS = {
-  minX: -EXPLORATION_WORLD_HALF_SIZE,
-  maxX: EXPLORATION_WORLD_HALF_SIZE,
-  minZ: -EXPLORATION_WORLD_HALF_SIZE,
-  maxZ: EXPLORATION_WORLD_HALF_SIZE,
-} as const;
+const EXPLORATION_WORLD_BOUNDS = worldBounds(EXPLORATION_WORLD_CONFIG);
+const EXPLORATION_WORLD_HALF_SIZE =
+  (EXPLORATION_WORLD_BOUNDS.maxX - EXPLORATION_WORLD_BOUNDS.minX) / 2;
+const WORLD_BOUNDS = EXPLORATION_WORLD_BOUNDS;
+const SIMULANT_SPAWN_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
+const SIMULANT_MIN_START_DISTANCE_METERS = 180;
+const SIMULANT_STOP_DISTANCE_METERS = 18;
+const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.09;
+const SIMULANT_BODY_TARGET_HEIGHT_METERS = 1.8;
+const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.05;
 export const PLAY_AREA_SIZE_METERS = 50;
 const PLAY_AREA_GAP_METERS = 10;
 const PLAY_AREA_SPACING_METERS = PLAY_AREA_SIZE_METERS + PLAY_AREA_GAP_METERS;
@@ -375,6 +415,7 @@ const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "table" ||
   value === "roomReveal" ||
   value === "assetReview" ||
+  value === "worldPlanner" ||
   value === "focusCalibration" ||
   value === "climbingGym";
 
@@ -898,6 +939,11 @@ export interface MahjongTableDebugControls {
   readonly setCameraBobEnabled: (enabled: boolean) => void;
   readonly setWireframe: (enabled: boolean) => void;
   readonly setBoundsVisible: (visible: boolean) => void;
+  readonly setWorldDebugLayerVisible: (layer: WorldDebugLayer, visible: boolean) => void;
+  readonly setWorldStreamingFrozen: (frozen: boolean) => void;
+  readonly teleportToWorldChunk: (coord: { readonly x: number; readonly z: number }) => void;
+  readonly getWorldDebugSnapshot: () => ReturnType<WorldDebugState["getSnapshot"]>;
+  readonly exportWorldPlan: () => string;
   readonly teleportToFocusLab: () => void;
   readonly resetDefaults: () => void;
   readonly getSnapshot: () => SceneDebugSnapshot;
@@ -1187,6 +1233,10 @@ const createVisualCameraPresets = (): Readonly<Record<VisualCameraPreset, Camera
     target: new THREE.Vector3(0, 1.15, -1.45),
   },
   assetReview: cameraPresets.overhead,
+  worldPlanner: {
+    position: new THREE.Vector3(0, 520, 0),
+    target: new THREE.Vector3(0, 0, 0),
+  },
   focusCalibration: {
     position: new THREE.Vector3(
       FOCUS_CALIBRATION_START_X,
@@ -1282,6 +1332,12 @@ const WALK_SPEED_RATIO = 1 / SPRINT_MULTIPLIER;
 const NEUTRAL_JOG_SPEED_RATIO =
   WALK_SPEED_RATIO + (1 - WALK_SPEED_RATIO) * O2_NEUTRAL_JOG_SPEED_BLEND;
 const NEUTRAL_JOG_SPEED_MULTIPLIER = SPRINT_MULTIPLIER * NEUTRAL_JOG_SPEED_RATIO;
+const SIMULANT_TROT_SPEED_METERS_PER_SECOND =
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND * NEUTRAL_JOG_SPEED_MULTIPLIER;
+const SIMULANT_TROT_SPEED_RATIO =
+  SIMULANT_TROT_SPEED_METERS_PER_SECOND / (PLAYER_MOVE_SPEED_METERS_PER_SECOND * SPRINT_MULTIPLIER);
+/** Trot is slightly more strenuous than the player's exact O₂-neutral blend. */
+const SIMULANT_TROT_LOCOMOTION_BLEND = Math.min(1, O2_NEUTRAL_JOG_SPEED_BLEND + 0.18);
 
 export interface PlayerMovementSpeedInput {
   readonly crouching: boolean;
@@ -1314,6 +1370,18 @@ export const resolvePlayerMovementSpeedMultiplier = ({
   return reloading
     ? Math.min(requestedMultiplier, NEUTRAL_JOG_SPEED_MULTIPLIER)
     : requestedMultiplier;
+};
+
+/** Apply one ordinary weapon shot's full projectile payload to a target. */
+export const resolveSimulantShotDamage = (
+  damagePerProjectile: number,
+  projectileCount = 1,
+): number => {
+  const damage = Number.isFinite(damagePerProjectile) ? Math.max(0, damagePerProjectile) : 0;
+  const projectiles = Number.isFinite(projectileCount)
+    ? Math.max(0, Math.floor(projectileCount))
+    : 0;
+  return damage * projectiles;
 };
 
 const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
@@ -1860,9 +1928,6 @@ const createClimbingGymCollider = (obstacle: ClimbingGymObstacle): PhysicsBox =>
   };
 };
 
-const EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET = EXPLORATION_CHUNK_SIZE * (2.45 / 8);
-const EXPLORATION_CHUNK_BUILDING_EDGE_JITTER = EXPLORATION_CHUNK_SIZE * (2.3 / 8);
-
 /**
  * The room occupies the full streamed block at the gateway. Keep this
  * exclusion slightly outside the visible shell; city geometry may touch the
@@ -2036,8 +2101,8 @@ const sampleExplorationBiomeNoise = (
   chunkZ: number,
   salt: string,
 ): number => {
-  const worldX = chunkX * EXPLORATION_CHUNK_SIZE;
-  const worldZ = chunkZ * EXPLORATION_CHUNK_SIZE;
+  const worldX = WORLD_BOUNDS.minX + (chunkX + 0.5) * EXPLORATION_CHUNK_SIZE;
+  const worldZ = WORLD_BOUNDS.minZ + (chunkZ + 0.5) * EXPLORATION_CHUNK_SIZE;
   const coarse = sampleExplorationNoise(seed, worldX, worldZ, 0.022, salt);
   const fine = sampleExplorationNoise(seed, worldX, worldZ, 0.11, salt);
   return clamp01(0.72 * coarse + 0.28 * fine);
@@ -2089,10 +2154,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.2,
     humidityTolerance: 0.22,
     elevationTolerance: 0.24,
-    buildingDensity: 1.45,
-    buildingHeightMin: 1.5,
-    buildingHeightMax: 5.6,
-    windowHeight: 3.8,
+    buildingDensity: 1.75,
+    buildingHeightMin: 2,
+    buildingHeightMax: 6.4,
+    windowHeight: 4.2,
     pathFrequency: 0.55,
     bridgeDensity: 0.15,
     propDensity: 1.05,
@@ -2112,10 +2177,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.23,
     humidityTolerance: 0.2,
     elevationTolerance: 0.25,
-    buildingDensity: 1.0,
-    buildingHeightMin: 1,
-    buildingHeightMax: 4.2,
-    windowHeight: 2.8,
+    buildingDensity: 1.25,
+    buildingHeightMin: 1.3,
+    buildingHeightMax: 5.1,
+    windowHeight: 3.1,
     pathFrequency: 0.45,
     bridgeDensity: 0.12,
     propDensity: 1.36,
@@ -2135,10 +2200,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.21,
     humidityTolerance: 0.22,
     elevationTolerance: 0.22,
-    buildingDensity: 1.95,
-    buildingHeightMin: 1.8,
-    buildingHeightMax: 5.9,
-    windowHeight: 4.2,
+    buildingDensity: 2.25,
+    buildingHeightMin: 2.1,
+    buildingHeightMax: 6.6,
+    windowHeight: 4.8,
     pathFrequency: 0.52,
     bridgeDensity: 0.2,
     propDensity: 1.0,
@@ -2158,10 +2223,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.21,
     humidityTolerance: 0.21,
     elevationTolerance: 0.2,
-    buildingDensity: 1.15,
-    buildingHeightMin: 2.8,
-    buildingHeightMax: 7,
-    windowHeight: 4.6,
+    buildingDensity: 1.5,
+    buildingHeightMin: 2.9,
+    buildingHeightMax: 8.1,
+    windowHeight: 5,
     pathFrequency: 0.58,
     bridgeDensity: 0.35,
     propDensity: 0.85,
@@ -2176,43 +2241,19 @@ const resolveExplorationBiome = (
   chunkX: number,
   chunkZ: number,
 ): ResolvedExplorationBiome => {
-  const temperature = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "temp");
-  const humidity = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "humidity");
-  const elevation = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "elevation");
+  // v0.1 deliberately uses one urban visual theme. Keep the keyed feature
+  // noise for deterministic prop variation, but do not blend terrain or
+  // select biome-specific materials in the city shell.
   const featureNoise = sampleExplorationBiomeNoise(seed, chunkX, chunkZ, "feature");
-
-  let resolvedStyle = EXPLORATION_BIOMES[0] as ExplorationBiomeStyle;
-  let resolvedStyleIndex = 0;
-  let highestScore = -Infinity;
-
-  for (let index = 0; index < EXPLORATION_BIOMES.length; index += 1) {
-    const style = EXPLORATION_BIOMES[index];
-    if (style === undefined) {
-      continue;
-    }
-    const tempScore = clamp01(
-      1 - Math.abs(temperature - style.preferredTemperature) / style.temperatureTolerance,
-    );
-    const humidityScore = clamp01(
-      1 - Math.abs(humidity - style.preferredHumidity) / style.humidityTolerance,
-    );
-    const elevationScore = clamp01(
-      1 - Math.abs(elevation - style.preferredElevation) / style.elevationTolerance,
-    );
-    const score = tempScore * 0.48 + humidityScore * 0.34 + elevationScore * 0.18;
-    if (score > highestScore) {
-      highestScore = score;
-      resolvedStyle = style;
-      resolvedStyleIndex = index;
-    }
-  }
+  const resolvedStyle = EXPLORATION_BIOMES[0];
+  if (resolvedStyle === undefined) throw new Error("exploration_city_style_missing");
 
   return {
     style: resolvedStyle,
-    styleIndex: resolvedStyleIndex,
-    temperature,
-    humidity,
-    elevation,
+    styleIndex: 0,
+    temperature: 0.5,
+    humidity: 0.5,
+    elevation: 0,
     featureNoise,
   };
 };
@@ -3792,6 +3833,48 @@ const addHand = (
   parent.add(hand);
 };
 
+const createSimulantBody = (color: THREE.Color): THREE.Group => {
+  const root = new THREE.Group();
+  root.name = "SimulantBody";
+  const bodyScale = SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS;
+  root.scale.setScalar(bodyScale);
+  root.position.y = SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS * bodyScale;
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.48,
+    metalness: 0.08,
+    emissive: color,
+    emissiveIntensity: 0.2,
+  });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), bodyMaterial);
+  head.position.set(0, 0.86, 0);
+  root.add(head);
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.52, 8, 8), bodyMaterial);
+  torso.position.set(0, 0.44, 0);
+  root.add(torso);
+  const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  leftArm.position.set(-0.28, 0.52, 0.02);
+  leftArm.rotation.z = 0.25;
+  root.add(leftArm);
+  const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  rightArm.position.set(0.28, 0.52, 0.02);
+  rightArm.rotation.z = -0.25;
+  root.add(rightArm);
+  const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  leftLeg.position.set(-0.12, 0.05, 0);
+  root.add(leftLeg);
+  const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  rightLeg.position.set(0.12, 0.05, 0);
+  root.add(rightLeg);
+  root.traverse((node) => {
+    if (node instanceof THREE.Mesh) {
+      node.castShadow = true;
+      node.receiveShadow = true;
+    }
+  });
+  return root;
+};
+
 const addOpenMeld = (
   parent: THREE.Object3D,
   cache: TileTextureCache,
@@ -4005,6 +4088,12 @@ interface WeaponRuntime {
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
+  readonly fireFrom: (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options?: WeaponFireFromOptions,
+  ) => void;
   readonly reload: () => void;
   readonly isReloading: () => boolean;
   readonly interact: () => void;
@@ -4018,6 +4107,24 @@ interface WeaponRuntime {
   } | null;
   readonly getSnapshot: () => WeaponStateSnapshot;
   readonly dispose: () => void;
+}
+
+interface WeaponFireFromOptions {
+  readonly random?: { readonly nextFloat: () => number };
+  readonly spreadRadians?: number;
+  readonly maxDistance?: number;
+  readonly showWorldEffects?: boolean;
+  readonly showCameraMuzzle?: boolean;
+  readonly playAudio?: boolean;
+  readonly playPassByAudio?: boolean;
+  readonly trackShotHits?: boolean;
+  readonly onHit?: (hitObject: THREE.Object3D, damage: number) => void;
+  readonly onTargetHit?: () => void;
+}
+
+interface WeaponAudioSpatialOutput {
+  readonly destination: GainNode;
+  readonly cleanup: () => void;
 }
 
 const getWeaponAccent = (weapon: WeaponId): string =>
@@ -4050,6 +4157,23 @@ const WEAPON_SHOT_SOUND_MASTER_GAIN = 0.08;
 const WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ = 3200;
 const WEAPON_SHOT_SOUND_CRACK_FILTER_Q = 0.7;
 const WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ = 190;
+const WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND = 343;
+const WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS = 6;
+const WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS = 0.2;
+const WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS = 0.028;
+const WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS = 0.1;
+const WEAPON_BULLET_WHIZZ_PAN_SCALE = 0.95;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ = 5000;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ = 2200;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ = 2500;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ = 700;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ = 2000;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ = 6000;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_Q = 2;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_Q = 10;
+const WEAPON_BULLET_WHIZZ_NOISE_MIX = 0.8;
+const WEAPON_BULLET_WHIZZ_WHISTLE_MIX = 0.2;
+const WEAPON_BULLET_WHIZZ_VOLUME_SCALE = 1.1;
 
 const createWeaponShotSaturationCurve = (): Float32Array => {
   const curve = new Float32Array(256);
@@ -4489,6 +4613,7 @@ const createWeaponRuntime = (
   pickups: readonly WeaponPickupSpawn[],
   onStateChange?: (state: WeaponStateSnapshot) => void,
   onWeaponShot?: (damage: number, projectileCount: number) => void,
+  onWeaponHit?: (hitObject: THREE.Object3D, damage: number) => void,
   onWeaponSwitch?: (hasOutgoingWeapon: boolean) => void,
 ): WeaponRuntime => {
   const pickupRoot = new THREE.Group();
@@ -4642,6 +4767,14 @@ const createWeaponRuntime = (
   const pelletDirection = new THREE.Vector3();
   const effectEnd = new THREE.Vector3();
   const effectStart = new THREE.Vector3();
+  const passByDirection = new THREE.Vector3();
+  const passByToListener = new THREE.Vector3();
+  const passByClosestPoint = new THREE.Vector3();
+  const passByRightAxis = new THREE.Vector3();
+  const audioListenerPosition = new THREE.Vector3();
+  const audioListenerForward = new THREE.Vector3();
+  const audioListenerUp = new THREE.Vector3();
+  const audioListenerQuaternion = new THREE.Quaternion();
   const hitColor = new THREE.Color();
   const surfaceNormal = new THREE.Vector3();
   const bulletHoleForward = new THREE.Vector3(0, 0, 1);
@@ -4709,13 +4842,87 @@ const createWeaponRuntime = (
     return { context: shotAudioContext, output, noiseBuffer };
   };
 
-  const playWeaponShotSound = (damage: number, barrelLength: number): void => {
+  const updateShotAudioListener = (context: AudioContext): void => {
+    camera.getWorldPosition(audioListenerPosition);
+    camera.getWorldDirection(audioListenerForward);
+    camera.getWorldQuaternion(audioListenerQuaternion);
+    audioListenerUp.set(0, 1, 0).applyQuaternion(audioListenerQuaternion).normalize();
+    const listener = context.listener;
+    const when = context.currentTime;
+    try {
+      listener.positionX.setValueAtTime(audioListenerPosition.x, when);
+      listener.positionY.setValueAtTime(audioListenerPosition.y, when);
+      listener.positionZ.setValueAtTime(audioListenerPosition.z, when);
+      listener.forwardX.setValueAtTime(audioListenerForward.x, when);
+      listener.forwardY.setValueAtTime(audioListenerForward.y, when);
+      listener.forwardZ.setValueAtTime(audioListenerForward.z, when);
+      listener.upX.setValueAtTime(audioListenerUp.x, when);
+      listener.upY.setValueAtTime(audioListenerUp.y, when);
+      listener.upZ.setValueAtTime(audioListenerUp.z, when);
+    } catch {
+      // Unsupported listener positioning should not block visual firing. The
+      // shared proximity gain remains active even without HRTF placement.
+    }
+  };
+
+  const createWeaponAudioSpatialOutput = (
+    audio: { readonly context: AudioContext; readonly output: GainNode },
+    sourcePosition: THREE.Vector3,
+    when: number,
+  ): WeaponAudioSpatialOutput => {
+    updateShotAudioListener(audio.context);
+    const proximity = resolveWeaponAudioProximity(sourcePosition.distanceTo(audioListenerPosition));
+    const proximityGain = audio.context.createGain();
+    proximityGain.gain.setValueAtTime(proximity, when);
+    let panner: PannerNode | null = null;
+    try {
+      panner = audio.context.createPanner();
+      panner.panningModel = "HRTF";
+      panner.distanceModel = "inverse";
+      panner.refDistance = WEAPON_AUDIO_REFERENCE_DISTANCE_METERS;
+      panner.maxDistance = WEAPON_AUDIO_MAX_DISTANCE_METERS;
+      panner.rolloffFactor = WEAPON_AUDIO_ROLLOFF_FACTOR;
+      panner.positionX.setValueAtTime(sourcePosition.x, when);
+      panner.positionY.setValueAtTime(sourcePosition.y, when);
+      panner.positionZ.setValueAtTime(sourcePosition.z, when);
+      proximityGain.connect(panner);
+      panner.connect(audio.output);
+    } catch {
+      panner?.disconnect();
+      // The gain still applies the bounded proximity envelope when a browser
+      // lacks a usable PannerNode implementation.
+      proximityGain.connect(audio.output);
+      panner = null;
+    }
+    let cleaned = false;
+    return {
+      destination: proximityGain,
+      cleanup: (): void => {
+        if (cleaned) {
+          return;
+        }
+        cleaned = true;
+        proximityGain.disconnect();
+        panner?.disconnect();
+      },
+    };
+  };
+
+  const playWeaponShotSound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    sourcePosition: THREE.Vector3,
+  ): void => {
     const audio = ensureShotAudio();
     if (audio === null) {
       return;
     }
-    const profile = resolveGunAudioProfile({ damage, barrelLength });
     const now = audio.context.currentTime;
+    updateShotAudioListener(audio.context);
+    const muzzlePropagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const startAt = now + Math.max(0, muzzlePropagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, startAt);
     const scheduleNoiseLayer = (options: {
       readonly durationSeconds: number;
       readonly gain: number;
@@ -4734,12 +4941,12 @@ const createWeaponRuntime = (
         filter = audio.context.createBiquadFilter();
         envelope = audio.context.createGain();
         source.buffer = audio.noiseBuffer;
-        source.playbackRate.setValueAtTime(options.playbackRate, now);
+        source.playbackRate.setValueAtTime(options.playbackRate, startAt);
         filter.type = options.filterType;
-        filter.frequency.setValueAtTime(options.filterFrequencyHz, now);
-        filter.Q.setValueAtTime(options.filterQ, now);
-        envelope.gain.setValueAtTime(Math.max(0.0001, options.gain), now);
-        envelope.gain.exponentialRampToValueAtTime(0.0001, now + options.durationSeconds);
+        filter.frequency.setValueAtTime(options.filterFrequencyHz, startAt);
+        filter.Q.setValueAtTime(options.filterQ, startAt);
+        envelope.gain.setValueAtTime(Math.max(0.0001, options.gain), startAt);
+        envelope.gain.exponentialRampToValueAtTime(0.0001, startAt + options.durationSeconds);
         source.connect(filter);
         filter.connect(envelope);
         envelope.connect(options.destination);
@@ -4749,8 +4956,8 @@ const createWeaponRuntime = (
           envelope?.disconnect();
           options.onEnded?.();
         };
-        source.start(now);
-        source.stop(now + options.durationSeconds);
+        source.start(startAt);
+        source.stop(startAt + options.durationSeconds);
       } catch {
         source?.disconnect();
         filter?.disconnect();
@@ -4759,16 +4966,16 @@ const createWeaponRuntime = (
     };
 
     const muzzleCompressor = audio.context.createDynamicsCompressor();
-    muzzleCompressor.threshold.setValueAtTime(-24, now);
-    muzzleCompressor.knee.setValueAtTime(12, now);
-    muzzleCompressor.ratio.setValueAtTime(2, now);
-    muzzleCompressor.attack.setValueAtTime(0.001, now);
-    muzzleCompressor.release.setValueAtTime(0.05, now);
+    muzzleCompressor.threshold.setValueAtTime(-24, startAt);
+    muzzleCompressor.knee.setValueAtTime(12, startAt);
+    muzzleCompressor.ratio.setValueAtTime(2, startAt);
+    muzzleCompressor.attack.setValueAtTime(0.001, startAt);
+    muzzleCompressor.release.setValueAtTime(0.05, startAt);
     const muzzleSaturation = audio.context.createWaveShaper();
     muzzleSaturation.curve = WEAPON_SHOT_SATURATION_CURVE as unknown as Float32Array<ArrayBuffer>;
     muzzleSaturation.oversample = "2x";
     muzzleCompressor.connect(muzzleSaturation);
-    muzzleSaturation.connect(audio.output);
+    muzzleSaturation.connect(spatialOutput.destination);
     scheduleNoiseLayer({
       durationSeconds: WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS,
       gain: profile.damageVolume,
@@ -4790,27 +4997,27 @@ const createWeaponRuntime = (
       filterType: "highpass",
       filterFrequencyHz: WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ,
       filterQ: WEAPON_SHOT_SOUND_CRACK_FILTER_Q,
-      destination: audio.output,
+      destination: spatialOutput.destination,
     });
 
     try {
       const clickOscillator = audio.context.createOscillator();
       const clickEnvelope = audio.context.createGain();
       clickOscillator.type = "square";
-      clickOscillator.frequency.setValueAtTime(WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ, now);
-      clickEnvelope.gain.setValueAtTime(0.1, now);
+      clickOscillator.frequency.setValueAtTime(WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ, startAt);
+      clickEnvelope.gain.setValueAtTime(0.1, startAt);
       clickEnvelope.gain.exponentialRampToValueAtTime(
         0.0001,
-        now + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS,
+        startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS,
       );
       clickOscillator.connect(clickEnvelope);
-      clickEnvelope.connect(audio.output);
+      clickEnvelope.connect(spatialOutput.destination);
       clickOscillator.onended = (): void => {
         clickOscillator.disconnect();
         clickEnvelope.disconnect();
       };
-      clickOscillator.start(now);
-      clickOscillator.stop(now + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS);
+      clickOscillator.start(startAt);
+      clickOscillator.stop(startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS);
     } catch {
       // Web Audio is optional; visual firing must continue if a node fails.
     }
@@ -4822,8 +5029,198 @@ const createWeaponRuntime = (
       filterType: "lowpass",
       filterFrequencyHz: profile.tailCutoffFrequencyHz,
       filterQ: 0.8,
-      destination: audio.output,
+      destination: spatialOutput.destination,
+      onEnded: spatialOutput.cleanup,
     });
+  };
+
+  const playWeaponPassBySound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    distance: number,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    updateShotAudioListener(audio.context);
+    if (distance <= 0 || !Number.isFinite(distance)) {
+      return;
+    }
+    const safeDirection = passByDirection.copy(direction).normalize();
+    if (safeDirection.lengthSq() <= 0) {
+      return;
+    }
+    passByToListener.copy(audioListenerPosition).sub(origin);
+    const projection = passByToListener.dot(safeDirection);
+    if (projection < WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS) {
+      return;
+    }
+    const clampedProjection = Math.max(0, Math.min(distance, projection));
+    passByClosestPoint.copy(origin).addScaledVector(safeDirection, clampedProjection);
+    const closestDistance = passByClosestPoint.distanceTo(audioListenerPosition);
+    if (
+      !Number.isFinite(closestDistance) ||
+      closestDistance > WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS
+    ) {
+      return;
+    }
+    const nearDistanceSpan = Math.max(
+      0.05,
+      WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS - closestDistance,
+    );
+    const startProjection = Math.max(0, clampedProjection - nearDistanceSpan);
+    const endProjection = Math.min(distance, clampedProjection + nearDistanceSpan);
+    passByToListener.copy(origin).addScaledVector(safeDirection, startProjection);
+    const startSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    passByToListener.copy(origin).addScaledVector(safeDirection, endProjection);
+    const endSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    const now = audio.context.currentTime;
+    const start =
+      now +
+      startProjection / profile.bulletSpeedMetersPerSecond +
+      startSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const end =
+      now +
+      endProjection / profile.bulletSpeedMetersPerSecond +
+      endSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const duration = Math.max(
+      WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS,
+      Math.min(WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS, end - start),
+    );
+    const travelRatio = THREE.MathUtils.clamp(
+      1 - closestDistance / WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS,
+      0,
+      1,
+    );
+    const damageRatio = THREE.MathUtils.clamp((profile.damageVolume - 0.8) / 0.5, 0, 1);
+    const lightDamageStartPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ;
+    const heavyDamageStartPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ;
+    const lightDamageEndPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ;
+    const heavyDamageEndPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ;
+    const baseStartPitch = THREE.MathUtils.lerp(
+      lightDamageStartPitch,
+      heavyDamageStartPitch,
+      damageRatio,
+    );
+    const baseEndPitch = THREE.MathUtils.lerp(
+      lightDamageEndPitch,
+      heavyDamageEndPitch,
+      damageRatio,
+    );
+    const sweepDepth = 0.35 + travelRatio * 0.65;
+    const startPitch = baseStartPitch;
+    const endPitch = THREE.MathUtils.lerp(baseStartPitch, baseEndPitch, sweepDepth);
+    const noiseStartFrequency = THREE.MathUtils.clamp(
+      startPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseEndFrequency = THREE.MathUtils.clamp(
+      endPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ * 0.75,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseStartQ = THREE.MathUtils.lerp(
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_Q,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_Q,
+      travelRatio,
+    );
+    const noiseEndQ = Math.max(1.4, noiseStartQ * 0.72);
+    const peakGain = Math.max(
+      0.0001,
+      profile.damageVolume * WEAPON_BULLET_WHIZZ_VOLUME_SCALE * (0.08 + travelRatio * 0.92),
+    );
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, passByClosestPoint, start);
+
+    let turbulenceSource: AudioBufferSourceNode | null = null;
+    let turbulenceFilter: BiquadFilterNode | null = null;
+    let turbulenceGain: GainNode | null = null;
+    let whistleOscillator: OscillatorNode | null = null;
+    let whistleGain: GainNode | null = null;
+    let passByPan: StereoPannerNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      turbulenceSource?.disconnect();
+      turbulenceFilter?.disconnect();
+      turbulenceGain?.disconnect();
+      whistleOscillator?.disconnect();
+      whistleGain?.disconnect();
+      passByPan?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 2) {
+        cleanup();
+      }
+    };
+    try {
+      turbulenceSource = audio.context.createBufferSource();
+      turbulenceFilter = audio.context.createBiquadFilter();
+      turbulenceGain = audio.context.createGain();
+      whistleOscillator = audio.context.createOscillator();
+      whistleGain = audio.context.createGain();
+      turbulenceSource.buffer = audio.noiseBuffer;
+      turbulenceFilter.type = "bandpass";
+      turbulenceFilter.frequency.setValueAtTime(noiseStartFrequency, start);
+      turbulenceFilter.frequency.exponentialRampToValueAtTime(noiseEndFrequency, start + duration);
+      turbulenceFilter.Q.setValueAtTime(noiseStartQ, start);
+      turbulenceFilter.Q.exponentialRampToValueAtTime(noiseEndQ, start + duration);
+      whistleOscillator.type = "sine";
+      whistleOscillator.frequency.setValueAtTime(startPitch, start);
+      whistleOscillator.frequency.exponentialRampToValueAtTime(endPitch, start + duration);
+      const peakTime = start + Math.min(0.005, duration * 0.2);
+      turbulenceGain.gain.setValueAtTime(0.0001, start);
+      turbulenceGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_NOISE_MIX,
+        peakTime,
+      );
+      turbulenceGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      whistleGain.gain.setValueAtTime(0.0001, start);
+      whistleGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_WHISTLE_MIX,
+        peakTime,
+      );
+      whistleGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      turbulenceSource.connect(turbulenceFilter);
+      turbulenceFilter.connect(turbulenceGain);
+      whistleOscillator.connect(whistleGain);
+      passByToListener.copy(audioListenerPosition).sub(passByClosestPoint);
+      if (audio.context.createStereoPanner === undefined) {
+        turbulenceGain.connect(spatialOutput.destination);
+        whistleGain.connect(spatialOutput.destination);
+      } else {
+        passByPan = audio.context.createStereoPanner();
+        passByRightAxis.set(1, 0, 0).applyQuaternion(audioListenerQuaternion);
+        const rawPan = passByToListener.normalize().dot(passByRightAxis);
+        passByPan.pan.setValueAtTime(
+          THREE.MathUtils.clamp(rawPan * WEAPON_BULLET_WHIZZ_PAN_SCALE, -1, 1),
+          start,
+        );
+        turbulenceGain.connect(passByPan);
+        whistleGain.connect(passByPan);
+        passByPan.connect(spatialOutput.destination);
+      }
+      turbulenceSource.onended = (): void => {
+        finishLayer();
+      };
+      whistleOscillator.onended = (): void => {
+        finishLayer();
+      };
+      turbulenceSource.start(start);
+      turbulenceSource.stop(start + duration);
+      whistleOscillator.start(start);
+      whistleOscillator.stop(start + duration);
+    } catch {
+      cleanup();
+    }
   };
 
   const isReloadPresentationActive = (): boolean =>
@@ -5484,11 +5881,13 @@ const createWeaponRuntime = (
   const findWeaponHit = (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
+    maxDistance?: number,
   ): THREE.Intersection | undefined => {
     shotRaycaster.set(origin, direction);
     // Shots are hitscan and continue until the first render surface. Keep the
     // raycaster unbounded instead of applying a weapon-specific distance cap.
-    shotRaycaster.far = Number.POSITIVE_INFINITY;
+    shotRaycaster.far =
+      maxDistance === undefined || maxDistance < 0 ? Number.POSITIVE_INFINITY : maxDistance;
     try {
       // Chunks and other streamed render roots can be added after weapon
       // construction. Resolve the current scene children for every shot so
@@ -5509,6 +5908,108 @@ const createWeaponRuntime = (
       return undefined;
     }
   };
+  const fireFrom = (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options: WeaponFireFromOptions = {},
+  ): void => {
+    const definition = WEAPON_DEFINITIONS[weapon];
+    const spreadRadians = options.spreadRadians ?? resolveWeaponSpreadRadians(definition);
+    const random = options.random ?? shotRandom;
+    const maxDistance = options.maxDistance;
+    const baseDirection = direction.clone().normalize();
+    if (baseDirection.lengthSq() <= 0) {
+      return;
+    }
+    const useCameraMuzzle = options.showCameraMuzzle ?? false;
+    const useWorldEffects = options.showWorldEffects ?? true;
+    const shouldPlayAudio = options.playAudio === true;
+    const shouldPlayPassByAudio = options.playPassByAudio !== false;
+    const shouldTrackShotHits = options.trackShotHits === true;
+    const onHit = options.onHit ?? null;
+    const onTargetHit = options.onTargetHit ?? null;
+    const applyTargetHit = onTargetHit !== null;
+    const weaponModel = viewModels.get(weapon);
+    const viewModel = useCameraMuzzle ? weaponModel : undefined;
+    const shotProfile = resolveGunAudioProfile({
+      damage: definition.damage,
+      barrelLength: weaponModel?.hotBarrelLength ?? GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+    });
+    if (useCameraMuzzle) {
+      scene.updateMatrixWorld(true);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      updateWeaponSmokeWorldFrame(viewModel, 0);
+    }
+    if (shouldPlayAudio) {
+      const soundOrigin = viewModel?.muzzleWorldPosition ?? origin;
+      playWeaponShotSound(shotProfile, soundOrigin);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      viewModel.muzzleFlash.visible = true;
+      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
+      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
+      const puffCount = Math.min(
+        WEAPON_BARREL_SMOKE_POOL_SIZE,
+        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
+      );
+      for (let puff = 0; puff < puffCount; puff += 1) {
+        spawnWeaponSmoke(viewModel, false, smokePower);
+      }
+    }
+    let targetWasHit = false;
+    for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
+      pelletDirection.copy(baseDirection);
+      if (spreadRadians > 0) {
+        const angle = random.nextFloat() * Math.PI * 2;
+        const radius = Math.sqrt(random.nextFloat()) * spreadRadians;
+        rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
+        if (rightVector.lengthSq() < 0.0001) {
+          rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
+        }
+        rightVector.normalize();
+        upVector.crossVectors(rightVector, baseDirection).normalize();
+        pelletDirection
+          .addScaledVector(rightVector, Math.cos(angle) * radius)
+          .addScaledVector(upVector, Math.sin(angle) * radius)
+          .normalize();
+      }
+      const hit = findWeaponHit(origin, pelletDirection, maxDistance);
+      const distance = hit?.distance ?? maxDistance ?? camera.far;
+      // Audio follows the intended projectile path rather than stopping at an
+      // intervening render surface. Otherwise a table or wall can swallow an
+      // incoming near-miss before the listener ever hears the whizz.
+      const passByDistance = maxDistance ?? distance;
+      if (useWorldEffects) {
+        addTracer(origin, pelletDirection, distance, definition.color);
+      }
+      if (shouldPlayPassByAudio) {
+        playWeaponPassBySound(shotProfile, origin, pelletDirection, passByDistance);
+      }
+      if (hit !== undefined) {
+        if (shouldTrackShotHits) {
+          shotsHit += 1;
+        }
+        addWeaponHitHeat(definition.id, definition.damage);
+        onHit?.(hit.object, definition.damage);
+        if (useWorldEffects) {
+          addImpact(hit.point, definition.color);
+          addBulletHole(hit, pelletDirection, definition.color);
+        }
+        hitColor.set(definition.color);
+        hit.object.userData.lastWeaponHit = {
+          weapon: definition.id,
+          damage: definition.damage,
+          color: hitColor.getHexString(),
+        };
+      } else if (applyTargetHit && maxDistance !== undefined && !targetWasHit) {
+        targetWasHit = true;
+        onTargetHit();
+      }
+    }
+  };
+
   const tryFire = (canStartBurst: boolean): void => {
     if (
       !controlsActive ||
@@ -5556,65 +6057,17 @@ const createWeaponRuntime = (
     recoilAmount = Math.min(1, recoilAmount + resolveWeaponRecoilAmount(definition.damage));
     onWeaponShot?.(definition.damage, definition.pellets);
     shotsFired += 1;
-    scene.updateMatrixWorld(true);
     const baseDirection = latestAimRay.direction.clone().normalize();
-    const viewModel = viewModels.get(activeWeapon);
-    playWeaponShotSound(
-      definition.damage,
-      viewModel?.hotBarrelLength ?? GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
-    );
-    if (viewModel !== undefined) {
-      updateWeaponSmokeWorldFrame(viewModel, 0);
-      viewModel.muzzleFlash.visible = true;
-      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
-      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
-      const puffCount = Math.min(
-        WEAPON_BARREL_SMOKE_POOL_SIZE,
-        // Each puff is now five times larger, so one machine-gun sprite per
-        // shot is enough while shotgun and sniper damage still add puffs.
-        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
-      );
-      for (let puff = 0; puff < puffCount; puff += 1) {
-        spawnWeaponSmoke(viewModel, false, smokePower);
-      }
-    }
-    const spreadRadians = resolveWeaponSpreadRadians(definition);
-    if (spreadRadians > 0) {
-      rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
-      if (rightVector.lengthSq() < 0.0001) {
-        rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
-      }
-      rightVector.normalize();
-      upVector.crossVectors(rightVector, baseDirection).normalize();
-    }
-    for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
-      pelletDirection.copy(baseDirection);
-      if (spreadRadians > 0) {
-        const angle = shotRandom.nextFloat() * Math.PI * 2;
-        const radius = Math.sqrt(shotRandom.nextFloat()) * spreadRadians;
-        pelletDirection
-          .addScaledVector(rightVector, Math.cos(angle) * radius)
-          .addScaledVector(upVector, Math.sin(angle) * radius)
-          .normalize();
-      }
-      const hit = findWeaponHit(latestAimRay.origin, pelletDirection);
-      // A miss has no surface to terminate the tracer. Use the camera's far
-      // plane only for finite effect geometry; it is not a gameplay range.
-      const distance = hit?.distance ?? camera.far;
-      addTracer(latestAimRay.origin, pelletDirection, distance, definition.color);
-      if (hit !== undefined) {
-        shotsHit += 1;
-        addWeaponHitHeat(definition.id, definition.damage);
-        addImpact(hit.point, definition.color);
-        addBulletHole(hit, pelletDirection, definition.color);
-        hitColor.set(definition.color);
-        hit.object.userData.lastWeaponHit = {
-          weapon: definition.id,
-          damage: definition.damage,
-          color: hitColor.getHexString(),
-        };
-      }
-    }
+    const fireOptions: WeaponFireFromOptions = {
+      random: shotRandom,
+      spreadRadians: resolveWeaponSpreadRadians(definition),
+      showCameraMuzzle: true,
+      playAudio: true,
+      showWorldEffects: true,
+      trackShotHits: true,
+      ...(onWeaponHit === undefined ? {} : { onHit: onWeaponHit }),
+    };
+    fireFrom(latestAimRay.origin, baseDirection, activeWeapon, fireOptions);
     emitState(true);
   };
   const update = (
@@ -5629,6 +6082,11 @@ const createWeaponRuntime = (
     controlsActive = active;
     viewActive = visibleInView;
     latestAimRay = aimRay;
+    if (shotAudioContext !== null && shotAudioContext.state !== "closed") {
+      // Keep active tails and pass-by voices attached to the moving listener,
+      // not just to the camera pose from the frame that spawned them.
+      updateShotAudioListener(shotAudioContext);
+    }
     // Traversal state arrives from the shared camera damper before firing or
     // reload input is processed for this frame.
     viewmodelTransitionActive = viewmodelTransition.phase !== "idle";
@@ -5885,6 +6343,9 @@ const createWeaponRuntime = (
     update,
     setFireHeld,
     fire: () => tryFire(true),
+    fireFrom: (origin, direction, weapon, options) => {
+      fireFrom(origin, direction, weapon, options);
+    },
     reload,
     isReloading: isReloadPresentationActive,
     interact,
@@ -7392,7 +7853,11 @@ const createGeneratedRoom = (
 };
 
 interface ExplorationWorld {
-  readonly update: (position: THREE.Vector3) => void;
+  readonly update: (
+    position: THREE.Vector3,
+    velocity?: PhysicsVector,
+    camera?: THREE.Camera,
+  ) => void;
   readonly updateKnockables: (
     deltaSeconds: number,
     playerPosition: THREE.Vector3,
@@ -7410,11 +7875,20 @@ interface ExplorationWorld {
   readonly getLoadedChunkCount: () => number;
   readonly getPhysicsBoxes: () => readonly PhysicsBox[];
   readonly getPhysicsVersion: () => number;
+  readonly setDebugVisible: (visible: boolean) => void;
+  readonly setDebugLayerVisible: (layer: WorldDebugLayer, visible: boolean) => void;
+  readonly setStreamingFrozen: (frozen: boolean) => void;
+  readonly teleportToChunk: (coord: { readonly x: number; readonly z: number }) => PhysicsVector;
+  readonly getDebugSnapshot: () => ReturnType<WorldDebugState["getSnapshot"]>;
+  readonly exportPlanJson: () => string;
   readonly dispose: () => void;
 }
 
 interface ExplorationChunk {
   readonly root: THREE.Group;
+  readonly lod: Exclude<ChunkLod, "unloaded">;
+  readonly geometryTelemetry: ChunkGeometry;
+  readonly cullBounds: THREE.Box3;
   readonly physicsBoxes: readonly PhysicsBox[];
   readonly knockableProps: readonly ExplorationKnockable[];
 }
@@ -7445,14 +7919,6 @@ interface ExplorationBuildingSpec {
   readonly width: number;
   readonly height: number;
   readonly depth: number;
-  readonly rotation: number;
-}
-
-interface ExplorationWindowSpec {
-  readonly x: number;
-  readonly y: number;
-  readonly z: number;
-  readonly width: number;
   readonly rotation: number;
 }
 
@@ -7517,30 +7983,508 @@ export const createExplorationWorld = (
   onAreaChange?: (area: string) => void,
 ): ExplorationWorld => {
   const normalizedSeed = normalizeVisualRoomSeed(roomSeed);
+  const generationStartedAt = typeof performance === "undefined" ? Date.now() : performance.now();
+  const cityPlan: WorldPlan = generateWorldPlan({
+    seed: normalizedSeed,
+    reservedRects: PLAY_AREA_BOUNDS.map(({ minX, maxX, minZ, maxZ }) => ({
+      minX,
+      maxX,
+      minZ,
+      maxZ,
+    })),
+  });
+  const generationTimeMs =
+    (typeof performance === "undefined" ? Date.now() : performance.now()) - generationStartedAt;
+  const worldDebugState = createWorldDebugState(cityPlan, generationTimeMs);
   const root = new THREE.Group();
   root.name = "ExplorationWorldRoot";
-  root.userData = { roomSeed: normalizedSeed, streaming: true };
+  root.userData = {
+    roomSeed: normalizedSeed,
+    streaming: true,
+    generatorVersion: cityPlan.config.generatorVersion,
+    planHash: cityPlan.planHash,
+    chunkSizeM: cityPlan.config.chunkSizeM,
+    chunkCount: cityPlan.chunksPerAxis ** 2,
+    generationTimeMs,
+    combatDistrict: cityPlan.combatDistrict.bounds,
+  };
   scene.add(root);
 
-  const groundGeometry = new THREE.BoxGeometry(
-    EXPLORATION_CHUNK_SIZE - 0.08,
-    0.1,
-    EXPLORATION_CHUNK_SIZE - 0.08,
+  const worldPlanDebugRoot = new THREE.Group();
+  worldPlanDebugRoot.name = "WorldPlanDebugOverlay";
+  worldPlanDebugRoot.visible = false;
+  worldPlanDebugRoot.userData = {
+    planHash: cityPlan.planHash,
+    generatorVersion: cityPlan.generatorVersion,
+    chunkCount: cityPlan.chunksPerAxis ** 2,
+    combatValidation: cityPlan.combatDistrict.validation,
+  };
+  const debugLayerObjects = new Map<WorldDebugLayer, THREE.Object3D>();
+  const worldPlanDebugMaterials = {
+    chunk: new THREE.LineBasicMaterial({ color: 0x4e6872, transparent: true, opacity: 0.42 }),
+    planning: new THREE.LineBasicMaterial({ color: 0x71858b, transparent: true, opacity: 0.16 }),
+    roads: new THREE.LineBasicMaterial({ color: 0xd8e3e0, transparent: true, opacity: 0.75 }),
+    buildings: new THREE.LineBasicMaterial({ color: 0x8f9aa1, transparent: true, opacity: 0.5 }),
+    combat: new THREE.LineBasicMaterial({ color: 0xc58bff, transparent: true, opacity: 0.95 }),
+    walkableRoutes: new THREE.LineBasicMaterial({
+      color: 0x74d6a0,
+      transparent: true,
+      opacity: 0.88,
+    }),
+    routeWidth: new THREE.LineBasicMaterial({ color: 0x9d78d6, transparent: true, opacity: 0.62 }),
+    attackerRegion: new THREE.LineBasicMaterial({
+      color: 0x4bb3fd,
+      transparent: true,
+      opacity: 0.86,
+    }),
+    defenderRegion: new THREE.LineBasicMaterial({
+      color: 0xf26b6b,
+      transparent: true,
+      opacity: 0.86,
+    }),
+    objectiveA: new THREE.MeshBasicMaterial({ color: 0xf1b84b, transparent: true, opacity: 0.95 }),
+    objectiveB: new THREE.MeshBasicMaterial({ color: 0x55c7d9, transparent: true, opacity: 0.95 }),
+    chokes: new THREE.MeshBasicMaterial({ color: 0xc58bff, transparent: true, opacity: 0.95 }),
+    visibility: new THREE.LineBasicMaterial({ color: 0xf1b84b, transparent: true, opacity: 0.95 }),
+    cover: new THREE.LineBasicMaterial({ color: 0x74d6a0, transparent: true, opacity: 0.7 }),
+    walkable: new THREE.PointsMaterial({
+      color: 0x74d6a0,
+      size: 0.7,
+      transparent: true,
+      opacity: 0.42,
+      sizeAttenuation: true,
+    }),
+    failure: new THREE.MeshBasicMaterial({ color: 0xff4f5e, transparent: true, opacity: 0.92 }),
+  };
+  const lineSegments = (
+    name: string,
+    vertices: readonly number[],
+    material: THREE.LineBasicMaterial,
+  ): THREE.LineSegments | null => {
+    if (vertices.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+    const lines = new THREE.LineSegments(geometry, material);
+    lines.name = name;
+    lines.userData.debugLayer = name;
+    return lines;
+  };
+  const boxOutlineVertices = (bounds: Bounds2, y: number): number[] => [
+    bounds.minX,
+    y,
+    bounds.minZ,
+    bounds.maxX,
+    y,
+    bounds.minZ,
+    bounds.maxX,
+    y,
+    bounds.minZ,
+    bounds.maxX,
+    y,
+    bounds.maxZ,
+    bounds.maxX,
+    y,
+    bounds.maxZ,
+    bounds.minX,
+    y,
+    bounds.maxZ,
+    bounds.minX,
+    y,
+    bounds.maxZ,
+    bounds.minX,
+    y,
+    bounds.minZ,
+  ];
+  const chunkVertices: number[] = [];
+  const planningVertices: number[] = [];
+  const worldBounds = cityPlan.bounds;
+  for (let index = 0; index <= cityPlan.chunksPerAxis; index += 1) {
+    const x = worldBounds.minX + index * cityPlan.config.chunkSizeM;
+    chunkVertices.push(x, 0.16, worldBounds.minZ, x, 0.16, worldBounds.maxZ);
+    const z = worldBounds.minZ + index * cityPlan.config.chunkSizeM;
+    chunkVertices.push(worldBounds.minX, 0.16, z, worldBounds.maxX, 0.16, z);
+  }
+  const planningCellCountX = Math.round(
+    cityPlan.config.worldSizeM / cityPlan.config.layoutCellSizeM,
   );
-  const pathGeometry = new THREE.BoxGeometry(EXPLORATION_CHUNK_SIZE * 0.84, 0.026, 0.9);
+  for (let index = 0; index <= planningCellCountX; index += 1) {
+    const x = worldBounds.minX + index * cityPlan.config.layoutCellSizeM;
+    planningVertices.push(x, 0.17, worldBounds.minZ, x, 0.17, worldBounds.maxZ);
+    const z = worldBounds.minZ + index * cityPlan.config.layoutCellSizeM;
+    planningVertices.push(worldBounds.minX, 0.17, z, worldBounds.maxX, 0.17, z);
+  }
+  const roadVertices = cityPlan.roads.flatMap((road) => [
+    road.start.x,
+    0.18,
+    road.start.z,
+    road.end.x,
+    0.18,
+    road.end.z,
+  ]);
+  const buildingVertices = cityPlan.buildingParts.flatMap((part) =>
+    boxOutlineVertices(part.bounds, 0.19),
+  );
+  const combatVertices = cityPlan.combatDistrict.edges.flatMap((edge) =>
+    edge.segments.flatMap((segment) => [
+      segment.start.x,
+      0.21,
+      segment.start.z,
+      segment.end.x,
+      0.21,
+      segment.end.z,
+    ]),
+  );
+  const walkableRouteVertices = cityPlan.combatDistrict.edges.flatMap((edge) =>
+    edge.segments.flatMap((segment) => [
+      segment.start.x,
+      0.205,
+      segment.start.z,
+      segment.end.x,
+      0.205,
+      segment.end.z,
+    ]),
+  );
+  const attackerRegionVertices = cityPlan.combatDistrict.edges
+    .filter((edge) => edge.routeRole !== "defender")
+    .flatMap((edge) =>
+      edge.segments.flatMap((segment) => [
+        segment.start.x,
+        0.206,
+        segment.start.z,
+        segment.end.x,
+        0.206,
+        segment.end.z,
+      ]),
+    );
+  const defenderRegionVertices = cityPlan.combatDistrict.edges
+    .filter((edge) => edge.routeRole === "defender")
+    .flatMap((edge) =>
+      edge.segments.flatMap((segment) => [
+        segment.start.x,
+        0.207,
+        segment.start.z,
+        segment.end.x,
+        0.207,
+        segment.end.z,
+      ]),
+    );
+  const routeWidthVertices = cityPlan.combatDistrict.edges.flatMap((edge) =>
+    edge.segments.flatMap((segment) => {
+      const halfWidth = edge.widthM / 2;
+      const horizontal = Math.abs(segment.start.z - segment.end.z) < 1e-6;
+      const bounds = horizontal
+        ? {
+            minX: Math.min(segment.start.x, segment.end.x),
+            maxX: Math.max(segment.start.x, segment.end.x),
+            minZ: segment.start.z - halfWidth,
+            maxZ: segment.start.z + halfWidth,
+          }
+        : {
+            minX: segment.start.x - halfWidth,
+            maxX: segment.start.x + halfWidth,
+            minZ: Math.min(segment.start.z, segment.end.z),
+            maxZ: Math.max(segment.start.z, segment.end.z),
+          };
+      return [
+        bounds.minX,
+        0.215,
+        bounds.minZ,
+        bounds.maxX,
+        0.215,
+        bounds.minZ,
+        bounds.maxX,
+        0.215,
+        bounds.minZ,
+        bounds.maxX,
+        0.215,
+        bounds.maxZ,
+        bounds.maxX,
+        0.215,
+        bounds.maxZ,
+        bounds.minX,
+        0.215,
+        bounds.maxZ,
+        bounds.minX,
+        0.215,
+        bounds.maxZ,
+        bounds.minX,
+        0.215,
+        bounds.minZ,
+      ];
+    }),
+  );
+  const visibilityVertices: number[] = [];
+  const combatNodeById = new Map(cityPlan.combatDistrict.nodes.map((node) => [node.id, node]));
+  for (const sightline of cityPlan.combatDistrict.validation.visibility.longSightlines) {
+    const source = combatNodeById.get(sightline.sourceId);
+    const target = combatNodeById.get(sightline.targetId);
+    if (source === undefined || target === undefined) continue;
+    visibilityVertices.push(
+      source.position.x,
+      0.22,
+      source.position.z,
+      target.position.x,
+      0.22,
+      target.position.z,
+    );
+  }
+  const chunkLines = lineSegments(
+    "WorldPlanChunkBoundaries",
+    chunkVertices,
+    worldPlanDebugMaterials.chunk,
+  );
+  const planningLines = lineSegments(
+    "WorldPlanPlanningGrid",
+    planningVertices,
+    worldPlanDebugMaterials.planning,
+  );
+  const roadLines = lineSegments("WorldPlanRoadGraph", roadVertices, worldPlanDebugMaterials.roads);
+  const buildingLines = lineSegments(
+    "WorldPlanBuildingMasses",
+    buildingVertices,
+    worldPlanDebugMaterials.buildings,
+  );
+  const combatLines = lineSegments(
+    "WorldPlanCombatGraph",
+    combatVertices,
+    worldPlanDebugMaterials.combat,
+  );
+  const walkableRouteLines = lineSegments(
+    "WorldPlanWalkableRoutes",
+    walkableRouteVertices,
+    worldPlanDebugMaterials.walkableRoutes,
+  );
+  const attackerRegionLines = lineSegments(
+    "WorldPlanAttackerRegion",
+    attackerRegionVertices,
+    worldPlanDebugMaterials.attackerRegion,
+  );
+  const defenderRegionLines = lineSegments(
+    "WorldPlanDefenderRegion",
+    defenderRegionVertices,
+    worldPlanDebugMaterials.defenderRegion,
+  );
+  const routeWidthLines = lineSegments(
+    "WorldPlanRouteWidths",
+    routeWidthVertices,
+    worldPlanDebugMaterials.routeWidth,
+  );
+  const visibilityLines = lineSegments(
+    "WorldPlanVisibilityLines",
+    visibilityVertices,
+    worldPlanDebugMaterials.visibility,
+  );
+  const coverVertices = cityPlan.combatDistrict.coverObjects.flatMap((cover) => [
+    cover.bounds.minX,
+    0.24,
+    cover.bounds.minZ,
+    cover.bounds.maxX,
+    0.24,
+    cover.bounds.minZ,
+    cover.bounds.maxX,
+    0.24,
+    cover.bounds.minZ,
+    cover.bounds.maxX,
+    0.24,
+    cover.bounds.maxZ,
+    cover.bounds.maxX,
+    0.24,
+    cover.bounds.maxZ,
+    cover.bounds.minX,
+    0.24,
+    cover.bounds.maxZ,
+    cover.bounds.minX,
+    0.24,
+    cover.bounds.maxZ,
+    cover.bounds.minX,
+    0.24,
+    cover.bounds.minZ,
+  ]);
+  const coverLines = lineSegments(
+    "WorldPlanCoverInfluence",
+    coverVertices,
+    worldPlanDebugMaterials.cover,
+  );
+  const walkablePositions: number[] = [];
+  for (
+    let z = cityPlan.combatDistrict.bounds.minZ + 5;
+    z < cityPlan.combatDistrict.bounds.maxZ;
+    z += 10
+  ) {
+    for (
+      let x = cityPlan.combatDistrict.bounds.minX + 5;
+      x < cityPlan.combatDistrict.bounds.maxX;
+      x += 10
+    ) {
+      const occupied = cityPlan.buildingParts.some(
+        (part) =>
+          x > part.bounds.minX &&
+          x < part.bounds.maxX &&
+          z > part.bounds.minZ &&
+          z < part.bounds.maxZ,
+      );
+      if (!occupied) walkablePositions.push(x, 0.23, z);
+    }
+  }
+  const walkableGeometry = new THREE.BufferGeometry();
+  walkableGeometry.setAttribute("position", new THREE.Float32BufferAttribute(walkablePositions, 3));
+  const walkablePoints = new THREE.Points(walkableGeometry, worldPlanDebugMaterials.walkable);
+  walkablePoints.name = "WorldPlanWalkableCells";
+  walkablePoints.userData.debugLayer = "walkable-cells";
+  const objectiveMarkerGeometry = new THREE.RingGeometry(2.2, 2.8, 24);
+  const chokeMarkerGeometry = new THREE.RingGeometry(1.25, 1.7, 16);
+  const objectiveMarkers = new THREE.Group();
+  objectiveMarkers.name = "WorldPlanObjectiveMarkers";
+  for (const node of cityPlan.combatDistrict.nodes) {
+    if (node.kind !== "objective-a" && node.kind !== "objective-b") continue;
+    const marker = new THREE.Mesh(
+      objectiveMarkerGeometry,
+      node.kind === "objective-a"
+        ? worldPlanDebugMaterials.objectiveA
+        : worldPlanDebugMaterials.objectiveB,
+    );
+    marker.name = `WorldPlanObjective:${node.id}`;
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.set(node.position.x, 0.27, node.position.z);
+    marker.userData = { debugLayer: "objective-markers", nodeId: node.id };
+    objectiveMarkers.add(marker);
+  }
+  const chokeMarkers = new THREE.Group();
+  chokeMarkers.name = "WorldPlanChokePoints";
+  for (const node of cityPlan.combatDistrict.nodes) {
+    if (node.kind !== "choke") continue;
+    const marker = new THREE.Mesh(chokeMarkerGeometry, worldPlanDebugMaterials.chokes);
+    marker.name = `WorldPlanChoke:${node.id}`;
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.set(node.position.x, 0.28, node.position.z);
+    marker.userData = { debugLayer: "choke-points", nodeId: node.id };
+    chokeMarkers.add(marker);
+  }
+  for (const lines of [
+    chunkLines,
+    planningLines,
+    roadLines,
+    buildingLines,
+    combatLines,
+    walkableRouteLines,
+    attackerRegionLines,
+    defenderRegionLines,
+    visibilityLines,
+  ]) {
+    if (lines !== null) worldPlanDebugRoot.add(lines);
+  }
+  if (chunkLines !== null) debugLayerObjects.set("chunk-boundaries", chunkLines);
+  if (planningLines !== null) debugLayerObjects.set("planning-grid", planningLines);
+  if (roadLines !== null) debugLayerObjects.set("road-graph", roadLines);
+  if (buildingLines !== null) {
+    buildingLines.visible = false;
+    debugLayerObjects.set("building-masses", buildingLines);
+  }
+  if (combatLines !== null) debugLayerObjects.set("combat-graph", combatLines);
+  if (walkableRouteLines !== null) debugLayerObjects.set("walkable-routes", walkableRouteLines);
+  if (attackerRegionLines !== null) debugLayerObjects.set("attacker-region", attackerRegionLines);
+  if (defenderRegionLines !== null) debugLayerObjects.set("defender-region", defenderRegionLines);
+  if (routeWidthLines !== null) {
+    worldPlanDebugRoot.add(routeWidthLines);
+    debugLayerObjects.set("route-widths", routeWidthLines);
+  }
+  if (visibilityLines !== null) debugLayerObjects.set("visibility-lines", visibilityLines);
+  if (coverLines !== null) {
+    worldPlanDebugRoot.add(coverLines);
+    debugLayerObjects.set("cover-influence", coverLines);
+  }
+  worldPlanDebugRoot.add(walkablePoints);
+  debugLayerObjects.set("walkable-cells", walkablePoints);
+  worldPlanDebugRoot.add(objectiveMarkers);
+  debugLayerObjects.set("objective-markers", objectiveMarkers);
+  worldPlanDebugRoot.add(chokeMarkers);
+  debugLayerObjects.set("choke-points", chokeMarkers);
+  const failureGeometry = new THREE.SphereGeometry(1.15, 10, 8);
+  const failureNodeIds = new Set(
+    cityPlan.combatDistrict.validation.failures.flatMap((failure) => failure.nodeIds),
+  );
+  for (const nodeId of failureNodeIds) {
+    const node = combatNodeById.get(nodeId);
+    if (node === undefined) continue;
+    const marker = new THREE.Mesh(failureGeometry, worldPlanDebugMaterials.failure);
+    marker.name = `WorldPlanValidationFailure:${nodeId}`;
+    marker.position.set(node.position.x, 0.45, node.position.z);
+    marker.userData.validationFailure = true;
+    worldPlanDebugRoot.add(marker);
+  }
+  const failureLayer = new THREE.Group();
+  failureLayer.name = "WorldPlanValidationFailures";
+  for (const child of [...worldPlanDebugRoot.children]) {
+    if (child.userData.validationFailure === true) {
+      worldPlanDebugRoot.remove(child);
+      failureLayer.add(child);
+    }
+  }
+  worldPlanDebugRoot.add(failureLayer);
+  debugLayerObjects.set("validation-failures", failureLayer);
+  root.add(worldPlanDebugRoot);
+
+  const groundGeometry = new THREE.BoxGeometry(EXPLORATION_CHUNK_SIZE, 0.1, EXPLORATION_CHUNK_SIZE);
+  const pathGeometry = new THREE.BoxGeometry(1, 0.026, 1);
+  const sidewalkGeometry = new THREE.BoxGeometry(1, 0.018, 1);
+  const combatRouteGeometry = new THREE.BoxGeometry(1, 0.028, 1);
+  const combatCoverGeometry = new RoundedBoxGeometry(1, 1, 1, 3, 0.04);
+  const combatNodeGeometry = new THREE.CylinderGeometry(0.72, 0.72, 0.12, 16);
+  const combatObjectiveGeometry = new THREE.CylinderGeometry(1.05, 1.05, 0.16, 20);
   const propGeometry = new RoundedBoxGeometry(0.28, 1, 0.28, 3, 0.04);
   const beaconGeometry = new RoundedBoxGeometry(0.12, 0.12, 0.12, 3, 0.02);
   const citySignGeometry = new RoundedBoxGeometry(1.25, 0.22, 0.06, 2, 0.02);
   const utilityPostGeometry = new RoundedBoxGeometry(0.12, 2, 0.12, 2, 0.03);
   const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
-  const windowGeometry = new THREE.BoxGeometry(0.56, 0.055, 0.045);
-  const bridgeGeometry = new RoundedBoxGeometry(EXPLORATION_CHUNK_SIZE * 0.86, 0.14, 0.2, 3, 0.035);
+  const buildingWindowGeometry = new RoundedBoxGeometry(1, 1, 1, 2, 0.025);
+  const stairStepGeometry = new RoundedBoxGeometry(1, 1, 1, 2, 0.035);
   const groundMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.ground, 0.9, 0, undefined, surfaceTextures?.detail),
   );
   const pathMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.path, 0.82, 0, undefined, surfaceTextures?.detail),
   );
+  const sidewalkMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.accent, 0.86, 0, undefined, surfaceTextures?.detail),
+  );
+  const combatRouteMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4b5960,
+    roughness: 0.92,
+    metalness: 0.02,
+  });
+  const combatCoverMaterial = new THREE.MeshStandardMaterial({
+    color: 0x7b8584,
+    roughness: 0.88,
+    metalness: 0.04,
+  });
+  const combatObjectiveMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf1b84b,
+    emissive: 0xf1b84b,
+    emissiveIntensity: 0.34,
+    roughness: 0.4,
+    metalness: 0.12,
+  });
+  const combatAttackerMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4bb3fd,
+    emissive: 0x4bb3fd,
+    emissiveIntensity: 0.3,
+    roughness: 0.38,
+    metalness: 0.08,
+  });
+  const combatDefenderMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf26b6b,
+    emissive: 0xf26b6b,
+    emissiveIntensity: 0.3,
+    roughness: 0.38,
+    metalness: 0.08,
+  });
+  const combatChokeMaterial = new THREE.MeshStandardMaterial({
+    color: 0xc58bff,
+    emissive: 0xc58bff,
+    emissiveIntensity: 0.2,
+    roughness: 0.4,
+    metalness: 0.08,
+  });
   const propMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.prop, 0.66, 0.05, undefined, surfaceTextures?.detail),
   );
@@ -7550,11 +8494,24 @@ export const createExplorationWorld = (
   const buildingMaterials = EXPLORATION_BIOMES.map((style) =>
     createMaterial(style.prop, 0.78, 0.08, undefined, surfaceTextures?.detail),
   );
-  const windowMaterials = EXPLORATION_BIOMES.map((style) =>
-    createAccentMaterial(style.accent, 0.32, 0.18, 0.2, surfaceTextures?.detail),
+  const lowBuildingMaterials = EXPLORATION_BIOMES.map(
+    (style) => new THREE.MeshBasicMaterial({ color: style.prop }),
   );
-  const bridgeMaterials = EXPLORATION_BIOMES.map((style) =>
-    createMaterial(style.path, 0.48, 0.44, undefined, surfaceTextures?.detail),
+  const buildingWindowMaterials = EXPLORATION_BIOMES.map(
+    (style) =>
+      new THREE.MeshStandardMaterial({
+        color: style.accent,
+        emissive: style.accent,
+        emissiveIntensity: 0.62,
+        roughness: 0.18,
+        metalness: 0.12,
+        transparent: true,
+        opacity: 0.88,
+        vertexColors: true,
+      }),
+  );
+  const stairMaterials = EXPLORATION_BIOMES.map((style) =>
+    createMaterial(style.accent, 0.58, 0.12, undefined, surfaceTextures?.detail),
   );
   const citySignMaterials = EXPLORATION_BIOMES.map((style) =>
     createAccentMaterial(style.accent, 0.24, 0.25, 0.35, surfaceTextures?.detail),
@@ -7562,7 +8519,25 @@ export const createExplorationWorld = (
   const utilityPostMaterials = EXPLORATION_BIOMES.map((style) =>
     createAccentMaterial(style.path, 0.38, 0.22, 0.16, surfaceTextures?.detail),
   );
+  const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
   const activeChunks = new Map<string, ExplorationChunk>();
+  const chunkManager = new ChunkManager(cityPlan, DEFAULT_CHUNK_STREAMING_CONFIG);
+  let streamingFrozen = false;
+  const pinnedCombatChunkKeys = new Set<string>();
+  for (
+    let chunkX = cityPlan.combatDistrict.chunkMin.x;
+    chunkX < cityPlan.combatDistrict.chunkMin.x + cityPlan.combatDistrict.chunkSize;
+    chunkX += 1
+  ) {
+    for (
+      let chunkZ = cityPlan.combatDistrict.chunkMin.z;
+      chunkZ < cityPlan.combatDistrict.chunkMin.z + cityPlan.combatDistrict.chunkSize;
+      chunkZ += 1
+    ) {
+      pinnedCombatChunkKeys.add(chunkKey(chunkX, chunkZ));
+    }
+  }
+  const lastStreamingPosition = new THREE.Vector3();
   const knockCollisionRefreshDistance = 1.05;
   const knockImpactSpeedMin = 0.9;
   const knockAngularVelocityMax = 2.9;
@@ -7632,9 +8607,130 @@ export const createExplorationWorld = (
     }
   };
 
-  const chunkCoordinate = (value: number): number =>
-    Math.floor((value + EXPLORATION_CHUNK_SIZE / 2) / EXPLORATION_CHUNK_SIZE);
-  const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
+  /** Add all clipped rectangles for one material/archetype as one instance batch. */
+  const addPlanRectInstances = (
+    parent: THREE.Object3D,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material | undefined,
+    boundsList: readonly Bounds2[],
+    y: number,
+    name: string,
+    receiveShadow: boolean,
+    clipToBounds?: Bounds2,
+    scaleY = 1,
+  ): THREE.InstancedMesh | null => {
+    if (material === undefined) return null;
+    const pieces = boundsList.flatMap((bounds) =>
+      clipExplorationRectAroundPlayAreas(bounds).flatMap((piece) => {
+        const clipped =
+          clipToBounds === undefined ? piece : intersectPlanBounds(piece, clipToBounds);
+        if (clipped === null) return [];
+        const worldClipped = {
+          minX: Math.max(clipped.minX, WORLD_BOUNDS.minX),
+          maxX: Math.min(clipped.maxX, WORLD_BOUNDS.maxX),
+          minZ: Math.max(clipped.minZ, WORLD_BOUNDS.minZ),
+          maxZ: Math.min(clipped.maxZ, WORLD_BOUNDS.maxZ),
+        };
+        return worldClipped.maxX > worldClipped.minX && worldClipped.maxZ > worldClipped.minZ
+          ? [worldClipped]
+          : [];
+      }),
+    );
+    if (pieces.length === 0) return null;
+    const instances = new THREE.InstancedMesh(geometry, material, pieces.length);
+    instances.name = name;
+    instances.castShadow = true;
+    instances.receiveShadow = receiveShadow;
+    const instanceMatrix = new THREE.Matrix4();
+    const instancePosition = new THREE.Vector3();
+    const instanceScale = new THREE.Vector3();
+    const instanceRotation = new THREE.Quaternion();
+    for (const [index, piece] of pieces.entries()) {
+      instancePosition.set((piece.minX + piece.maxX) / 2, y, (piece.minZ + piece.maxZ) / 2);
+      instanceScale.set(piece.maxX - piece.minX, scaleY, piece.maxZ - piece.minZ);
+      instanceMatrix.compose(instancePosition, instanceRotation, instanceScale);
+      instances.setMatrixAt(index, instanceMatrix);
+    }
+    instances.instanceMatrix.needsUpdate = true;
+    instances.computeBoundingSphere();
+    parent.add(instances);
+    return instances;
+  };
+
+  const roadBounds = (road: ChunkPlan["roads"][number]): Bounds2 => {
+    const halfWidth = road.widthM / 2;
+    const horizontal = Math.abs(road.start.z - road.end.z) < 1e-6;
+    return horizontal
+      ? {
+          minX: Math.min(road.start.x, road.end.x),
+          maxX: Math.max(road.start.x, road.end.x),
+          minZ: road.start.z - halfWidth,
+          maxZ: road.start.z + halfWidth,
+        }
+      : {
+          minX: road.start.x - halfWidth,
+          maxX: road.start.x + halfWidth,
+          minZ: Math.min(road.start.z, road.end.z),
+          maxZ: Math.max(road.start.z, road.end.z),
+        };
+  };
+
+  const surfaceBounds = (surface: ChunkPlan["sidewalks"][number]): Bounds2 => {
+    const xs = surface.points.map((point) => point.x);
+    const zs = surface.points.map((point) => point.z);
+    return {
+      minX: Math.min(...xs),
+      maxX: Math.max(...xs),
+      minZ: Math.min(...zs),
+      maxZ: Math.max(...zs),
+    };
+  };
+
+  const intersectPlanBounds = (left: Bounds2, right: Bounds2): Bounds2 | null => {
+    const result = {
+      minX: Math.max(left.minX, right.minX),
+      maxX: Math.min(left.maxX, right.maxX),
+      minZ: Math.max(left.minZ, right.minZ),
+      maxZ: Math.min(left.maxZ, right.maxZ),
+    };
+    return result.maxX <= result.minX || result.maxZ <= result.minZ ? null : result;
+  };
+
+  const WINDOW_PANEL_THICKNESS_M = 0.08;
+
+  const windowTransform = (
+    window: BuildingWindow,
+  ): { readonly position: THREE.Vector3; readonly scale: THREE.Vector3 } => {
+    const outward = 0.055;
+    const position = new THREE.Vector3(
+      window.position.x,
+      window.bottomM + window.heightM / 2,
+      window.position.z,
+    );
+    if (window.facade === "north") position.z += outward;
+    if (window.facade === "south") position.z -= outward;
+    if (window.facade === "east") position.x += outward;
+    if (window.facade === "west") position.x -= outward;
+    return {
+      position,
+      scale:
+        window.facade === "north" || window.facade === "south"
+          ? new THREE.Vector3(window.widthM, window.heightM, WINDOW_PANEL_THICKNESS_M)
+          : new THREE.Vector3(WINDOW_PANEL_THICKNESS_M, window.heightM, window.widthM),
+    };
+  };
+
+  const stairFlightRotation = (
+    flight: BuildingStairwell["flights"][number],
+  ): { readonly rotationX?: number; readonly rotationZ?: number } => {
+    const deltaX = flight.end.x - flight.start.x;
+    const deltaZ = flight.end.z - flight.start.z;
+    if (Math.abs(deltaX) >= Math.abs(deltaZ)) {
+      return { rotationZ: Math.atan2(flight.topM - flight.baseM, deltaX) };
+    }
+    return { rotationX: -Math.atan2(flight.topM - flight.baseM, deltaZ) };
+  };
+
   const describeArea = (position: THREE.Vector3): string => {
     const playArea = PLAY_AREA_BOUNDS.find(
       (bounds) =>
@@ -7661,22 +8757,31 @@ export const createExplorationWorld = (
     return "Exploration grounds";
   };
 
-  const createChunk = (chunkX: number, chunkZ: number): ExplorationChunk => {
+  const createChunk = (
+    chunkX: number,
+    chunkZ: number,
+    requestedLod: Exclude<ChunkLod, "unloaded"> = "high",
+  ): ExplorationChunk => {
+    const chunkPlan: ChunkPlan = deriveChunkPlan(cityPlan, { x: chunkX, z: chunkZ });
+    const lod = requestedLod;
+    const geometryTelemetry = buildChunkGeometry(chunkPlan, lod);
     const random = createSeededRandom(
       `${normalizedSeed}|exploration|${String(chunkX)}|${String(chunkZ)}`,
     );
     const biome = resolveExplorationBiome(normalizedSeed, chunkX, chunkZ);
     const style = biome.style;
     const styleIndex = biome.styleIndex;
-    if (style === undefined) {
-      throw new Error("Exploration zone styles are empty");
-    }
-    const terrainHeight = THREE.MathUtils.lerp(0.45, 1.7, biome.elevation);
     const featureBias = biome.featureNoise;
-    const routeSeed = createSeededRandom(
-      `${normalizedSeed}|exploration-route|${String(chunkX)}|${String(chunkZ)}`,
-    );
     const chunk = new THREE.Group();
+    const cullMaxY = Math.max(
+      4,
+      ...chunkPlan.buildingParts.map((part) => part.heightM),
+      ...chunkPlan.coverObjects.map((cover) => cover.heightM),
+    );
+    const cullBounds = new THREE.Box3(
+      new THREE.Vector3(chunkPlan.bounds.minX, -0.1, chunkPlan.bounds.minZ),
+      new THREE.Vector3(chunkPlan.bounds.maxX, cullMaxY, chunkPlan.bounds.maxZ),
+    );
     const physicsBoxes: PhysicsBox[] = [];
     const knockableProps: ExplorationKnockable[] = [];
     chunk.name = `ExplorationChunk:${String(chunkX)}:${String(chunkZ)}`;
@@ -7685,10 +8790,15 @@ export const createExplorationWorld = (
       chunkZ,
       roomSeed: normalizedSeed,
       area: style.label,
+      planHash: chunkPlan.planHash,
+      isInsideCombatDistrict: chunkPlan.isInsideCombatDistrict,
+      lod,
+      geometryTelemetry: geometryTelemetry.metrics,
+      cullBounds,
     };
-    const originX = chunkX * EXPLORATION_CHUNK_SIZE;
-    const originZ = chunkZ * EXPLORATION_CHUNK_SIZE;
-    const chunkHalfSize = EXPLORATION_CHUNK_SIZE / 2 - 0.04;
+    const originX = (chunkPlan.bounds.minX + chunkPlan.bounds.maxX) / 2;
+    const originZ = (chunkPlan.bounds.minZ + chunkPlan.bounds.maxZ) / 2;
+    const chunkHalfSize = EXPLORATION_CHUNK_SIZE / 2;
     addClippedMeshes(
       chunk,
       groundGeometry,
@@ -7699,130 +8809,180 @@ export const createExplorationWorld = (
         minZ: originZ - chunkHalfSize,
         maxZ: originZ + chunkHalfSize,
       },
-      EXPLORATION_CHUNK_SIZE - 0.08,
-      EXPLORATION_CHUNK_SIZE - 0.08,
+      EXPLORATION_CHUNK_SIZE,
+      EXPLORATION_CHUNK_SIZE,
       -0.06,
       "CityGround",
       true,
     );
-    addClippedMeshes(
+    addPlanRectInstances(
       chunk,
       pathGeometry,
       pathMaterials[styleIndex],
-      {
-        minX: originX - EXPLORATION_CHUNK_SIZE * 0.42,
-        maxX: originX + EXPLORATION_CHUNK_SIZE * 0.42,
-        minZ: originZ - 0.45,
-        maxZ: originZ + 0.45,
-      },
-      EXPLORATION_CHUNK_SIZE * 0.84,
-      0.9,
+      chunkPlan.roads.map(roadBounds),
       0.012,
-      "CityGridPath",
+      "CityRoadBatch",
       true,
+      chunkPlan.bounds,
     );
-    if (routeSeed.nextFloat() < style.pathFrequency) {
-      const laneOffset = (routeSeed.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE * 0.22);
-      addClippedMeshes(
-        chunk,
-        pathGeometry,
-        pathMaterials[styleIndex],
-        {
-          minX: originX - EXPLORATION_CHUNK_SIZE * 0.32,
-          maxX: originX + EXPLORATION_CHUNK_SIZE * 0.32,
-          minZ: originZ - 0.3 + laneOffset,
-          maxZ: originZ + 0.3 + laneOffset,
-        },
-        EXPLORATION_CHUNK_SIZE * 0.64,
-        0.6,
-        0.014,
-        "CityDistrictRoad",
+    addPlanRectInstances(
+      chunk,
+      sidewalkGeometry,
+      sidewalkMaterials[styleIndex],
+      chunkPlan.sidewalks.map(surfaceBounds),
+      0.023,
+      "CitySidewalkBatch",
+      true,
+      chunkPlan.bounds,
+    );
+
+    const combatSegmentBounds = (
+      start: { readonly x: number; readonly z: number },
+      end: { readonly x: number; readonly z: number },
+      widthM: number,
+    ): Bounds2 => {
+      const halfWidth = widthM / 2;
+      const horizontal = Math.abs(start.z - end.z) < 1e-6;
+      return horizontal
+        ? {
+            minX: Math.min(start.x, end.x),
+            maxX: Math.max(start.x, end.x),
+            minZ: start.z - halfWidth,
+            maxZ: start.z + halfWidth,
+          }
+        : {
+            minX: start.x - halfWidth,
+            maxX: start.x + halfWidth,
+            minZ: Math.min(start.z, end.z),
+            maxZ: Math.max(start.z, end.z),
+          };
+    };
+
+    const combatRoot = new THREE.Group();
+    combatRoot.name = "CombatDistrictFeatures";
+    combatRoot.userData = {
+      chunkX,
+      chunkZ,
+      validation: cityPlan.combatDistrict.validation,
+    };
+    const combatRouteBoundsList: Bounds2[] = [];
+    const combatCoverBoundsByHeight = new Map<number, Bounds2[]>();
+    for (const feature of lod === "low" ? [] : chunkPlan.combatFeatures) {
+      if (feature.kind === "edge") {
+        for (const segment of feature.segments) {
+          combatRouteBoundsList.push(
+            combatSegmentBounds(segment.start, segment.end, feature.widthM),
+          );
+        }
+        continue;
+      }
+      if (feature.kind === "cover") {
+        const bounds = combatCoverBoundsByHeight.get(feature.heightM) ?? [];
+        bounds.push(feature.bounds);
+        combatCoverBoundsByHeight.set(feature.heightM, bounds);
+        continue;
+      }
+      if (feature.kind !== "node") continue;
+      const node = new THREE.Mesh(
+        feature.nodeKind === "objective-a" || feature.nodeKind === "objective-b"
+          ? combatObjectiveGeometry
+          : combatNodeGeometry,
+        feature.nodeKind === "objective-a" || feature.nodeKind === "objective-b"
+          ? combatObjectiveMaterial
+          : feature.nodeKind === "attacker-spawn"
+            ? combatAttackerMaterial
+            : feature.nodeKind === "defender-spawn"
+              ? combatDefenderMaterial
+              : combatChokeMaterial,
+      );
+      node.name = `CombatNode:${feature.id}`;
+      node.position.set(
+        feature.position.x,
+        feature.nodeKind.startsWith("objective") ? 0.11 : 0.09,
+        feature.position.z,
+      );
+      node.userData = { combatNodeKind: feature.nodeKind, combatNodeId: feature.id };
+      node.castShadow = true;
+      node.receiveShadow = true;
+      combatRoot.add(node);
+    }
+    addPlanRectInstances(
+      combatRoot,
+      combatRouteGeometry,
+      combatRouteMaterial,
+      combatRouteBoundsList,
+      0.041,
+      "CombatRouteBatch",
+      true,
+      chunkPlan.bounds,
+    );
+    for (const [height, bounds] of combatCoverBoundsByHeight) {
+      addPlanRectInstances(
+        combatRoot,
+        combatCoverGeometry,
+        combatCoverMaterial,
+        bounds,
+        height / 2 + 0.06,
+        `CombatCoverBatch:${String(height)}`,
         true,
+        chunkPlan.bounds,
+        height,
       );
     }
+    if (combatRoot.children.length > 0) chunk.add(combatRoot);
 
-    // Keep a cross-city route at every chunk seam. The buildings and props
-    // vary by seed, but the two orthogonal routes remain continuous so a
-    // player can cross from one streamed block into the next without hitting
-    // a dead-end caused by a random local road orientation.
-    addClippedMeshes(
-      chunk,
-      pathGeometry,
-      pathMaterials[styleIndex],
-      {
-        minX: originX - 0.45,
-        maxX: originX + 0.45,
-        minZ: originZ - EXPLORATION_CHUNK_SIZE * 0.42,
-        maxZ: originZ + EXPLORATION_CHUNK_SIZE * 0.42,
-      },
-      0.9,
-      EXPLORATION_CHUNK_SIZE * 0.84,
-      0.013,
-      "CityGridCrossPath",
-      true,
-    );
-
-    const buildingCount = Math.max(
-      1,
-      Math.round(
-        (style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE,
-      ),
-    );
     const buildingSpecs: ExplorationBuildingSpec[] = [];
-    for (let index = 0; index < buildingCount; index += 1) {
-      const edge = random.nextInt(4);
-      const edgeOffset = (random.nextFloat() - 0.5) * EXPLORATION_CHUNK_BUILDING_EDGE_JITTER;
-      const x = quantizeToGrid(
-        edge === 0
-          ? originX - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-          : edge === 1
-            ? originX + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-            : originX + edgeOffset,
-      );
-      const z = quantizeToGrid(
-        edge === 2
-          ? originZ - EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-          : edge === 3
-            ? originZ + EXPLORATION_CHUNK_BUILDING_EDGE_OFFSET + edgeOffset
-            : originZ + edgeOffset,
-      );
-      const width = quantizeScale(1 + random.nextFloat() * (1 + featureBias * 1.2));
-      const height = quantizeScale(
-        style.buildingHeightMin +
-          random.nextFloat() * (style.buildingHeightMax - style.buildingHeightMin) +
-          terrainHeight * 0.8,
-      );
-      const depth = quantizeScale(1 + random.nextFloat() * (1 + terrainHeight));
-      const rotation = random.nextInt(4) * (Math.PI / 2);
-      const swapsAxes = Math.abs(Math.sin(rotation)) > 0.5;
+    for (const buildingPart of chunkPlan.buildingParts) {
+      const bounds = buildingPart.bounds;
       if (
         !isExplorationRectOutsidePenthouse({
-          minX: x - (swapsAxes ? depth : width) / 2,
-          maxX: x + (swapsAxes ? depth : width) / 2,
-          minZ: z - (swapsAxes ? width : depth) / 2,
-          maxZ: z + (swapsAxes ? width : depth) / 2,
-        }) ||
-        isExplorationRectOutsideWorld({
-          minX: x - (swapsAxes ? depth : width) / 2,
-          maxX: x + (swapsAxes ? depth : width) / 2,
-          minZ: z - (swapsAxes ? width : depth) / 2,
-          maxZ: z + (swapsAxes ? width : depth) / 2,
+          minX: bounds.minX,
+          maxX: bounds.maxX,
+          minZ: bounds.minZ,
+          maxZ: bounds.maxZ,
         }) ||
         !isExplorationRectOutsideFocusCalibrationRamp({
-          minX: x - (swapsAxes ? depth : width) / 2,
-          maxX: x + (swapsAxes ? depth : width) / 2,
-          minZ: z - (swapsAxes ? width : depth) / 2,
-          maxZ: z + (swapsAxes ? width : depth) / 2,
+          minX: bounds.minX,
+          maxX: bounds.maxX,
+          minZ: bounds.minZ,
+          maxZ: bounds.maxZ,
         })
       ) {
         continue;
       }
+      const x = (bounds.minX + bounds.maxX) / 2;
+      const z = (bounds.minZ + bounds.maxZ) / 2;
+      const width = bounds.maxX - bounds.minX;
+      const depth = bounds.maxZ - bounds.minZ;
+      const height = quantizeScale(buildingPart.heightM);
+      const rotation = 0;
       buildingSpecs.push({ x, z, width, height, depth, rotation });
-      physicsBoxes.push({
-        center: { x, y: height / 2, z },
-        halfExtents: { x: width / 2, y: height / 2, z: depth / 2 },
-        rotationY: rotation,
-      });
+      if (lod !== "low") {
+        physicsBoxes.push({
+          center: { x, y: height / 2, z },
+          halfExtents: { x: width / 2, y: height / 2, z: depth / 2 },
+          rotationY: rotation,
+        });
+      }
+    }
+    if (lod !== "low") {
+      for (const feature of chunkPlan.combatFeatures) {
+        if (feature.kind !== "cover") continue;
+        const coverBounds = intersectPlanBounds(feature.bounds, chunkPlan.bounds);
+        if (coverBounds === null) continue;
+        physicsBoxes.push({
+          center: {
+            x: (coverBounds.minX + coverBounds.maxX) / 2,
+            y: feature.heightM / 2,
+            z: (coverBounds.minZ + coverBounds.maxZ) / 2,
+          },
+          halfExtents: {
+            x: (coverBounds.maxX - coverBounds.minX) / 2,
+            y: feature.heightM / 2,
+            z: (coverBounds.maxZ - coverBounds.minZ) / 2,
+          },
+        });
+      }
     }
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
@@ -7832,7 +8992,7 @@ export const createExplorationWorld = (
     if (buildingSpecs.length > 0) {
       const buildings = new THREE.InstancedMesh(
         buildingGeometry,
-        buildingMaterials[styleIndex],
+        lod === "low" ? lowBuildingMaterials[styleIndex] : buildingMaterials[styleIndex],
         buildingSpecs.length,
       );
       buildings.name = "CityBlockBuildingInstances";
@@ -7850,159 +9010,214 @@ export const createExplorationWorld = (
       chunk.add(buildings);
     }
 
-    const windowPlacements: ExplorationWindowSpec[] = [];
-    for (const building of buildingSpecs) {
-      const rows = Math.min(
-        Math.floor(style.windowHeight / 0.95),
-        Math.max(2, Math.floor(building.height / 1.05)),
-      );
-      const frontOffset = building.depth / 2 + 0.035;
-      const offsetX = Math.sin(building.rotation) * frontOffset;
-      const offsetZ = Math.cos(building.rotation) * frontOffset;
-      for (let row = 0; row < rows; row += 1) {
-        const windowWidth = Math.max(0.28, building.width * 0.42);
-        const swapsAxes = Math.abs(Math.sin(building.rotation)) > 0.5;
-        const halfWidth = swapsAxes ? 0.0225 : 0.28 * windowWidth;
-        const halfDepth = swapsAxes ? 0.28 * windowWidth : 0.0225;
-        const windowX = quantizeToGrid(building.x + offsetX);
-        const windowZ = quantizeToGrid(building.z + offsetZ);
-        if (
-          !isExplorationRectOutsidePenthouse({
-            minX: windowX - halfWidth,
-            maxX: windowX + halfWidth,
-            minZ: windowZ - halfDepth,
-            maxZ: windowZ + halfDepth,
-          }) ||
-          isExplorationRectOutsideWorld({
-            minX: windowX - halfWidth,
-            maxX: windowX + halfWidth,
-            minZ: windowZ - halfDepth,
-            maxZ: windowZ + halfDepth,
-          }) ||
-          !isExplorationRectOutsideFocusCalibrationRamp({
-            minX: windowX - halfWidth,
-            maxX: windowX + halfWidth,
-            minZ: windowZ - halfDepth,
-            maxZ: windowZ + halfDepth,
-          })
-        ) {
-          continue;
-        }
-        windowPlacements.push({
-          x: windowX,
-          y: 0.75 + row * 0.96,
-          z: windowZ,
-          width: windowWidth,
-          rotation: building.rotation,
-        });
-      }
-    }
-    if (windowPlacements.length > 0) {
+    const windowSpecs =
+      lod === "low"
+        ? []
+        : chunkPlan.buildingWindows.filter(
+            (window) =>
+              isExplorationRectOutsidePenthouse(window.bounds) &&
+              isExplorationRectOutsideFocusCalibrationRamp(window.bounds),
+          );
+    if (windowSpecs.length > 0) {
       const windows = new THREE.InstancedMesh(
-        windowGeometry,
-        windowMaterials[styleIndex],
-        windowPlacements.length,
+        buildingWindowGeometry,
+        buildingWindowMaterials[styleIndex],
+        windowSpecs.length,
       );
-      windows.name = "CityBlockWindowInstances";
+      windows.name = "CityBuildingWindowInstances";
       windows.castShadow = true;
-      windowPlacements.forEach((window, index) => {
-        position.set(window.x, window.y, window.z);
-        rotation.setFromAxisAngle(yAxis, window.rotation);
-        scale.set(window.width, 1, 1);
-        matrix.compose(position, rotation, scale);
+      windows.receiveShadow = true;
+      const windowColor = new THREE.Color();
+      rotation.identity();
+      windowSpecs.forEach((window, index) => {
+        const transform = windowTransform(window);
+        matrix.compose(transform.position, rotation, transform.scale);
         windows.setMatrixAt(index, matrix);
+        windowColor.setHex(window.lit ? style.accent : style.path);
+        windows.setColorAt(index, windowColor);
       });
       windows.instanceMatrix.needsUpdate = true;
+      if (windows.instanceColor !== null) windows.instanceColor.needsUpdate = true;
       windows.computeBoundingSphere();
       chunk.add(windows);
     }
 
-    if (random.nextFloat() < style.bridgeDensity * (0.5 + style.preferredElevation)) {
-      const bridgeRotation = random.nextFloat() > 0.5 ? 0 : Math.PI / 2;
-      const bridgeLength = EXPLORATION_CHUNK_SIZE * 0.86;
-      const bridgeHalfWidth = bridgeRotation === 0 ? bridgeLength / 2 : 0.1;
-      const bridgeHalfDepth = bridgeRotation === 0 ? 0.1 : bridgeLength / 2;
-      const bridgeX = originX;
-      const bridgeZ = originZ;
-      if (
-        isExplorationRectOutsidePenthouse({
-          minX: bridgeX - bridgeHalfWidth,
-          maxX: bridgeX + bridgeHalfWidth,
-          minZ: bridgeZ - bridgeHalfDepth,
-          maxZ: bridgeZ + bridgeHalfDepth,
-        }) &&
-        isExplorationRectOutsideWorld({
-          minX: bridgeX - bridgeHalfWidth,
-          maxX: bridgeX + bridgeHalfWidth,
-          minZ: bridgeZ - bridgeHalfDepth,
-          maxZ: bridgeZ + bridgeHalfDepth,
-        }) &&
-        isExplorationRectOutsideFocusCalibrationRamp({
-          minX: bridgeX - bridgeHalfWidth,
-          maxX: bridgeX + bridgeHalfWidth,
-          minZ: bridgeZ - bridgeHalfDepth,
-          maxZ: bridgeZ + bridgeHalfDepth,
-        })
-      ) {
-        const bridge = new THREE.Mesh(bridgeGeometry, bridgeMaterials[styleIndex]);
-        bridge.name = "SkybridgeSpan";
-        bridge.position.set(
-          originX,
-          3.2 + random.nextFloat() * 1.9 + terrainHeight * 0.65,
-          originZ,
-        );
-        bridge.rotation.y = quantizeRotation45(bridgeRotation);
-        bridge.castShadow = true;
-        bridge.receiveShadow = true;
-        chunk.add(bridge);
-        physicsBoxes.push({
-          center: { x: originX, y: bridge.position.y, z: originZ },
-          halfExtents: { x: bridgeLength / 2, y: 0.07, z: 0.1 },
-          rotationY: bridgeRotation,
-        });
+    const stairwells =
+      lod === "low"
+        ? []
+        : chunkPlan.buildingStairwells.filter(
+            (stairwell) =>
+              isExplorationRectOutsidePenthouse(stairwell.bounds) &&
+              isExplorationRectOutsideFocusCalibrationRamp(stairwell.bounds),
+          );
+    const stairStepCount = stairwells.reduce(
+      (total, stairwell) =>
+        total +
+        stairwell.flights.reduce((flightTotal, flight) => flightTotal + flight.stepCount, 0),
+      0,
+    );
+    const stairLandingCount = stairwells.reduce(
+      (total, stairwell) => total + stairwell.landings.length,
+      0,
+    );
+    if (stairStepCount > 0) {
+      const steps = new THREE.InstancedMesh(
+        stairStepGeometry,
+        stairMaterials[styleIndex],
+        stairStepCount,
+      );
+      steps.name = "CityBuildingStairStepInstances";
+      steps.castShadow = true;
+      steps.receiveShadow = true;
+      let stepIndex = 0;
+      rotation.identity();
+      for (const stairwell of stairwells) {
+        for (const flight of stairwell.flights) {
+          const deltaX = flight.end.x - flight.start.x;
+          const deltaZ = flight.end.z - flight.start.z;
+          const alongX = Math.abs(deltaX) >= Math.abs(deltaZ);
+          for (let step = 0; step < flight.stepCount; step += 1) {
+            const fraction = (step + 0.5) / flight.stepCount;
+            const topM = flight.baseM + (step + 1) * flight.stepHeightM;
+            position.set(
+              flight.start.x + deltaX * fraction,
+              topM - 0.065,
+              flight.start.z + deltaZ * fraction,
+            );
+            scale.set(
+              alongX ? flight.stepDepthM + 0.04 : flight.widthM,
+              0.13,
+              alongX ? flight.widthM : flight.stepDepthM + 0.04,
+            );
+            matrix.compose(position, rotation, scale);
+            steps.setMatrixAt(stepIndex, matrix);
+            stepIndex += 1;
+          }
+          const runLengthM = Math.hypot(deltaX, deltaZ);
+          const rampRotation = stairFlightRotation(flight);
+          physicsBoxes.push({
+            center: {
+              x: (flight.start.x + flight.end.x) / 2,
+              y: (flight.baseM + flight.topM) / 2,
+              z: (flight.start.z + flight.end.z) / 2,
+            },
+            halfExtents: {
+              x: alongX ? runLengthM / 2 : flight.widthM / 2,
+              y: 0.1,
+              z: alongX ? flight.widthM / 2 : runLengthM / 2,
+            },
+            ...(rampRotation.rotationX === undefined ? {} : { rotationX: rampRotation.rotationX }),
+            ...(rampRotation.rotationZ === undefined ? {} : { rotationZ: rampRotation.rotationZ }),
+            friction: 0.82,
+          });
+        }
       }
+      steps.instanceMatrix.needsUpdate = true;
+      steps.computeBoundingSphere();
+      chunk.add(steps);
+    }
+    if (stairLandingCount > 0) {
+      const landings = new THREE.InstancedMesh(
+        stairStepGeometry,
+        stairMaterials[styleIndex],
+        stairLandingCount,
+      );
+      landings.name = "CityBuildingStairLandingInstances";
+      landings.castShadow = true;
+      landings.receiveShadow = true;
+      let landingIndex = 0;
+      rotation.identity();
+      for (const stairwell of stairwells) {
+        for (const landing of stairwell.landings) {
+          const landingBounds = intersectPlanBounds(landing.bounds, chunkPlan.bounds);
+          if (landingBounds === null) continue;
+          position.set(
+            (landingBounds.minX + landingBounds.maxX) / 2,
+            landing.heightM - 0.065,
+            (landingBounds.minZ + landingBounds.maxZ) / 2,
+          );
+          scale.set(
+            landingBounds.maxX - landingBounds.minX,
+            0.13,
+            landingBounds.maxZ - landingBounds.minZ,
+          );
+          matrix.compose(position, rotation, scale);
+          landings.setMatrixAt(landingIndex, matrix);
+          landingIndex += 1;
+          physicsBoxes.push({
+            center: {
+              x: position.x,
+              y: landing.heightM - 0.065,
+              z: position.z,
+            },
+            halfExtents: {
+              x: scale.x / 2,
+              y: 0.065,
+              z: scale.z / 2,
+            },
+            friction: 0.82,
+          });
+        }
+      }
+      landings.count = landingIndex;
+      landings.instanceMatrix.needsUpdate = true;
+      landings.computeBoundingSphere();
+      chunk.add(landings);
     }
 
-    const propCount = Math.max(
-      1,
-      Math.round(
-        (style.propDensity * 2 + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE,
-      ),
-    );
+    const propCount =
+      lod === "low"
+        ? 0
+        : Math.max(
+            1,
+            Math.round(
+              (style.propDensity * 2 + featureBias + random.nextFloat()) *
+                EXPLORATION_DENSITY_SCALE,
+            ),
+          );
     const propMatrices: THREE.Matrix4[] = [];
-    const propTransforms: Array<{
+    const propTransforms: {
       readonly position: THREE.Vector3;
       readonly quaternion: THREE.Quaternion;
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
-    }> = [];
-    const citySignCount = Math.max(
-      1,
-      Math.round(
-        (style.citySignDensity + featureBias + random.nextFloat()) * EXPLORATION_DENSITY_SCALE,
-      ),
-    );
+    }[] = [];
+    const citySignCount =
+      lod === "low"
+        ? 0
+        : Math.max(
+            1,
+            Math.round(
+              (style.citySignDensity + featureBias + random.nextFloat()) *
+                EXPLORATION_DENSITY_SCALE,
+            ),
+          );
     const citySignMatrices: THREE.Matrix4[] = [];
-    const citySignTransforms: Array<{
+    const citySignTransforms: {
       readonly position: THREE.Vector3;
       readonly quaternion: THREE.Quaternion;
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
-    }> = [];
-    const utilityPostCount = Math.max(
-      1,
-      Math.round((style.utilityPostDensity + random.nextFloat() * 0.7) * EXPLORATION_DENSITY_SCALE),
-    );
+    }[] = [];
+    const utilityPostCount =
+      lod === "low"
+        ? 0
+        : Math.max(
+            1,
+            Math.round(
+              (style.utilityPostDensity + random.nextFloat() * 0.7) * EXPLORATION_DENSITY_SCALE,
+            ),
+          );
     const utilityPostMatrices: THREE.Matrix4[] = [];
-    const utilityPostTransforms: Array<{
+    const utilityPostTransforms: {
       readonly position: THREE.Vector3;
       readonly quaternion: THREE.Quaternion;
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
-    }> = [];
+    }[] = [];
     for (let index = 0; index < propCount; index += 1) {
       position.set(
         quantizeToGrid(originX + (random.nextFloat() - 0.5) * (EXPLORATION_CHUNK_SIZE - 1.4)),
@@ -8281,13 +9496,13 @@ export const createExplorationWorld = (
 
     const beaconCount = random.nextFloat() < style.beaconDensity * 1.2 + featureBias * 0.2 ? 1 : 0;
     const beaconMatrices: THREE.Matrix4[] = [];
-    const beaconTransforms: Array<{
+    const beaconTransforms: {
       readonly position: THREE.Vector3;
       readonly quaternion: THREE.Quaternion;
       readonly scale: THREE.Vector3;
       readonly halfExtents: PhysicsVector;
       readonly rotationY: number;
-    }> = [];
+    }[] = [];
     const beaconScale = new THREE.Vector3(1, 1, 1);
     rotation.identity();
     for (let index = 0; index < beaconCount; index += 1) {
@@ -8371,6 +9586,9 @@ export const createExplorationWorld = (
     }
     return {
       root: chunk,
+      lod,
+      geometryTelemetry,
+      cullBounds,
       physicsBoxes,
       knockableProps,
     };
@@ -8388,31 +9606,135 @@ export const createExplorationWorld = (
     });
   };
 
-  const preloadAllChunks = (): void => {
-    let physicsChanged = false;
-    const minChunkX = chunkCoordinate(WORLD_BOUNDS.minX);
-    const maxChunkX = chunkCoordinate(WORLD_BOUNDS.maxX);
-    const minChunkZ = chunkCoordinate(WORLD_BOUNDS.minZ);
-    const maxChunkZ = chunkCoordinate(WORLD_BOUNDS.maxZ);
-
-    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
-      for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
-        const key = chunkKey(chunkX, chunkZ);
-        if (activeChunks.has(key)) {
-          continue;
-        }
-        const chunk = createChunk(chunkX, chunkZ);
-        activeChunks.set(key, chunk);
-        root.add(chunk.root);
-        physicsChanged = true;
-      }
+  const updateStreaming = (position: THREE.Vector3, velocity: PhysicsVector): void => {
+    const syncDebugLoadedStates = (): void => {
+      worldDebugState.setLoadedChunkStates(
+        [...activeChunks.entries()].map(([activeKey, chunk]) => {
+          const [x = 0, z = 0] = activeKey.split(":").map(Number);
+          const managerState = chunkManager.getState({ x, z });
+          return {
+            coord: { x, z },
+            state: chunk.lod === "low" ? "active-low" : "active-high",
+            lod: chunk.lod,
+            distanceChunks: managerState?.distanceChunks ?? Number.POSITIVE_INFINITY,
+            priority: managerState?.priority ?? Number.POSITIVE_INFINITY,
+          };
+        }),
+      );
+    };
+    if (streamingFrozen) {
+      syncDebugLoadedStates();
+      worldDebugState.setStreamingMetrics(chunkManager.getMetrics());
+      return;
     }
-    if (physicsChanged) {
-      physicsVersion += 1;
+    let playerChunk;
+    try {
+      playerChunk = worldToChunkCoord(cityPlan.config, { x: position.x, z: position.z });
+    } catch {
+      playerChunk = {
+        x: Math.max(
+          0,
+          Math.min(EXPLORATION_CHUNKS_PER_SIDE - 1, Math.floor(EXPLORATION_CHUNKS_PER_SIDE / 2)),
+        ),
+        z: Math.max(
+          0,
+          Math.min(EXPLORATION_CHUNKS_PER_SIDE - 1, Math.floor(EXPLORATION_CHUNKS_PER_SIDE / 2)),
+        ),
+      };
+    }
+    const states = chunkManager.update(playerChunk, { x: velocity.x, z: velocity.z });
+    worldDebugState.setStreamingMetrics(chunkManager.getMetrics());
+    const desiredKeys = new Set(
+      states
+        .filter((state) => state.lod !== "unloaded")
+        .map((state) => chunkKey(state.coord.x, state.coord.z)),
+    );
+    for (const pinnedKey of pinnedCombatChunkKeys) desiredKeys.add(pinnedKey);
+
+    let physicsChanged = false;
+    for (const [key, chunk] of activeChunks) {
+      if (desiredKeys.has(key)) continue;
+      chunk.root.removeFromParent();
+      disposeChunk(chunk.root);
+      activeChunks.delete(key);
+      physicsChanged = true;
+    }
+
+    const candidates = [
+      ...states.filter((state) => desiredKeys.has(chunkKey(state.coord.x, state.coord.z))),
+      ...[...pinnedCombatChunkKeys]
+        .filter((key) => !states.some((state) => chunkKey(state.coord.x, state.coord.z) === key))
+        .map((key) => {
+          const [x = 0, z = 0] = key.split(":").map(Number);
+          return { coord: { x, z }, priority: 10_000, lod: "gameplay" as const };
+        }),
+    ].sort((left, right) => left.priority - right.priority);
+    const startedAt = typeof performance === "undefined" ? Date.now() : performance.now();
+    let built = 0;
+    for (const state of candidates) {
+      const key = chunkKey(state.coord.x, state.coord.z);
+      const activeLod: Exclude<ChunkLod, "unloaded"> = pinnedCombatChunkKeys.has(key)
+        ? "gameplay"
+        : state.lod === "unloaded"
+          ? "low"
+          : state.lod;
+      const active = activeChunks.get(key);
+      if (active?.lod === activeLod) continue;
+      if (active !== undefined) {
+        active.root.removeFromParent();
+        disposeChunk(active.root);
+        activeChunks.delete(key);
+      }
+      const buildStartedAt = typeof performance === "undefined" ? Date.now() : performance.now();
+      const chunk = createChunk(state.coord.x, state.coord.z, activeLod);
+      const buildElapsedMs =
+        (typeof performance === "undefined" ? Date.now() : performance.now()) - buildStartedAt;
+      chunkManager.recordBuild(state.coord, chunk.geometryTelemetry, buildElapsedMs);
+      activeChunks.set(key, chunk);
+      root.add(chunk.root);
+      physicsChanged = true;
+      built += 1;
+      const elapsed =
+        (typeof performance === "undefined" ? Date.now() : performance.now()) - startedAt;
+      if (built >= 8 || elapsed >= DEFAULT_CHUNK_STREAMING_CONFIG.buildBudgetMs) break;
+    }
+    chunkManager.recordGenerationFrame(
+      (typeof performance === "undefined" ? Date.now() : performance.now()) - startedAt,
+    );
+    if (physicsChanged) physicsVersion += 1;
+    syncDebugLoadedStates();
+    worldDebugState.setStreamingMetrics(chunkManager.getMetrics());
+  };
+
+  const updateChunkCulling = (camera: THREE.Camera | undefined): void => {
+    if (camera === undefined) {
+      for (const chunk of activeChunks.values()) chunk.root.visible = true;
+      return;
+    }
+    camera.updateMatrixWorld();
+    const projectionScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse,
+    );
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(projectionScreenMatrix);
+    for (const chunk of activeChunks.values()) {
+      chunk.root.visible = frustum.intersectsBox(chunk.cullBounds);
     }
   };
 
-  const update = (position: THREE.Vector3): void => {
+  const update = (
+    position: THREE.Vector3,
+    velocity?: PhysicsVector,
+    camera?: THREE.Camera,
+  ): void => {
+    const inferredVelocity = velocity ?? {
+      x: position.x - lastStreamingPosition.x,
+      y: 0,
+      z: position.z - lastStreamingPosition.z,
+    };
+    updateStreaming(position, inferredVelocity);
+    updateChunkCulling(camera);
+    lastStreamingPosition.copy(position);
     const nextArea = describeArea(position);
     if (nextArea !== currentArea) {
       currentArea = nextArea;
@@ -8510,9 +9832,6 @@ export const createExplorationWorld = (
             .copy(knockAxis)
             .multiplyScalar(knockAngularImpulseScale * (knockScale + 0.12));
           physicsChanged = true;
-        }
-        if (!knockable.isKnocked) {
-          continue;
         }
         const bodyState = dynamicStateById.get(knockable.physicsId);
         if (bodyState !== undefined) {
@@ -8619,27 +9938,41 @@ export const createExplorationWorld = (
 
   const dispose = (): void => {
     root.removeFromParent();
+    disposeObject(worldPlanDebugRoot);
     for (const chunk of activeChunks.values()) {
       disposeChunk(chunk.root);
     }
     activeChunks.clear();
     groundGeometry.dispose();
     pathGeometry.dispose();
+    sidewalkGeometry.dispose();
+    combatRouteGeometry.dispose();
+    combatCoverGeometry.dispose();
+    combatNodeGeometry.dispose();
+    combatObjectiveGeometry.dispose();
     propGeometry.dispose();
     citySignGeometry.dispose();
     utilityPostGeometry.dispose();
     beaconGeometry.dispose();
     buildingGeometry.dispose();
-    windowGeometry.dispose();
-    bridgeGeometry.dispose();
+    buildingWindowGeometry.dispose();
+    stairStepGeometry.dispose();
     for (const material of [
       ...groundMaterials,
       ...pathMaterials,
+      ...sidewalkMaterials,
+      combatRouteMaterial,
+      combatCoverMaterial,
+      combatObjectiveMaterial,
+      combatAttackerMaterial,
+      combatDefenderMaterial,
+      combatChokeMaterial,
       ...propMaterials,
       ...accentMaterials,
       ...buildingMaterials,
-      ...windowMaterials,
-      ...bridgeMaterials,
+      ...lowBuildingMaterials,
+      ...buildingWindowMaterials,
+      ...stairMaterials,
       ...citySignMaterials,
       ...utilityPostMaterials,
     ]) {
@@ -8647,7 +9980,6 @@ export const createExplorationWorld = (
     }
   };
 
-  preloadAllChunks();
   update(new THREE.Vector3(0, 0, 0));
   onAreaChange?.(currentArea);
   return {
@@ -8702,6 +10034,31 @@ export const createExplorationWorld = (
       return boxes;
     },
     getPhysicsVersion: () => physicsVersion,
+    setDebugVisible: (visible: boolean) => {
+      worldPlanDebugRoot.visible = visible;
+    },
+    setDebugLayerVisible: (layer, visible) => {
+      worldDebugState.setLayerVisible(layer, visible);
+      const object = debugLayerObjects.get(layer);
+      if (object !== undefined) object.visible = visible;
+    },
+    setStreamingFrozen: (frozen) => {
+      streamingFrozen = frozen;
+      worldDebugState.setFreezeStreaming(frozen);
+    },
+    teleportToChunk: (coord): PhysicsVector => {
+      worldDebugState.requestTeleport(coord);
+      const bounds = chunkBounds(cityPlan.config, coord);
+      const target = {
+        x: (bounds.minX + bounds.maxX) / 2,
+        y: 0,
+        z: (bounds.minZ + bounds.maxZ) / 2,
+      };
+      update(new THREE.Vector3(target.x, target.y, target.z));
+      return target;
+    },
+    getDebugSnapshot: () => worldDebugState.getSnapshot(),
+    exportPlanJson: () => JSON.stringify(cityPlan),
     dispose,
   };
 };
@@ -8998,6 +10355,19 @@ export const createMahjongTableScene = (
   container.dataset.sceneQuality = quality.preset;
   container.dataset.controlActive = "false";
   container.replaceChildren(renderer.domElement);
+  const deathFadeOverlay = document.createElement("div");
+  deathFadeOverlay.setAttribute("aria-hidden", "true");
+  deathFadeOverlay.dataset.playerDeathFade = "true";
+  deathFadeOverlay.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:2147483647",
+    "pointer-events:none",
+    "background:#000",
+    "opacity:0",
+    "transition:opacity 260ms ease-out",
+  ].join(";");
+  container.append(deathFadeOverlay);
 
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   const roomEnvironment = new RoomEnvironment();
@@ -9506,7 +10876,37 @@ export const createMahjongTableScene = (
   const lastMovementTapAtByKey = new Map<string, number>();
   let lastSceneStateSaveAt = Number.NEGATIVE_INFINITY;
   let lastSceneStateSerialized: string | null = null;
+  interface SimulantWeaponState {
+    ammoInMagazine: number;
+    reserveAmmo: number;
+    burstShotsRemaining: number;
+    reloadingSeconds: number;
+  }
+  const simulantRandom = createSeededRandom(`${roomSeed}|simulant-combat-v1`);
+  const playerRespawnRandom = createSeededRandom(`${roomSeed}|player-death-respawn-v1`);
+  let simulantAnchor: THREE.Object3D | null = null;
+  let simulantWeapon: WeaponId | null = null;
+  let simulantCooldownSeconds = 0;
+  let simulantWeaponState: SimulantWeaponState | null = null;
+  let simulantMarker: THREE.Group | null = null;
+  let simulantBody: THREE.Group | null = null;
+  let simulantWeaponModel: WeaponModelResources | null = null;
+  let simulantRespawnTimer = 0;
+  let simulantMuzzleFlashSeconds = 0;
+  const simulantOrigin = new THREE.Vector3();
+  const simulantSpawnPosition = new THREE.Vector3();
+  const simulantPosition = new THREE.Vector3();
+  const simulantWeaponBasePosition = new THREE.Vector3(0.3, 0.68, 0);
+  const simulantDirection = new THREE.Vector3();
+  const simulantAimRight = new THREE.Vector3();
+  const simulantAimUp = new THREE.Vector3();
+  const simulantWorldUp = new THREE.Vector3(0, 1, 0);
+  const simulantFallbackRight = new THREE.Vector3(1, 0, 0);
+  const simulantPerspectiveRig = createCameraMotionDamper();
+  let simulantVitals = createPlayerVitals();
   let playerVitals = createPlayerVitals();
+  let deathFadeStartTimer = 0;
+  let deathRespawnTimer = 0;
   let vitalsPublishElapsed = 0;
   let speedPublishElapsed = 0;
   let publishedPlayerSpeed: number | null = null;
@@ -9573,11 +10973,52 @@ export const createMahjongTableScene = (
     nextVitals.oxygenRecoveryDelaySeconds !== playerVitals.oxygenRecoveryDelaySeconds ||
     nextVitals.holdingBreath !== playerVitals.holdingBreath ||
     nextVitals.holdBreathLocked !== playerVitals.holdBreathLocked;
+  const cancelDeathRespawn = (): void => {
+    if (deathFadeStartTimer !== 0) {
+      window.clearTimeout(deathFadeStartTimer);
+      deathFadeStartTimer = 0;
+    }
+    if (deathRespawnTimer !== 0) {
+      window.clearTimeout(deathRespawnTimer);
+      deathRespawnTimer = 0;
+    }
+  };
+  const scheduleDeathRespawn = (): void => {
+    cancelDeathRespawn();
+    deathFadeOverlay.style.transition = "none";
+    deathFadeOverlay.style.opacity = "0";
+    deathFadeStartTimer = window.setTimeout(() => {
+      deathFadeStartTimer = 0;
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_DEATH_FADE_DURATION_MS}ms ease-in`;
+      deathFadeOverlay.style.opacity = "1";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS - PLAYER_DEATH_FADE_DURATION_MS);
+    deathRespawnTimer = window.setTimeout(() => {
+      deathRespawnTimer = 0;
+      resetToSpawn();
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_RESPAWN_FADE_IN_DURATION_MS}ms ease-out`;
+      deathFadeOverlay.style.opacity = "0";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
+  };
   const damagePlayer = (damage: number): PlayerVitalsDamageResult => {
+    const wasDead = playerVitals.isDead;
     const result = applyPlayerDamage(playerVitals, damage);
     if (result.damage > 0) {
       playerVitals = result.state;
       publishPlayerVitals(true);
+    }
+    if (!wasDead && result.killed) {
+      cameraMotion.applyDeathTumble();
+      pressedKeys.clear();
+      jumpKeyHeld = false;
+      touchMovementActive = false;
+      touchForward = 0;
+      touchRight = 0;
+      isSprinting = false;
+      forwardVelocity = 0;
+      strafeVelocity = 0;
+      verticalVelocity = 0;
+      weaponRuntime?.setFireHeld(false);
+      scheduleDeathRespawn();
     }
     return result;
   };
@@ -9625,6 +11066,279 @@ export const createMahjongTableScene = (
   const syncAimingFromInput = (): void => {
     const aimInput = resolveDesktopAimInput(leftCommandHeld, rightMouseAiming);
     setAiming(aimInput.aimingDownSights, aimInput.holdingBreath);
+  };
+  const resolveRandomSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const spawnRangeX = maxX - minX;
+    const spawnRangeZ = maxZ - minZ;
+    const fallbackX = THREE.MathUtils.clamp(WORLD_BOUNDS.minX + spawnRangeX / 2, minX, maxX);
+    const fallbackZ = THREE.MathUtils.clamp(WORLD_BOUNDS.minZ + spawnRangeZ / 2, minZ, maxZ);
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const sampleX =
+        spawnRangeX > 0 ? minX + spawnRangeX * playerRespawnRandom.nextFloat() : fallbackX;
+      const sampleZ =
+        spawnRangeZ > 0 ? minZ + spawnRangeZ * playerRespawnRandom.nextFloat() : fallbackZ;
+      if (physicsRuntime === null) {
+        return {
+          x: sampleX,
+          y: PLAYER_COLLIDER_CENTER_HEIGHT,
+          z: sampleZ,
+        };
+      }
+      const settled = physicsRuntime.move(
+        { x: sampleX, y: WORLD_SPAWN_DROP_HEIGHT, z: sampleZ },
+        { x: 0, y: -WORLD_SPAWN_DROP_DISTANCE, z: 0 },
+      );
+      if (
+        Number.isFinite(settled.position.x) &&
+        Number.isFinite(settled.position.y) &&
+        Number.isFinite(settled.position.z) &&
+        settled.grounded
+      ) {
+        return {
+          x: THREE.MathUtils.clamp(settled.position.x, minX, maxX),
+          y: settled.position.y,
+          z: THREE.MathUtils.clamp(settled.position.z, minZ, maxZ),
+        };
+      }
+    }
+    return {
+      x: fallbackX,
+      y: PLAYER_COLLIDER_CENTER_HEIGHT,
+      z: fallbackZ,
+    };
+  };
+  const resolveSimulantSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const playerX = camera.position.x;
+    const playerZ = camera.position.z;
+    let bestDistance = Number.NEGATIVE_INFINITY;
+    let bestX = minX;
+    let bestZ = minZ;
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const simulantSpawnAngle = simulantRandom.nextFloat() * Math.PI * 2;
+      const sampleX = Math.cos(simulantSpawnAngle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const sampleZ = Math.sin(simulantSpawnAngle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const candidateX = THREE.MathUtils.clamp(sampleX, minX, maxX);
+      const candidateZ = THREE.MathUtils.clamp(sampleZ, minZ, maxZ);
+      const distanceToPlayer =
+        Number.isFinite(playerX) && Number.isFinite(playerZ)
+          ? Math.hypot(candidateX - playerX, candidateZ - playerZ)
+          : Number.POSITIVE_INFINITY;
+      if (distanceToPlayer > bestDistance) {
+        bestDistance = distanceToPlayer;
+        bestX = candidateX;
+        bestZ = candidateZ;
+      }
+      if (distanceToPlayer >= SIMULANT_MIN_START_DISTANCE_METERS) {
+        return { x: candidateX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: candidateZ };
+      }
+    }
+    return { x: bestX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: bestZ };
+  };
+  const syncSimulantMarkerVitals = (): void => {
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.userData.simulantHealth = simulantVitals.health;
+    simulantMarker.userData.simulantShield = simulantVitals.shield;
+    simulantMarker.userData.simulantO2 = simulantVitals.o2;
+  };
+  const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
+    const bodyBaseY =
+      SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+      (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+    if (simulantBody !== null) {
+      simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+      simulantBody.rotation.z = motion.roll;
+    }
+    if (simulantWeaponModel !== null) {
+      simulantWeaponModel.root.position.copy(simulantWeaponBasePosition);
+      simulantWeaponModel.root.position.y += motion.verticalOffset;
+      simulantWeaponModel.root.rotation.set(0, Math.PI, motion.roll);
+    }
+  };
+  const cancelSimulantRespawn = (): void => {
+    if (simulantRespawnTimer !== 0) {
+      window.clearTimeout(simulantRespawnTimer);
+      simulantRespawnTimer = 0;
+    }
+  };
+  const respawnSimulant = (): void => {
+    if (simulantMarker === null || simulantWeapon === null) {
+      return;
+    }
+    const spawnPosition = resolveSimulantSpawnPosition();
+    simulantPosition.set(spawnPosition.x, spawnPosition.y, spawnPosition.z);
+    simulantMarker.position.copy(simulantPosition);
+    simulantMarker.visible = true;
+    simulantVitals = createPlayerVitals();
+    simulantWeaponState = createSimulantWeaponState(simulantWeapon);
+    simulantCooldownSeconds = SIMULANT_START_COOLDOWN_SECONDS;
+    simulantMuzzleFlashSeconds = 0;
+    simulantPerspectiveRig.reset();
+    if (simulantWeaponModel !== null) {
+      simulantWeaponModel.muzzleFlash.visible = false;
+    }
+    syncSimulantMarkerVitals();
+  };
+  const scheduleSimulantRespawn = (): void => {
+    cancelSimulantRespawn();
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.visible = false;
+    simulantWeaponState = null;
+    simulantCooldownSeconds = Number.POSITIVE_INFINITY;
+    simulantMuzzleFlashSeconds = 0;
+    if (simulantWeaponModel !== null) {
+      simulantWeaponModel.muzzleFlash.visible = false;
+    }
+    simulantRespawnTimer = window.setTimeout(() => {
+      simulantRespawnTimer = 0;
+      respawnSimulant();
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
+  };
+  const createSimulantWeaponState = (weapon: WeaponId): SimulantWeaponState => {
+    const definition = WEAPON_DEFINITIONS[weapon];
+    return {
+      ammoInMagazine: definition.magazineSize,
+      reserveAmmo: definition.reserveAmmo,
+      burstShotsRemaining: 0,
+      reloadingSeconds: 0,
+    };
+  };
+  const startSimulantWeaponReload = (weapon: WeaponId, weaponState: SimulantWeaponState): void => {
+    if (
+      weaponState.reloadingSeconds > 0 ||
+      weaponState.ammoInMagazine >= WEAPON_DEFINITIONS[weapon].magazineSize ||
+      weaponState.reserveAmmo <= 0
+    ) {
+      return;
+    }
+    weaponState.reloadingSeconds = WEAPON_DEFINITIONS[weapon].reloadSeconds;
+    weaponState.burstShotsRemaining = 0;
+  };
+  const completeSimulantWeaponReload = (
+    weapon: WeaponId,
+    weaponState: SimulantWeaponState,
+  ): void => {
+    const definition = WEAPON_DEFINITIONS[weapon];
+    const needed = definition.magazineSize - weaponState.ammoInMagazine;
+    if (needed <= 0 || weaponState.reserveAmmo <= 0) {
+      weaponState.reloadingSeconds = 0;
+      return;
+    }
+    if (definition.reloadMode === "clip") {
+      const loaded = Math.min(needed, weaponState.reserveAmmo);
+      weaponState.ammoInMagazine += loaded;
+      weaponState.reserveAmmo -= loaded;
+      weaponState.reloadingSeconds = 0;
+      return;
+    }
+    weaponState.ammoInMagazine += 1;
+    weaponState.reserveAmmo -= 1;
+    weaponState.reloadingSeconds =
+      weaponState.ammoInMagazine < definition.magazineSize && weaponState.reserveAmmo > 0
+        ? definition.reloadSeconds
+        : 0;
+  };
+  const fireSimulantWeapon = (
+    weapon: WeaponId,
+    weaponState: SimulantWeaponState,
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    maxDistance: number,
+  ): boolean => {
+    if (weaponRuntime === null) {
+      return false;
+    }
+    const definition = WEAPON_DEFINITIONS[weapon];
+    if (weaponState.ammoInMagazine <= 0) {
+      weaponState.burstShotsRemaining = 0;
+      startSimulantWeaponReload(weapon, weaponState);
+      return false;
+    }
+    if (
+      weaponState.reloadingSeconds > 0 &&
+      !canInterruptWeaponReload(definition, weaponState.ammoInMagazine)
+    ) {
+      return false;
+    }
+    if (weaponState.reloadingSeconds > 0) {
+      weaponState.reloadingSeconds = 0;
+    }
+    if (weaponState.burstShotsRemaining <= 0) {
+      weaponState.burstShotsRemaining = definition.burstSize;
+    }
+    weaponState.ammoInMagazine -= 1;
+    weaponState.burstShotsRemaining = Math.max(0, weaponState.burstShotsRemaining - 1);
+    simulantCooldownSeconds =
+      weaponState.burstShotsRemaining > 0
+        ? definition.fireIntervalSeconds
+        : definition.burstCooldownSeconds;
+    weaponRuntime.fireFrom(origin, direction, weapon, {
+      random: simulantRandom,
+      spreadRadians: resolveWeaponSpreadRadians(definition),
+      maxDistance,
+      showCameraMuzzle: false,
+      showWorldEffects: true,
+      playAudio: true,
+      playPassByAudio: true,
+      trackShotHits: false,
+      onTargetHit: () => {
+        if (!playerVitals.isDead) {
+          damagePlayer(resolveSimulantShotDamage(definition.damage, definition.pellets));
+        }
+      },
+    });
+    simulantMuzzleFlashSeconds = 0.055;
+    if (simulantWeaponModel !== null) {
+      simulantWeaponModel.muzzleFlash.visible = true;
+      simulantWeaponModel.muzzleFlash.scale.setScalar(1.2 + simulantRandom.nextFloat() * 0.7);
+    }
+    simulantVitals = applyPlayerProjectileO2Cost(
+      simulantVitals,
+      definition.damage,
+      definition.pellets,
+    );
+    syncSimulantMarkerVitals();
+    return true;
+  };
+  const getSimulantHitObject = (hitObject: THREE.Object3D): THREE.Object3D | null => {
+    let current: THREE.Object3D | null = hitObject;
+    while (current !== null) {
+      if (current.userData.simulantCombatMarker === true) {
+        return current;
+      }
+      current = current.parent;
+    }
+    return null;
+  };
+  const damageSimulant = (hitObject: THREE.Object3D, damage: number): void => {
+    if (
+      simulantMarker === null ||
+      simulantWeaponState === null ||
+      getSimulantHitObject(hitObject) === null
+    ) {
+      return;
+    }
+    const nextVitals = applyPlayerDamage(simulantVitals, damage);
+    if (nextVitals.damage <= 0) {
+      return;
+    }
+    simulantVitals = nextVitals.state;
+    syncSimulantMarkerVitals();
+    if (!nextVitals.killed) {
+      return;
+    }
+    scheduleSimulantRespawn();
   };
   const resetVitalsState = (): PlayerVitalsState => {
     playerVitals = resetPlayerVitals();
@@ -10075,9 +11789,13 @@ export const createMahjongTableScene = (
     isSprinting = false;
     lastMovementTapAtByKey.clear();
 
-    const preset = cameraPresets.seat;
-    camera.position.copy(preset.position);
-    camera.lookAt(preset.target);
+    const spawnPosition = resolveRandomSpawnPosition();
+    camera.position.set(
+      spawnPosition.x,
+      spawnPosition.y + STANDING_EYE_HEIGHT - PLAYER_COLLIDER_CENTER_HEIGHT,
+      spawnPosition.z,
+    );
+    camera.lookAt(0, camera.position.y, 0);
     debugFovOverride = null;
     camera.fov = debugEnabled ? DEBUG_STANDING_FOV : SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
@@ -10094,6 +11812,29 @@ export const createMahjongTableScene = (
     }
     activeDebugPreset = preset;
     setFocusCalibrationVisibility();
+    if (preset !== "worldPlanner" && !debugBoundsVisible) {
+      explorationWorld?.setDebugVisible(false);
+    }
+
+    if (preset === "worldPlanner") {
+      activeView = "overhead";
+      firstPersonControls.enabled = false;
+      if (firstPersonControls.isLocked) firstPersonControls.unlock();
+      onWindowBlur();
+      orbitControls.enabled = true;
+      const plannerPreset = visualCameraPresets.worldPlanner;
+      camera.position.copy(plannerPreset.position);
+      orbitControls.target.copy(plannerPreset.target);
+      orbitControls.update();
+      camera.far = 1400;
+      camera.updateProjectionMatrix();
+      explorationWorld?.setDebugVisible(true);
+      debugFovOverride = 42;
+      camera.fov = 42;
+      camera.updateProjectionMatrix();
+      persistDebugPreferences();
+      return;
+    }
 
     if (preset === "focusCalibration") {
       // Focus calibration is a walkable wing of the development map. Keep the
@@ -10519,6 +12260,7 @@ export const createMahjongTableScene = (
     if (boundsRoot !== null) {
       boundsRoot.visible = visible;
     }
+    explorationWorld?.setDebugVisible(visible);
     persistDebugPreferences();
   };
 
@@ -10682,6 +12424,56 @@ export const createMahjongTableScene = (
   const wallRoot = createWall(textureCache);
   scene.add(wallRoot);
   const anchors = createPresentationAnchors(scene, table, wallRoot);
+  const simulantSpawnAnchors: readonly THREE.Object3D[] = [
+    anchors.opponentHands.north,
+    anchors.opponentHands.east,
+    anchors.opponentHands.west,
+  ];
+  const simulantSpawnIndex = Math.floor(simulantRandom.nextFloat() * simulantSpawnAnchors.length);
+  simulantAnchor = simulantSpawnAnchors[simulantSpawnIndex] ?? anchors.opponentHands.north;
+  const simulantWeaponIndex = Math.floor(simulantRandom.nextFloat() * WEAPON_IDS.length);
+  simulantWeapon = WEAPON_IDS[simulantWeaponIndex] ?? WEAPON_IDS[0];
+  simulantWeaponState = simulantWeapon === null ? null : createSimulantWeaponState(simulantWeapon);
+  simulantVitals = createPlayerVitals();
+  simulantMarker = new THREE.Group();
+  simulantMarker.name = "SimulantSpawnMarker";
+  const spawnPosition = resolveSimulantSpawnPosition();
+  simulantSpawnPosition.set(spawnPosition.x, spawnPosition.y, spawnPosition.z);
+  simulantPosition.copy(simulantSpawnPosition);
+  simulantMarker.position.copy(simulantSpawnPosition);
+  simulantMarker.userData = {
+    simulantCombatMarker: true,
+    simulantHealth: simulantVitals.health,
+    simulantShield: simulantVitals.shield,
+    simulantO2: simulantVitals.o2,
+  };
+  const simulantColor = new THREE.Color(
+    WEAPON_DEFINITIONS[simulantWeapon]?.color ?? WEAPON_DEFINITIONS[WEAPON_IDS[0]].color,
+  );
+  simulantBody = createSimulantBody(simulantColor);
+  simulantBody.name = "SimulantCombatMarker";
+  simulantMarker.add(simulantBody);
+  simulantWeaponModel = createWeaponModel(simulantWeapon, 0.42);
+  simulantWeaponModel.root.name = `SimulantWeapon:${simulantWeapon}`;
+  simulantWeaponModel.root.position.copy(simulantWeaponBasePosition);
+  simulantWeaponModel.root.rotation.y = Math.PI;
+  simulantMarker.add(simulantWeaponModel.root);
+  const simulantRing = new THREE.Mesh(
+    new THREE.RingGeometry(0.15, 0.27, 18),
+    new THREE.MeshBasicMaterial({
+      color: simulantColor,
+      transparent: true,
+      opacity: 0.45,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  simulantRing.name = "SimulantCombatRing";
+  simulantRing.rotation.x = -Math.PI / 2;
+  simulantRing.position.y = 0.02;
+  simulantMarker.add(simulantRing);
+  scene.add(simulantMarker);
+  simulantCooldownSeconds = SIMULANT_START_COOLDOWN_SECONDS;
   addHand(
     scene,
     textureCache,
@@ -10967,6 +12759,15 @@ export const createMahjongTableScene = (
           aimingDownSights ? ZOOM_RECOIL_FEEDBACK_MULTIPLIER : 1,
         ),
       });
+    },
+    (hitObject, damage) => {
+      if (simulantMarker === null) {
+        return;
+      }
+      if (getSimulantHitObject(hitObject) === null) {
+        return;
+      }
+      damageSimulant(hitObject, damage);
     },
     (hasOutgoingWeapon) => {
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
@@ -11914,6 +13715,126 @@ export const createMahjongTableScene = (
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
     );
+    if (
+      simulantMarker !== null &&
+      simulantWeapon !== null &&
+      simulantWeaponState !== null &&
+      simulantAnchor !== null &&
+      weaponRuntime !== null &&
+      !playerVitals.isDead
+    ) {
+      const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+      const toPlayerX = camera.position.x - simulantPosition.x;
+      const toPlayerZ = camera.position.z - simulantPosition.z;
+      const horizontalDistance = Math.hypot(toPlayerX, toPlayerZ);
+      const simulantMoving = horizontalDistance > SIMULANT_STOP_DISTANCE_METERS;
+      simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
+        movementMagnitude: simulantMoving ? 1 : 0,
+        locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
+        walking: simulantMoving,
+        sprinting: false,
+        aimingDownSights: false,
+      });
+      const simulantMotion = simulantPerspectiveRig.update({
+        deltaSeconds: safeDelta,
+        lateralInput: 0,
+        movementMagnitude: simulantMoving ? 1 : 0,
+        movementSpeedRatio: simulantMoving ? SIMULANT_TROT_SPEED_RATIO : 0,
+        oxygenRatio: simulantVitals.o2 / PLAYER_MAX_O2,
+        crouching: false,
+        shiftEnabled: false,
+        bobEnabled: true,
+        aimingDownSights: false,
+        holdingBreath: false,
+        stabilizedByWall: false,
+        traversalActive: false,
+      });
+      syncSimulantPresentation(simulantMotion);
+      if (simulantMuzzleFlashSeconds > 0) {
+        simulantMuzzleFlashSeconds = Math.max(0, simulantMuzzleFlashSeconds - safeDelta);
+        if (simulantMuzzleFlashSeconds <= 0 && simulantWeaponModel !== null) {
+          simulantWeaponModel.muzzleFlash.visible = false;
+        }
+      }
+      if (simulantWeaponState.reloadingSeconds > 0) {
+        simulantWeaponState.reloadingSeconds = Math.max(
+          0,
+          simulantWeaponState.reloadingSeconds - safeDelta,
+        );
+        if (simulantWeaponState.reloadingSeconds <= 0) {
+          completeSimulantWeaponReload(simulantWeapon, simulantWeaponState);
+        }
+      }
+      syncSimulantMarkerVitals();
+      if (horizontalDistance > SIMULANT_STOP_DISTANCE_METERS) {
+        const moveDistance = Math.min(
+          horizontalDistance - SIMULANT_STOP_DISTANCE_METERS,
+          SIMULANT_TROT_SPEED_METERS_PER_SECOND * safeDelta,
+        );
+        simulantPosition.x += (toPlayerX / horizontalDistance) * moveDistance;
+        simulantPosition.z += (toPlayerZ / horizontalDistance) * moveDistance;
+        simulantPosition.x = THREE.MathUtils.clamp(
+          simulantPosition.x,
+          WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN,
+        );
+        simulantPosition.z = THREE.MathUtils.clamp(
+          simulantPosition.z,
+          WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN,
+        );
+      }
+      simulantMarker.position.copy(simulantPosition);
+      if (horizontalDistance > 0.1 && Number.isFinite(horizontalDistance)) {
+        simulantMarker.rotation.y = Math.atan2(
+          camera.position.x - simulantPosition.x,
+          camera.position.z - simulantPosition.z,
+        );
+      }
+      simulantMarker.updateMatrixWorld(true);
+      if (simulantWeaponModel !== null) {
+        simulantWeaponModel.muzzleFlash.getWorldPosition(simulantOrigin);
+      } else {
+        simulantOrigin.copy(simulantPosition);
+        simulantOrigin.y += SIMULANT_BODY_TARGET_HEIGHT_METERS * 0.55;
+      }
+      simulantDirection.copy(camera.position).sub(simulantOrigin);
+      const targetDistance = simulantDirection.length();
+      simulantCooldownSeconds = Math.max(0, simulantCooldownSeconds - safeDelta);
+      if (simulantCooldownSeconds <= 0) {
+        if (targetDistance > 0.1 && Number.isFinite(targetDistance)) {
+          simulantDirection.normalize();
+          const aimYaw = simulantMotion.aimSwayX + simulantMotion.recoilYaw;
+          const aimPitch = simulantMotion.aimSwayY + simulantMotion.recoilPitch;
+          simulantAimRight.crossVectors(simulantDirection, simulantWorldUp);
+          if (simulantAimRight.lengthSq() < 0.0001) {
+            simulantAimRight.crossVectors(simulantDirection, simulantFallbackRight);
+          }
+          simulantAimRight.normalize();
+          simulantAimUp.crossVectors(simulantAimRight, simulantDirection).normalize();
+          simulantDirection
+            .addScaledVector(simulantAimRight, aimYaw)
+            .addScaledVector(simulantAimUp, -aimPitch)
+            .normalize();
+          if (
+            fireSimulantWeapon(
+              simulantWeapon,
+              simulantWeaponState,
+              simulantOrigin,
+              simulantDirection,
+              targetDistance,
+            )
+          ) {
+            simulantPerspectiveRig.applyWeaponShotImpulse({
+              damage: WEAPON_DEFINITIONS[simulantWeapon].damage,
+              reticleOffset: resolveWeaponShotReticleOffset(simulantMotion),
+            });
+          }
+        } else {
+          simulantCooldownSeconds = 1;
+        }
+      }
+    }
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
     // projecting the lens into the post-process buffer.
@@ -11957,7 +13878,7 @@ export const createMahjongTableScene = (
     }
     // The focus lab is part of the same streamed world, so moving through it
     // must continue loading and retaining the surrounding development map.
-    explorationWorld?.update(camera.position);
+    explorationWorld?.update(camera.position, undefined, camera);
     explorationWorld?.updateKnockables(
       delta,
       camera.position,
@@ -12117,6 +14038,107 @@ export const createMahjongTableScene = (
       setCameraBobEnabled: setDebugCameraBobEnabled,
       setWireframe: setDebugWireframe,
       setBoundsVisible: setDebugBoundsVisible,
+      setWorldDebugLayerVisible: (layer, visible) => {
+        explorationWorld?.setDebugLayerVisible(layer, visible);
+      },
+      setWorldStreamingFrozen: (frozen) => {
+        explorationWorld?.setStreamingFrozen(frozen);
+      },
+      teleportToWorldChunk: (coord) => {
+        const target = explorationWorld?.teleportToChunk(coord);
+        if (target === undefined) {
+          return;
+        }
+        onWindowBlur();
+        firstPersonGroundY = target.y;
+        eyeHeight = STANDING_EYE_HEIGHT;
+        isCrouched = false;
+        jumpOffset = 0;
+        verticalVelocity = 0;
+        grounded = true;
+        physicsCharacterPosition = null;
+        if (activeView === "seat") {
+          camera.position.set(target.x, target.y + eyeHeight, target.z);
+          camera.updateMatrix();
+          camera.updateMatrixWorld(true);
+          syncPhysicsCharacterToCamera();
+        } else {
+          const orbitOffset = camera.position.clone().sub(orbitControls.target);
+          orbitControls.target.set(target.x, target.y, target.z);
+          camera.position.set(target.x, target.y, target.z).add(orbitOffset);
+          orbitControls.update();
+        }
+        resetMotionCalibration();
+        saveSceneState(true);
+      },
+      getWorldDebugSnapshot: () =>
+        explorationWorld?.getDebugSnapshot() ?? {
+          seed: roomSeed,
+          planHash: "",
+          chunksPerAxis: EXPLORATION_CHUNKS_PER_SIDE,
+          generationTimeMs: 0,
+          loadedChunkKeys: [],
+          loadedChunkStates: [],
+          streamingMetrics: {
+            activeChunkCount: 0,
+            activeGameplayChunkCount: 0,
+            activeHighChunkCount: 0,
+            activeLowChunkCount: 0,
+            queueLength: 0,
+            totalBuilds: 0,
+            lastBuildTimeMs: 0,
+            longestBuildTimeMs: 0,
+            longestGenerationFrameMs: 0,
+            drawCalls: 0,
+            triangles: 0,
+            geometryBytes: 0,
+            textureBytes: 0,
+          },
+          validation: {
+            valid: false,
+            failures: [],
+            travel: {
+              attackerToASeconds: 0,
+              attackerToBSeconds: 0,
+              defenderToASeconds: 0,
+              defenderToBSeconds: 0,
+              siteToSiteSeconds: 0,
+              firstContactSeconds: 0,
+            },
+            visibility: {
+              maximumVisibleDistanceM: 0,
+              maximumVisibleShare: 0,
+              maximumVisibleNodeId: null,
+              spawnToSpawnVisible: false,
+              spawnToObjectiveVisible: [],
+              objectiveToObjectiveVisible: false,
+              longSightlines: [],
+            },
+            connectedComponentCount: 0,
+            nodeDegrees: {},
+            score: 0,
+          },
+          toggles: {
+            chunkBoundaries: true,
+            planningGrid: true,
+            roadGraph: true,
+            buildingMasses: false,
+            combatGraph: true,
+            walkableRoutes: true,
+            routeWidths: true,
+            walkableCells: true,
+            attackerRegion: true,
+            defenderRegion: true,
+            objectiveMarkers: true,
+            chokePoints: true,
+            visibilityLines: true,
+            coverInfluence: true,
+            validationFailures: true,
+            freezeStreaming: false,
+          },
+          teleportChunk: null,
+        },
+      exportWorldPlan: () => explorationWorld?.exportPlanJson() ?? "{}",
       resetDefaults: resetDebugPreferences,
       /**
        * Teleport the camera to the focus‑calibration platform.
@@ -12143,6 +14165,8 @@ export const createMahjongTableScene = (
       saveSceneState(true);
       publishPlayerSpeed(0, true);
       disposed = true;
+      cancelDeathRespawn();
+      deathFadeOverlay.remove();
       window.cancelAnimationFrame(animationFrame);
       if (warmupTimer !== 0) {
         window.clearTimeout(warmupTimer);
@@ -12185,6 +14209,17 @@ export const createMahjongTableScene = (
       physicsRuntime?.dispose();
       physicsRuntime = null;
       physicsCharacterPosition = null;
+      cancelSimulantRespawn();
+      simulantMarker?.removeFromParent();
+      if (simulantMarker !== null) {
+        disposeObject(simulantMarker);
+        simulantMarker = null;
+      }
+      simulantBody = null;
+      simulantWeaponModel = null;
+      simulantWeapon = null;
+      simulantWeaponState = null;
+      simulantAnchor = null;
       weaponRuntime?.dispose();
       weaponRuntime = null;
       explorationWorld?.dispose();

@@ -16,6 +16,8 @@ export default defineConfig({
       "@hk-mahjong/persistence": fromRoot("./packages/persistence/src/index.ts"),
       "@hk-mahjong/tile-ui": fromRoot("./packages/tile-ui/src/index.ts"),
       "@hk-mahjong/test-fixtures": fromRoot("./packages/test-fixtures/src/index.ts"),
+      "@hk-mahjong/fps/world": fromRoot("./packages/fps/src/world/index.ts"),
+      "@hk-mahjong/fps": fromRoot("./packages/fps/src/index.ts"),
     },
   },
   test: {

@@ -36,6 +36,7 @@ import type {
   VisualShadowQuality,
   VisualToneMapper,
   WeaponStateSnapshot,
+  WorldDebugLayer,
 } from "./scene/mahjong-table.js";
 
 const DEBUG_PANEL_ENABLED =
@@ -49,6 +50,7 @@ const debugCameraPresets: readonly {
   { value: "table", label: "Table" },
   { value: "roomReveal", label: "Room reveal" },
   { value: "assetReview", label: "Asset review" },
+  { value: "worldPlanner", label: "World planner" },
   { value: "focusCalibration", label: "Focus calibration" },
   { value: "climbingGym", label: "Climbing gym" },
 ];
@@ -139,6 +141,7 @@ const isVisualCameraPreset = (value: unknown): value is VisualCameraPreset =>
   value === "table" ||
   value === "roomReveal" ||
   value === "assetReview" ||
+  value === "worldPlanner" ||
   value === "focusCalibration" ||
   value === "climbingGym";
 
@@ -390,6 +393,9 @@ const VisualDebugPanel = ({
   const [snapshot, setSnapshot] = React.useState<SceneDebugSnapshot>(() =>
     mount.debug.getSnapshot(),
   );
+  const [worldDebug, setWorldDebug] = React.useState(() => mount.debug.getWorldDebugSnapshot());
+  const [teleportChunkX, setTeleportChunkX] = React.useState(0);
+  const [teleportChunkZ, setTeleportChunkZ] = React.useState(0);
   const debugStateLastPayloadRef = React.useRef<string | null>(null);
   const debugStatePendingRef = React.useRef<{
     readonly scene: PersistedVisualDebugScene;
@@ -406,6 +412,7 @@ const VisualDebugPanel = ({
   React.useEffect(() => {
     const interval = window.setInterval(() => {
       setSnapshot(mount.debug.getSnapshot());
+      setWorldDebug(mount.debug.getWorldDebugSnapshot());
     }, 500);
     return () => window.clearInterval(interval);
   }, [mount]);
@@ -505,7 +512,16 @@ const VisualDebugPanel = ({
   const applyDebugChange = (change: () => void): void => {
     change();
     refresh();
+    setWorldDebug(mount.debug.getWorldDebugSnapshot());
     markDebugStateDirty();
+  };
+  const setWorldDebugLayer = (layer: WorldDebugLayer, visible: boolean): void => {
+    mount.debug.setWorldDebugLayerVisible(layer, visible);
+    setWorldDebug(mount.debug.getWorldDebugSnapshot());
+  };
+  const setWorldStreamingFrozen = (frozen: boolean): void => {
+    mount.debug.setWorldStreamingFrozen(frozen);
+    setWorldDebug(mount.debug.getWorldDebugSnapshot());
   };
   const submitRoomSeed = (event: React.SyntheticEvent<HTMLFormElement>): void => {
     event.preventDefault();
@@ -585,6 +601,31 @@ const VisualDebugPanel = ({
   const setBoundsVisible = (visible: boolean): void => {
     applyDebugChange(() => mount.debug.setBoundsVisible(visible));
   };
+  const exportWorldPlan = (): void => {
+    const blob = new Blob([mount.debug.exportWorldPlan()], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${mount.debug.getSnapshot().roomSeed}-world-plan.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+  const copyWorldSeed = (): void => {
+    try {
+      void navigator.clipboard.writeText(snapshot.roomSeed).catch(() => undefined);
+    } catch {
+      // Clipboard access is optional in local debug sessions.
+    }
+  };
+  const teleportToWorldChunk = (): void => {
+    const maxChunk = Math.max(0, worldDebug.chunksPerAxis - 1);
+    const x = Math.max(0, Math.min(maxChunk, Math.round(teleportChunkX)));
+    const z = Math.max(0, Math.min(maxChunk, Math.round(teleportChunkZ)));
+    mount.debug.teleportToWorldChunk({ x, z });
+    setTeleportChunkX(x);
+    setTeleportChunkZ(z);
+    setWorldDebug(mount.debug.getWorldDebugSnapshot());
+  };
   const resetDefaults = (): void => {
     applyDebugChange(() => mount.debug.resetDefaults());
   };
@@ -601,6 +642,27 @@ const VisualDebugPanel = ({
     setCameraPreset("climbingGym");
     setPanelExpanded(true);
   };
+  const worldLayerControls: readonly {
+    readonly layer: WorldDebugLayer;
+    readonly label: string;
+    readonly key: keyof typeof worldDebug.toggles;
+  }[] = [
+    { layer: "chunk-boundaries", label: "Chunk boundaries", key: "chunkBoundaries" },
+    { layer: "planning-grid", label: "5 m planning cells", key: "planningGrid" },
+    { layer: "road-graph", label: "Global road graph", key: "roadGraph" },
+    { layer: "building-masses", label: "Building masses", key: "buildingMasses" },
+    { layer: "combat-graph", label: "Combat graph", key: "combatGraph" },
+    { layer: "walkable-routes", label: "Walkable routes", key: "walkableRoutes" },
+    { layer: "route-widths", label: "Route widths", key: "routeWidths" },
+    { layer: "walkable-cells", label: "Walkable cells", key: "walkableCells" },
+    { layer: "attacker-region", label: "Attacker region", key: "attackerRegion" },
+    { layer: "defender-region", label: "Defender region", key: "defenderRegion" },
+    { layer: "objective-markers", label: "Objective markers", key: "objectiveMarkers" },
+    { layer: "choke-points", label: "Choke points", key: "chokePoints" },
+    { layer: "visibility-lines", label: "Visibility lines", key: "visibilityLines" },
+    { layer: "cover-influence", label: "Cover influence", key: "coverInfluence" },
+    { layer: "validation-failures", label: "Validation failures", key: "validationFailures" },
+  ];
   const radiansToDegrees = (radians: number): number => (radians * 180) / Math.PI;
   return (
     <aside className="scene-debug-panel" aria-label="Visual development controls">
@@ -658,6 +720,110 @@ const VisualDebugPanel = ({
           <button onClick={onNextRoom} type="button">
             Generate next room
           </button>
+          <button onClick={exportWorldPlan} type="button">
+            Export world plan JSON
+          </button>
+          <button onClick={copyWorldSeed} type="button">
+            Copy current seed
+          </button>
+          <fieldset>
+            <legend>World planner layers</legend>
+            {worldLayerControls.map((control) => (
+              <label className="scene-debug-check" key={control.layer}>
+                <input
+                  checked={worldDebug.toggles[control.key]}
+                  onChange={(event) =>
+                    setWorldDebugLayer(control.layer, event.currentTarget.checked)
+                  }
+                  type="checkbox"
+                />
+                {control.label}
+              </label>
+            ))}
+            <label className="scene-debug-check">
+              <input
+                checked={worldDebug.toggles.freezeStreaming}
+                onChange={(event) => setWorldStreamingFrozen(event.currentTarget.checked)}
+                type="checkbox"
+              />
+              Freeze chunk streaming
+            </label>
+            <div className="scene-debug-room-meta">
+              <span>{worldDebug.loadedChunkKeys.length} chunks loaded</span>
+              <span>
+                LODs: {worldDebug.streamingMetrics.activeGameplayChunkCount} gameplay ·{" "}
+                {worldDebug.streamingMetrics.activeHighChunkCount} high ·{" "}
+                {worldDebug.streamingMetrics.activeLowChunkCount} low
+              </span>
+              <span aria-label="Loaded chunk states">
+                {worldDebug.loadedChunkStates.length === 0
+                  ? "No chunk states"
+                  : worldDebug.loadedChunkStates
+                      .map(
+                        (state) =>
+                          `${String(state.coord.x)}:${String(state.coord.z)}=${state.state}/${state.lod}`,
+                      )
+                      .join(" · ")}
+              </span>
+              <span>Global plan {formatMetric(worldDebug.generationTimeMs, 1)} ms</span>
+              <span>
+                Combat validation: {worldDebug.validation.valid ? "pass" : "fail"} ·{" "}
+                {worldDebug.validation.failures.length} failures
+              </span>
+              {worldDebug.validation.failures.length > 0 ? (
+                <span aria-label="Validation failure details">
+                  {worldDebug.validation.failures
+                    .map(
+                      (failure) =>
+                        `${failure.code}: ${failure.message}${
+                          failure.nodeIds.length > 0 ? ` [${failure.nodeIds.join(", ")}]` : ""
+                        }`,
+                    )
+                    .join(" · ")}
+                </span>
+              ) : null}
+              <span>
+                A/B travel {formatMetric(worldDebug.validation.travel.attackerToASeconds, 1)}s /{" "}
+                {formatMetric(worldDebug.validation.travel.attackerToBSeconds, 1)}s · rotation{" "}
+                {formatMetric(worldDebug.validation.travel.siteToSiteSeconds, 1)}s
+              </span>
+              <span>
+                Queue {worldDebug.streamingMetrics.queueLength} · build{" "}
+                {formatMetric(worldDebug.streamingMetrics.lastBuildTimeMs, 1)} ms · longest{" "}
+                {formatMetric(worldDebug.streamingMetrics.longestBuildTimeMs, 1)} ms · frame{" "}
+                {formatMetric(worldDebug.streamingMetrics.longestGenerationFrameMs, 1)} ms
+              </span>
+              <span>
+                Chunk estimate {worldDebug.streamingMetrics.drawCalls} calls ·{" "}
+                {worldDebug.streamingMetrics.triangles} triangles ·{" "}
+                {Math.round(worldDebug.streamingMetrics.geometryBytes / 1024)} KiB geometry ·{" "}
+                {Math.round(worldDebug.streamingMetrics.textureBytes / 1024)} KiB textures
+              </span>
+            </div>
+            <div className="scene-debug-seed-form">
+              <label htmlFor="world-chunk-x">Chunk X</label>
+              <input
+                id="world-chunk-x"
+                max={worldDebug.chunksPerAxis - 1}
+                min="0"
+                onChange={(event) => setTeleportChunkX(Number(event.currentTarget.value))}
+                type="number"
+                value={teleportChunkX}
+              />
+              <label htmlFor="world-chunk-z">Chunk Z</label>
+              <input
+                id="world-chunk-z"
+                max={worldDebug.chunksPerAxis - 1}
+                min="0"
+                onChange={(event) => setTeleportChunkZ(Number(event.currentTarget.value))}
+                type="number"
+                value={teleportChunkZ}
+              />
+              <button onClick={teleportToWorldChunk} type="button">
+                Teleport to chunk
+              </button>
+            </div>
+          </fieldset>
           <button onClick={resetDefaults} type="button">
             Reset debug defaults
           </button>
@@ -666,6 +832,13 @@ const VisualDebugPanel = ({
           <legend>Player vitals</legend>
           <button onClick={() => mount.applyDamage(25)} type="button">
             Simulate 25 damage
+          </button>
+          <button
+            onClick={() => mount.applyDamage(9999)}
+            type="button"
+            title="Drop health and shield to zero immediately"
+          >
+            Suicide
           </button>
           <button onClick={() => mount.resetVitals()} type="button">
             Reset vitals
@@ -1597,6 +1770,10 @@ const App = (): React.JSX.Element => {
           >
             <span />
           </div>
+          <div
+            className={`scene-death-fade${playerVitals.isDead ? " is-visible" : ""}`}
+            aria-hidden="true"
+          />
           <header className="scene-overlay scene-overlay-intro">
             <p className="eyebrow">Hong Kong Old Style · NYC Social Table</p>
             <h1 id="table-heading">Stay in the hand.</h1>

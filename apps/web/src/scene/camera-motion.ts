@@ -97,6 +97,7 @@ export interface CameraMotionDamper {
   readonly applyJumpImpulse: (jumpSpeed: number) => void;
   readonly applyLandingImpulse: (impact: CameraLandingImpact) => void;
   readonly applyWeaponShotImpulse: (shot: CameraWeaponShotInput) => void;
+  readonly applyDeathTumble: () => void;
   readonly applyWeaponSwitchImpulse: (input: CameraWeaponSwitchInput) => void;
   readonly clearShift: () => void;
   readonly clearBob: () => void;
@@ -163,6 +164,10 @@ export const CAMERA_LANDING_VELOCITY_SCALE = 0.15;
 export const CAMERA_LANDING_ACCELERATION_SCALE = 0.002;
 export const CAMERA_LANDING_VELOCITY_THRESHOLD = 1;
 export const CAMERA_WEIGHT_IMPULSE_MAX = 7;
+const CAMERA_DEATH_TUMBLE_SECONDS = 1.4;
+const CAMERA_DEATH_TUMBLE_PITCH_RADIANS = Math.PI * 0.82;
+const CAMERA_DEATH_TUMBLE_ROLL_RADIANS = 0.58;
+const CAMERA_DEATH_TUMBLE_DROP_METERS = -0.58;
 /** Damage value used to normalize the four visual weapon profiles. */
 export const CAMERA_RECOIL_REFERENCE_DAMAGE = 100;
 /** The CSS radius of the outer reticle ring at the default 16 px root size. */
@@ -422,6 +427,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let lastLateralDirection = 0;
   let lateralIdleTime = Number.POSITIVE_INFINITY;
   let offsets = createDefaultOffsets();
+  let deathTumbleElapsedSeconds = Number.POSITIVE_INFINITY;
+  let deathTumbleActive = false;
 
   const clearShift = (): void => {
     shiftRoll = 0;
@@ -448,7 +455,17 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     };
   };
 
+  const applyDeathTumble = (): void => {
+    if (deathTumbleActive) {
+      return;
+    }
+    deathTumbleActive = true;
+    deathTumbleElapsedSeconds = 0;
+  };
+
   const reset = (): void => {
+    deathTumbleElapsedSeconds = Number.POSITIVE_INFINITY;
+    deathTumbleActive = false;
     shiftRoll = 0;
     shiftTarget = 0;
     bobPhase = 0;
@@ -508,6 +525,19 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
 
   const update = (input: CameraMotionUpdateInput): CameraMotionOffsets => {
     const deltaSeconds = clamp(input.deltaSeconds, MIN_DELTA_SECONDS, MAX_DELTA_SECONDS);
+    let deathTumbleProgress = 0;
+    if (deathTumbleActive) {
+      deathTumbleElapsedSeconds = Math.min(
+        CAMERA_DEATH_TUMBLE_SECONDS,
+        deathTumbleElapsedSeconds + deltaSeconds,
+      );
+      deathTumbleProgress = deathTumbleElapsedSeconds / CAMERA_DEATH_TUMBLE_SECONDS;
+    }
+    const easedDeathTumble = easeOutCubic(deathTumbleProgress);
+    const deathPitch = CAMERA_DEATH_TUMBLE_PITCH_RADIANS * easedDeathTumble;
+    const deathRoll = CAMERA_DEATH_TUMBLE_ROLL_RADIANS * easedDeathTumble;
+    const deathDrop = CAMERA_DEATH_TUMBLE_DROP_METERS * easedDeathTumble;
+
     const nextTraversalActive = input.traversalActive === true;
     if (nextTraversalActive && !traversalInputActive) {
       traversalTransitionElapsed = 0;
@@ -678,12 +708,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     const viewmodelTransition = traversalTransition ?? switchTransition;
 
     offsets = {
-      roll: shiftRoll,
+      roll: shiftRoll + deathRoll,
       headBob,
       weightShift,
-      verticalOffset: headBob + weightShift,
+      verticalOffset: headBob + weightShift + deathDrop,
       recoilYaw,
-      recoilPitch,
+      recoilPitch: recoilPitch + deathPitch,
       viewmodelOffset: resolveCameraViewmodelOffset(crouchAmount, aimAmount),
       viewmodelTransition,
       aimSwayX,
@@ -700,6 +730,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     applyJumpImpulse,
     applyLandingImpulse,
     applyWeaponShotImpulse,
+    applyDeathTumble,
     applyWeaponSwitchImpulse,
     clearShift,
     clearBob,

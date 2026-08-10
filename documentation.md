@@ -1,5 +1,72 @@
 # Architecture and implementation log
 
+## Procedural FPS city generator v0.1
+
+The visual-table branch is the presentation base for the procedural city. The multiplayer branch is
+kept separate for networking and authoritative-room work; it is not the source of the backdrop.
+
+The pure planner lives in `packages/fps/src/world` and is independent of Three.js. A normalized room
+seed and `WorldConfig` produce one global `WorldPlan`, then `deriveChunkPlan` slices that plan into
+50 m chunks. The default world is centered at `(-500, -500)` through `(500, 500)`, uses a 5 m layout
+grid, and exposes exactly 400 chunk coordinates. Roads, sidewalks, buildings, combat edges, cover,
+and collision are all plan data before rendering begins.
+
+The combat district is a deterministic 300 m × 300 m (6 × 6 chunk) template. It contains two team
+spawns, objective A/B, three principal lanes, connector/flank routes, open arenas, chokes, and
+placeholder cover. Candidates are retried with keyed randomness and validated for connectivity,
+node degree, route timing at the configured 6 m/s nominal speed, 2-D obstruction visibility, and cover.
+Authored visual-table rectangles are passed as reserved placement bounds, so generated combat geometry
+does not take over the penthouse, focus room, or climbing gym.
+
+`createExplorationWorld` consumes only the global plan. It renders roads and sidewalks from chunk
+slices, instanced building boxes, combat route surfaces, cover, and colored combat markers. Physics
+boxes are generated from the same building/cover parts. `ChunkManager` supplies 3/5/6 chunk streaming
+hysteresis and a 4 ms build budget; combat-district chunks are pinned while surrounding visual chunks
+are loadable and unloadable. A chunk's plan hash and edge signatures make seams and load order testable.
+
+Development mode (`?debug=1`) adds a World planner camera and a hidden plan overlay. The existing bounds
+toggle reveals chunk boundaries, the 5 m planning grid, global road graph, combat graph, long visibility
+lines, and validation-failure markers. The panel can export the current serialized `WorldPlan` JSON.
+The source contract is preserved in [docs/procedural-fps-city-generator-v0.1.md](docs/procedural-fps-city-generator-v0.1.md).
+
+## 2026-08-07 — Correct-base local competitor repair
+
+The local visual-table competitor remains scene-only and is implemented in the existing
+`visual-table-gb9d082b587` checkout. It is not the separate server-authoritative multiplayer/FPS
+lane. The opponent is now a normal-height visible character with a visible seeded weapon. It uses
+the same `PlayerVitalsState`, shield/health damage, O₂ projectile cost, movement-speed/trot, and
+camera-motion damper mechanisms as the local player. Its muzzle follows the character, and its
+line-of-sight shots call the existing weapon path's target callback so the player's ordinary vitals
+can actually be damaged. A shotgun applies its full pellet payload. Defeated opponents hide for the
+same three-second respawn interval as the player, then return with reset vitals and ammunition at a
+new seeded position. The scene still does not alter mahjong engine rules, hidden tile information,
+replays, or multiplayer state.
+
+## 2026-08-06 — Visual-table simulant combat prototype
+
+- In the visual table scene, added a seeded prototype opponent system:
+  - random opponent-spawn anchor from existing hand anchors (`north`, `east`, `west`)
+  - random weapon selected from `WEAPON_IDS` per room-seed stream
+  - optional visible marker at the spawn location for tracking combat state
+- Added player respawn behavior in the same scene: on kill, the shared camera death tumble remains
+  visible for a three-second transition while movement and fire input are cleared. The final 650 ms
+  fades to a full-screen black overlay, then `resetToSpawn` samples a seeded point in `WORLD_BOUNDS`,
+  settles to ground by physics, rotates the camera to face the map center, and fades back in.
+- Extended `WeaponRuntime` with a reusable `fireFrom` function used by player shots and the simulator.
+- Simulant fire now uses seeded per-shot spread and capped distance to the player camera, so each attempt
+  applies random aim from the same weapon parameters.
+- Prototype is intentionally scene-only and does not affect engine rules or game-state logic.
+
+## 2026-08-06 — Procedural weapon pickup distribution
+
+Weapon pickups are scene-only presentation objects and do not alter the authoritative mahjong engine. The scene calls
+`generateWeaponPickups(roomSeed, ...)` with the 1 km world bounds, authored play-area reservations, and known coarse
+physics obstacles. The generator creates 24 copies of every weapon (`pistol`, `shotgun`, `machineGun`, `sniper`,
+`carbine`, and `submachineGun`) by default (144 pickups total). A seeded sector/cell pass spreads the copies across the world; candidates
+inside reserved areas, obstacles, or the minimum pickup separation are rejected. The same room seed therefore produces
+the same map-wide pickup positions, while a different seed produces a different layout. Pickup meshes are created once
+with the scene and remain discoverable by traversal; collecting one still uses the existing walk-over or `E` interaction.
+
 ## 2026-08-02 — Repository initialization
 
 - The repository was empty, so the existing `main` checkout is the canonical implementation lane.
@@ -182,8 +249,8 @@
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
   is presentation state only and never includes authoritative game state or concealed tile data. Snapshots
   below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
-  drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
-  writes the safe snapshot before the next HMR reload.
+  drops into an unrecoverable position, the scene clears movement state, returns to a seeded randomised
+  seat-facing-map-center spawn, and writes that safe snapshot before the next HMR reload.
 - The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only an explicit debug-UI
   change. The panel keeps the latest dirty tuning payload in memory and sends it once with `keepalive` on
   `pagehide`; its 500 ms live telemetry refresh never writes the artifact. The Vite middleware also skips
@@ -258,9 +325,13 @@
   keeping the append-only world bounded by the explicit play-space limits. The streamed areas are South courtyard,
   West tea garden, East practice court, and North skybridge; the debug HUD reports the active area and loaded count.
 - The FPS play space uses five 100 m chunks from the origin in each direction, for a 1,000 m × 1,000 m navigable
-  world. The procedural backdrop doubles the per-chunk feature density for buildings, props, signs, and utility
-  posts, and weapon pickups use the same full-world bounds. Existing authored-area, world-bound, and focus-ramp
-  exclusion checks still guard every generated placement.
+  world. The procedural backdrop now runs a higher per-chunk feature density and taller building bounds, while
+  props, signs, and utility posts remain governed by the same seeded stream. Weapon pickups use the same full-world
+  bounds. Existing authored-area, world-bound, and focus-ramp exclusion checks still guard every generated placement.
+- Skyline tuning uses one shared seeded profile: the current density multiplier is `2.85`, district elevation maps to
+  `0.65–3.15` metres, and building height receives `1.15 × elevation + 0.75 × featureNoise` as a derived lift. The
+  same continuous inputs drive both density and silhouette height, so dramatic districts remain reproducible per room
+  seed without special-case building tables.
 - For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
   directory, then run:
 
@@ -425,6 +496,18 @@ pnpm start
 workspace package build first; Vite resolves the browser package sources for development, while
 `pnpm build` retains the complete package build for production artifacts.
 
+To run an isolated web preview beside another worktree, start the server separately if needed and
+pass the port directly to the filtered Vite script (do not add a second `--`):
+
+```bash
+pnpm --filter @hk-mahjong/server dev
+pnpm --filter @hk-mahjong/web dev --port 5175
+```
+
+The web development config aliases `@hk-mahjong/fps` to its TypeScript source, so a clean
+`pnpm install` is sufficient; a prior package build is not required for this preview. Open
+`https://127.0.0.1:5175` and accept the local self-signed certificate when prompted.
+
 After a visual-table coding agent finishes a feature or a batch of scene edits, run `pnpm hmr` from
 the repository root with `pnpm dev` still running. Ordinary file changes do not reload the connected
 browser. The command writes an ignored, worktree-local request marker and touches the scene HMR boundary
@@ -487,10 +570,10 @@ match combat or persistence state.
 ## Procedural weapons prototype
 
 The visual-table scene now includes a seeded pickup and shooting loop in `apps/web/src/scene/weapons.ts`.
-Each normalized room seed produces one starter pistol in the penthouse and a deterministic outdoor spread
-of pistol, shotgun, machine gun, sniper, scoped carbine, and submachine gun pickups. The penthouse also stages one visible pickup of each type
-around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
-physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
+Each normalized room seed now places all pistol, shotgun, machine gun, sniper, scoped carbine, and submachine gun
+pickups from one shared full-world placement stream. No dedicated table-side set remains; every pickup still honours
+reserved play-area rectangles and coarse physics obstacles, so seeded pickups do not appear inside authored rooms or
+city blockers.
 
 The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
 gun, and E equips the nearest pickup while stopped; number keys or Q switch
@@ -828,8 +911,12 @@ The four layers are mixed at the same shot start time:
 
 The damage curve uses configured per-bullet damage, not a shotgun's total pellet payload. The barrel curve uses the
 longest generated model barrel as the long-barrel endpoint. A scene-local `AudioContext` is created or resumed from the
-firing gesture; stopped source and filter nodes disconnect after their envelopes finish. Browsers without Web Audio or
-with a blocked autoplay context silently keep the visual shot effects and do not block gameplay.
+firing gesture; stopped source and filter nodes disconnect after their envelopes finish. Every layer routes through the
+same camera-following Web Audio listener and a positional output. The spatializer uses HRTF placement with inverse
+distance rolloff, while a bounded 1–32 m proximity envelope also protects browsers that expose only the legacy gain
+path. Player muzzle audio uses the measured world muzzle position; simulated opponent shots use their world origin.
+Browsers without Web Audio or with a blocked autoplay context silently keep the visual shot effects and do not block
+gameplay.
 
 ## Parametric carbine and burst submachine gun
 
@@ -852,5 +939,102 @@ that profile's magnification for its narrow-FOV world feed. Explicit zoom is req
 the carbine or sniper optic. Number-row keys `5` and `6` select the carbine and submachine gun, and `Q` cycles all six
 owned weapons.
 
-The armory chart and table-side pickup set are generated from `WEAPON_DEFINITIONS`, so changing a primitive profile
+The armory chart and pickup set are generated from `WEAPON_DEFINITIONS`, so changing a primitive profile
 automatically changes its HUD/chart row, pickup model, reload timing, damage-scaled effects, and optic/burst metadata.
+
+## Bullet pass-by audio
+
+Weapon shots may produce a separate bullet-whizz voice when the pellet ray passes near the listener. Its tone is derived from the same resolved gun profile as the muzzle report and uses an 80/20 mix: band-pass white noise provides the air-turbulence "ssshhh" layer, while a sine oscillator provides the whistle layer. Damage selects a high-to-low pitch range from approximately 5 kHz to 2.2 kHz for light rounds and 2.5 kHz to 700 Hz for heavy rounds. Closest approach controls gain, band-pass width, and sweep depth; projectile speed controls the short 28-100 ms duration. The shot's left/right position controls stereo panning. The whizz uses the same positional output and 1–32 m proximity envelope as every muzzle layer, so no weapon sound bypasses distance attenuation. This keeps the pass-by effect coupled to weapon identity while preserving the existing muzzle sound.
+
+Incoming simulant fire uses both the pass-by voice and its muzzle report. The muzzle report is delayed by source distance at 343 m/s; the whizz uses the profile-derived 280-900 m/s projectile timeline plus the final sound path from the pass point, so a distant incoming round is heard as a whizz first and the shot later. Short low-damage weapons trend subsonic; heavy long-barrel weapons trend supersonic. A scope does not change velocity. Timing follows the intended projectile travel distance rather than stopping at the first render-surface impact.
+
+## Simulant movement
+
+The scene-only simulant starts at a seeded random ground azimuth on the 500 m world radius. Each
+frame it moves toward the player at the shared O₂-neutral trot speed (8.2 m/s), stops 18 m away,
+and keeps its marker, facing, firing origin, and weapon effects on the same live position. A private
+instance of the shared perspective damper consumes O₂ during trot movement and every projectile,
+then feeds breathing sway and recoil into the simulant's aim.
+
+## Procedural city backdrop
+
+The visual-table backdrop now extends from the global visual-table plan instead of choosing roads and building
+positions independently inside each rendered chunk. `packages/fps/src/world` is pure TypeScript and
+does not import Three.js. Given a normalized room seed and generator version it creates:
+
+- centered world bounds `[-500, 500) × [-500, 500)`;
+- a 5 m planning grid and a 20 × 20 addressable grid of 50 m chunks;
+- a deterministic Manhattan road grid with 100 m local pitch, 200 m arterial pitch, and sidewalk strips;
+- 100 buildable blocks, four parcels per block, and seeded rectangular building masses. Road and
+  sidewalk corridors are subtracted before block creation, so ordinary buildings never occupy a
+  generated road corridor;
+- one 300 m (6 × 6 chunk) combat-district marker at least two chunks from the perimeter and outside reserved authored
+  areas.
+
+The city and chunk dimensions remain configurable, but v0.1 intentionally accepts only a 300 m combat district. The
+fixed template is calibrated against the documented travel-time and visibility envelopes; a different district size
+must not produce a silently invalid competitive plan and is rejected until a new template is calibrated.
+
+`createExplorationWorld` generates this plan once, stores its plan hash on `ExplorationWorldRoot`, and materializes only
+the slices intersecting each chunk. Shared-edge signatures are derived from the global road slices, so neighboring chunks
+cannot make different road decisions. Building parts are clipped at chunk boundaries and share the original stable
+building ID. Decorative props remain keyed by global chunk coordinates, but they cannot alter road, parcel, building, or
+combat topology.
+
+The v0.1 city shell uses one restrained urban material style with seeded prop variation. Each authored building now
+receives deterministic facade windows and one external fire-stair stairwell with floor landings up to its roof. The
+final landing extends through the facade by a small deterministic overlap, making the roof transition walkable while
+the building remains a coarse solid mass. Windows and stair steps are instanced per chunk; stair flights also
+contribute sloped physics boxes so the player can climb between levels and step onto the rooftop surface. Low-detail
+chunks keep only simplified building masses.
+
+The authored penthouse, looking-focus room, climbing gym, and focus calibration ramp remain reserved. Ground, road, and
+sidewalk surfaces are clipped around the play areas; building and prop collision creation still rejects the ramp and all
+authored squares. The first version intentionally keeps flat ground, placeholder boxes, and the existing visual palette;
+it does not add interiors, terrain elevation, traffic, WFC, destruction, or network replication.
+
+### Combat candidate selection and validation
+
+The generator evaluates the complete `WorldConfig.maxGenerationAttempts` budget. It keeps all valid candidates and
+selects the highest score, so loading order or the first passing attempt cannot change the selected district. The graph
+has three principal approaches, two objectives with two entrances each, cross-connectors, and an explicit flank edge.
+Connectivity checks reject isolated components, unintended dead ends, over-degree junctions, missing objective
+entrances, missing principal lanes, missing flanks, or a defender edge that directly controls the middle lane. Timing
+uses `nominalRunSpeedMps`; visibility uses a deterministic two-dimensional obstruction raster; and cover checks run
+before geometry is built. An all-attempt failure returns the seed-transformed canonical template plus its validation
+receipt so the world format always contains a district to inspect.
+
+### Chunk geometry, streaming, and debug telemetry
+
+`deriveChunkPlan` includes a one-cell halo around each 50 m chunk for adjacency decisions. Roads, sidewalks, combat
+routes, cover, facade windows, and stair flights are emitted as instanced batches per chunk/archetype; buildings and
+decorative props use existing instancing. `buildChunkGeometry` estimates batch draw calls, indexed triangles, geometry bytes, and the per-chunk texture
+allocation estimate. `ChunkManager` records active chunks by gameplay/high/low LOD, queue length, build duration, longest
+build, and aggregate geometry/texture estimates. Gameplay chunks retain collision and combat features, high-detail chunks
+retain the visual blockout, and low-detail chunks retain only building masses for the skyline. The 6 × 6 combat district is
+pinned while surrounding visual chunks stream with 3/5/6-chunk hysteresis and a 4 ms construction budget. Low-detail
+building instances use an unlit material and omit props, combat markers, and collision so the distant skyline stays cheap.
+
+The development world planner exposes independent, colour-coded layers for chunk boundaries, 5 m planning cells, the global
+road graph, building masses, combat centerlines, walkable routes, route widths, walkable cells, attacker and defender route
+regions, objective markers, choke points, visibility lines, cover influence, and validation failures. It also supports
+streaming freeze, current-seed copy, per-chunk state/LOD readout, chunk teleport requests, JSON plan export,
+travel/visibility readouts, and build/geometry/texture telemetry. Chunk groups carry explicit world-space culling boxes, and
+the teleport control now moves the active player/camera while updating the streamed target. These controls are diagnostic only;
+they do not alter the deterministic `WorldPlan`.
+
+### Visual-table and multiplayer boundary
+
+The procedural city lives on the refined visual-table branch. It is the shared world backdrop and future match-space
+source for multiplayer; it is not a second renderer or a replacement for the existing first-person camera, weapon,
+movement, O₂, collision, or presentation systems. A later networked match should replicate player and match state
+against the serialized `WorldPlan` and its stable object IDs. Chunk loading may materialize geometry locally, but it must
+never make a road, building, objective, or combat-route decision independently.
+
+Combat validation now uses the fixed v0.1 envelopes: 2–5 seconds of defender advantage, 10–20 seconds to first
+contact, and 15–30 seconds for site rotation. It also checks primary-space reachability for both teams, distinct
+attacker/defender objective entrances, two or three cross-connectors, cover escape gaps, and alternate-route or cover
+support for long sightlines, and physical obstacle clearance against every graph corridor. When a transformed wall would cross
+an authoritative route, the planner deterministically splits the wall around the route before visibility and collision data
+are emitted. The graph template scales its local coordinates from `WorldConfig.combatDistrictSizeM`; only graph nodes are
+snapped, so scaled obstacle and cover rectangles retain a non-zero width.
