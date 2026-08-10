@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createFallbackMahjongPhysics,
   createMahjongPhysics,
+  createPhysicsBoxSpatialIndex,
   resolvePhysicsBoxGeometrySignature,
   type PhysicsBox,
 } from "./mahjong-physics.js";
@@ -19,6 +20,23 @@ const TEST_COLLIDERS: readonly PhysicsBox[] = [
 ];
 
 describe("mahjong physics", () => {
+  it("returns nearby colliders in stable source order without scanning distant boxes", () => {
+    const near: PhysicsBox = {
+      obstacleId: "near",
+      center: { x: 3, y: 1, z: 2 },
+      halfExtents: { x: 1, y: 1, z: 1 },
+    };
+    const far: PhysicsBox = {
+      obstacleId: "far",
+      center: { x: 80, y: 1, z: 80 },
+      halfExtents: { x: 1, y: 1, z: 1 },
+    };
+    const index = createPhysicsBoxSpatialIndex([TEST_COLLIDERS[0]!, near, far]);
+
+    expect(index.query({ x: 0, y: 0, z: 0 }, 4)).toEqual([TEST_COLLIDERS[0]!, near]);
+    expect(index.query({ x: 80, y: 0, z: 80 }, 1)).toEqual([far]);
+  });
+
   it("keeps a stable obstacle ID separate from mutable collider geometry", () => {
     const original: PhysicsBox = {
       obstacleId: "streamed-wall",

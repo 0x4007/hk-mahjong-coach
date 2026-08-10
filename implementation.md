@@ -1,5 +1,18 @@
 # Implementation status
 
+## 2026-08-10 — Procedural Debugging 03 climbing gym
+
+- Added `debugging-03`, a deterministic 750 m × 750 m standalone climbing-gym map. Seeded blocks use a sparse field layout,
+  reach up to 10 m, and share their geometry plan with static physics boxes. Alternating face ledges provide reachable
+  bouldering steps so the existing vault, ledge-grab, and wall-climb controller can traverse tall blocks.
+- Added daytime industrial presentation matching the Warehouse lane: pale sky, blue-grey fog, daylight fill, polished epoxy
+  floor, low-emission cyan/red holds, yellow course markers, and restrained high-bay fixtures. Map selection, first-person spawn, map bounds, weapon edges,
+  static physics, and the no-streamed-prop exploration seam now recognize the third map.
+- Constrained the HMR agent note and weapon loadout to the right half of the viewport (`max-width: 50vw`) so the play/start
+  surface stays visible.
+- Added deterministic map-catalog coverage for dimensions, maximum height, ledge generation, render/physics counts, spawn,
+  and fog metadata. Browser and HMR acceptance were not run because this lane is not authorized to open another browser.
+
 ## 2026-08-08 — Damaged Warehouse servers lose their status lights
 
 - Added a per-cabinet damage presentation state to the Warehouse rack resource. A projectile or melee impact marks the
@@ -2272,3 +2285,13 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   the same linear curve.
 - Updated the pure traversal-energy regression and movement documentation. Browser/HMR acceptance was not run because
   this balance-only change does not alter scene presentation and the existing one-window browser remains user-owned.
+
+## 2026-08-10 — Debugging 03 daytime course and runtime locality
+
+- Debugging 03 now presents a daytime climbing gym: pale sky and fog, a hemisphere skylight, a directional sun, brighter
+  slate-blue blocks, and restrained ledge/high-bay emission keep the player and holds readable.
+- The 750 m procedural block field remains fully generated with ten-metre climbable geometry. A deterministic coarse
+  physics spatial index now limits the fallback controller and climbing traversal probes to nearby colliders, preventing
+  the level from appearing frozen while retaining the complete course collider set for Rapier.
+- The HMR agent note and weapon loadout are right-aligned and capped at 50vw so they stay in the right half of the screen
+  and do not cover the map/play controls. Browser acceptance remains with the user's existing one-window session.

@@ -1,5 +1,19 @@
 # Architecture and implementation log
 
+## 2026-08-10 — Debugging 03 procedural climbing gym
+
+`debugging-03` is an isolated procedural bouldering field covering 750 m × 750 m. The generator is seeded by the room
+seed and creates a sparse grid of slate-blue blocks with heights quantized from 1 m to 10 m. Every rendered block and
+its alternating cyan/red climbing ledges has a matching `PhysicsBox` with a stable obstacle ID. The ledges are spaced at
+reachable intervals, so the existing traversal controller can vault and climb the course without adding map-specific game
+rules. The scene uses a daytime Warehouse presentation language (pale sky, blue-grey haze, daylight fill, polished epoxy
+floor, restrained high-bay fixtures, and readable yellow/cyan/red wayfinding). The map has no city streaming or melee props; the shared empty
+exploration seam still supplies the normal physics refresh and teardown path.
+
+Select it from the Map control or load `?map=debugging-03`. Change the room seed to regenerate a different deterministic
+field. The generator includes deterministic map regressions; strict typecheck, build, lint, changed-source formatting,
+and diff checks pass. Rendered browser/HMR acceptance remains a user-owned one-window check.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the
@@ -1445,3 +1459,14 @@ belong to the current scene match: a map or room remount starts both at zero, wh
 unchanged. A total changes only when the shared combat damage router reports a lethal result with `player` or
 `bot:simulant` as the attacker. This keeps the scoreboard tied to the same shield/health and death lifecycle as the
 combat presentation and avoids crediting an environmental or unattributed death.
+
+## Debugging 03 climbing gym
+
+Debugging 03 is a deterministic 750 m × 750 m daytime bouldering field. Seeded blocks are rendered as instanced slate-blue
+meshes up to 10 m tall, with alternating-face ledges at climbable vertical intervals. Its pale sky, low-contrast haze,
+hemisphere skylight, directional sun, and low ledge emission keep the player body and holds visible in first-person play.
+
+The full block and ledge collider set remains available to Rapier. JavaScript fallback movement and traversal helpers use a
+stable coarse spatial index to inspect only nearby boxes, avoiding a per-frame scan of the entire large course while
+preserving deterministic obstacle IDs and climb transitions. The development HMR note and weapon loadout are both pinned
+to the right side with a maximum width of 50vw.

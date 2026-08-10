@@ -35,6 +35,16 @@ import {
   WAREHOUSE_SPOTLIGHT_QUADRANTS,
 } from "./debugging-two-map.js";
 import { generateWeaponPickupsOnEdges, WEAPON_IDS } from "./weapons.js";
+import {
+  CLIMBING_GYM_BLOCK_GENERATION,
+  CLIMBING_GYM_BLOCK_MAX_HEIGHT_METERS,
+  CLIMBING_GYM_FOG_GENERATION,
+  CLIMBING_GYM_SKY_COLOR,
+  DEBUGGING_THREE_WORLD_BOUNDS,
+  DEBUGGING_THREE_WORLD_SIZE_METERS,
+  createClimbingGymFog,
+  createDebuggingThreeMap,
+} from "./debugging-three-map.js";
 
 describe("visual map catalog", () => {
   it("names the current authored map Debugging 01", () => {
@@ -44,7 +54,7 @@ describe("visual map catalog", () => {
 
   it("contains selectable, uniquely identified map definitions", () => {
     const ids = VISUAL_MAP_CATALOG.map((map) => map.id);
-    expect(ids).toEqual(["debugging-01", "debugging-02"]);
+    expect(ids).toEqual(["debugging-01", "debugging-02", "debugging-03"]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(VISUAL_MAP_CATALOG.every((map) => map.description.length > 0)).toBe(true);
     expect(getVisualMapDefinition("debugging-01").generation).toBe("authored");
@@ -52,6 +62,49 @@ describe("visual map catalog", () => {
     expect(getVisualMapDefinition("debugging-02").label).toBe("Warehouse");
     expect(getVisualMapDefinition("debugging-02").description).toBe("Industrial warehouse");
     expect(getVisualMapDefinition("debugging-02").document).toBeUndefined();
+    expect(getVisualMapDefinition("debugging-03").generation).toBe("procedural");
+    expect(getVisualMapDefinition("debugging-03").label).toBe("Climbing Gym");
+    expect(getVisualMapDefinition("debugging-03").document).toBeUndefined();
+  });
+
+  it("generates a deterministic 750 m climbing field with ten-metre climbable blocks", () => {
+    const firstScene = new THREE.Scene();
+    const secondScene = new THREE.Scene();
+    const first = createDebuggingThreeMap(firstScene, "climbing-seed");
+    const second = createDebuggingThreeMap(secondScene, "climbing-seed");
+    const blocks = first.root.getObjectByName("ClimbingGymProceduralBlocks");
+    const ledges = first.root.getObjectByName("ClimbingGymProceduralLedges");
+    expect(DEBUGGING_THREE_WORLD_SIZE_METERS).toBe(750);
+    expect(DEBUGGING_THREE_WORLD_BOUNDS).toEqual({ minX: -375, maxX: 375, minZ: -375, maxZ: 375 });
+    expect(first.root.userData.mapId).toBe("debugging-03");
+    expect(first.root.userData.generation).toBe(CLIMBING_GYM_BLOCK_GENERATION);
+    expect(first.root.userData.worldWidthMeters).toBe(750);
+    expect(first.root.userData.worldDepthMeters).toBe(750);
+    expect(first.root.userData.maxHeightMeters).toBe(CLIMBING_GYM_BLOCK_MAX_HEIGHT_METERS);
+    expect(first.root.userData.climbable).toBe(true);
+    expect(first.physicsBoxes).toEqual(second.physicsBoxes);
+    expect(first.physicsBoxes.length).toBeGreaterThan(600);
+    expect(first.root.userData.blockCount).toBeGreaterThan(200);
+    expect(first.root.userData.ledgeCount).toBeGreaterThan(400);
+    expect(blocks).toBeInstanceOf(THREE.InstancedMesh);
+    expect(ledges).toBeInstanceOf(THREE.InstancedMesh);
+    expect((blocks as THREE.InstancedMesh | undefined)?.count).toBe(first.root.userData.blockCount);
+    expect((ledges as THREE.InstancedMesh | undefined)?.count).toBe(first.root.userData.ledgeCount);
+    const topHeights = first.physicsBoxes.map((box) => box.center.y + box.halfExtents.y);
+    expect(Math.max(...topHeights)).toBeGreaterThan(8);
+    expect(Math.max(...topHeights)).toBeLessThanOrEqual(CLIMBING_GYM_BLOCK_MAX_HEIGHT_METERS);
+    expect(first.physicsBoxes.every((box) => box.obstacleId !== undefined)).toBe(true);
+    expect(first.physicsBoxes.some((box) => box.obstacleId?.includes("-ledge-") === true)).toBe(
+      true,
+    );
+    expect(first.spawn).toEqual({ x: 0, y: 0, z: 349 });
+    expect(first.simulantSpawn).toEqual({ x: 0, y: 1.05, z: -349 });
+    expect(firstScene.background).toEqual(new THREE.Color(CLIMBING_GYM_SKY_COLOR));
+    expect(firstScene.fog).toEqual(createClimbingGymFog());
+    expect(firstScene.fog?.name).toBe(CLIMBING_GYM_FOG_GENERATION);
+    expect(firstScene.environment).toBeNull();
+    expect(first.root.getObjectByName("ClimbingGymDaylight")).toBeInstanceOf(THREE.Group);
+    expect(first.root.getObjectByName("ClimbingGymHighBayLighting")).toBeInstanceOf(THREE.Group);
   });
 
   it("falls back to Debugging 01 for an unknown query value", () => {

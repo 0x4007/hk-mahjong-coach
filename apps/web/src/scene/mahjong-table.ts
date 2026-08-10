@@ -13,6 +13,7 @@ import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahj
 import {
   DEFAULT_VISUAL_MAP_ID,
   getVisualMapDefinition,
+  isStandaloneProceduralVisualMap,
   normalizeVisualMapId,
   type VisualMapId,
 } from "./map-catalog.js";
@@ -126,19 +127,40 @@ import {
   type DebuggingTwoMeleeKind,
   type DebuggingTwoMapResources,
 } from "./debugging-two-map.js";
+import {
+  DEBUGGING_THREE_WORLD_BOUNDS,
+  createClimbingGymFog,
+  createDebuggingThreeMap,
+  type ClimbingGymMapResources,
+} from "./debugging-three-map.js";
 
 export type { WeaponId, WeaponInventorySnapshot, WeaponStateSnapshot } from "./weapons.js";
 export type { MeleeObjectSnapshot, MeleeStateSnapshot } from "./melee.js";
 export type { VisualMapId } from "./map-catalog.js";
 
+interface StandaloneProceduralMapResources {
+  readonly root: THREE.Group;
+  readonly physicsBoxes: readonly PhysicsBox[];
+  readonly staticPhysicsBoxes: readonly PhysicsBox[];
+  readonly spawn: { readonly x: number; readonly y: number; readonly z: number };
+  readonly simulantSpawn: { readonly x: number; readonly y: number; readonly z: number };
+  readonly variant: string;
+  readonly explorationArea: string;
+  readonly cyanMaterials: readonly THREE.MeshStandardMaterial[];
+  readonly redMaterials: readonly THREE.MeshStandardMaterial[];
+  readonly textures: readonly THREE.Texture[];
+}
+
 import {
   createFallbackMahjongPhysics,
   createMahjongPhysics,
+  createPhysicsBoxSpatialIndex,
   resolvePhysicsBoxGeometrySignature,
   resolvePhysicsBoxObstacleId,
   type MahjongPhysicsRuntime,
   type PhysicsBodyState,
   type PhysicsBox,
+  type PhysicsBoxSpatialIndex,
   type PhysicsVector,
 } from "./mahjong-physics.js";
 import {
@@ -2914,6 +2936,10 @@ const PHYSICS_IGNORED_OBJECT_NAMES: ReadonlySet<string> = new Set([
 
 const PHYSICS_MINIMUM_HALF_EXTENT = 0.025;
 
+/** Keep climbing-course JavaScript traversal probes local to the active block. */
+const CLIMBING_GYM_PHYSICS_QUERY_RADIUS_METERS = 18;
+const CLIMBING_GYM_WALL_QUERY_RADIUS_METERS = 4;
+
 const isPhysicsIgnored = (object: THREE.Object3D): boolean => {
   let current: THREE.Object3D | null = object;
   while (current !== null) {
@@ -3897,16 +3923,16 @@ export const resolveHumanEyePupilDiameter = (luminance: number): number => {
 };
 
 /**
- * Keep display exposure and eye adaptation separate. The warehouse is lit by
- * isolated pools against a black background, so its global render estimate is
- * not a useful proxy for the player's dark adaptation.
+ * Keep display exposure and eye adaptation separate. The standalone courses
+ * are lit by isolated pools against a black background, so their global render
+ * estimate is not a useful proxy for the player's dark adaptation.
  */
 export const resolveHumanEyeAdaptationLuminance = (
   sceneLuminance: number,
-  isWarehouse: boolean,
+  isDarkCourse: boolean,
 ): number => {
   const safeLuminance = Number.isFinite(sceneLuminance) ? sceneLuminance : 1;
-  return isWarehouse ? Math.min(safeLuminance, HUMAN_EYE_DARK_LUMINANCE) : safeLuminance;
+  return isDarkCourse ? Math.min(safeLuminance, HUMAN_EYE_DARK_LUMINANCE) : safeLuminance;
 };
 
 /** Use different, pupil-aware accommodation timing for near and far gaze changes. */
@@ -11120,6 +11146,40 @@ interface ExplorationChunk {
   readonly knockableProps: readonly ExplorationKnockable[];
 }
 
+/**
+ * Standalone procedural courses have no streamed props or city chunks. Keep
+ * the common exploration seam alive so melee, physics refresh, and teardown
+ * remain identical to the authored and Warehouse maps.
+ */
+const createStaticCourseExplorationWorld = (
+  area: string,
+  onAreaChange?: (nextArea: string) => void,
+): ExplorationWorld => {
+  let currentArea = area;
+  return {
+    update: () => {
+      if (currentArea !== area) {
+        currentArea = area;
+        onAreaChange?.(currentArea);
+      }
+    },
+    updateKnockables: () => undefined,
+    getArea: () => currentArea,
+    getLoadedChunkCount: () => 0,
+    getPhysicsBoxes: () => [],
+    getMeleePickups: () => [],
+    getMeleeObjectIdForHit: () => null,
+    getMeleeSupportTarget: () => null,
+    getRagdollObjectIdForHit: () => null,
+    equipMeleeObject: () => null,
+    dropMeleeObject: () => false,
+    applyMeleeHit: () => false,
+    applyProjectileHit: () => false,
+    getPhysicsVersion: () => 0,
+    dispose: () => undefined,
+  };
+};
+
 interface ExplorationKnockable {
   readonly mesh: THREE.InstancedMesh;
   readonly index: number;
@@ -13570,16 +13630,20 @@ export const createMahjongTableScene = (
   const debugEnabled = options.debug === true;
   const mapId = normalizeVisualMapId(options.mapId ?? DEFAULT_VISUAL_MAP_ID);
   const isCleanSlateMap = mapId === "debugging-02";
+  const isClimbingGymMap = mapId === "debugging-03";
+  const isStandaloneProceduralMap = isStandaloneProceduralVisualMap(mapId);
   const activeWorldBounds: WorldBounds = isCleanSlateMap
     ? DEBUGGING_TWO_WORLD_BOUNDS
-    : WORLD_BOUNDS;
+    : isClimbingGymMap
+      ? DEBUGGING_THREE_WORLD_BOUNDS
+      : WORLD_BOUNDS;
   const roomSeed = normalizeVisualRoomSeed(options.roomSeed);
   const debugPreferencesStorage = getVisualDebugPreferencesStorage(debugEnabled);
   const persistedDebugPreferences = readVisualDebugPreferences(debugPreferencesStorage);
   const enabledAreas: Record<VisualSceneAreaId, boolean> = {
     ...DEFAULT_ENABLED_VISUAL_SCENE_AREAS,
   };
-  if (isCleanSlateMap) {
+  if (isStandaloneProceduralMap) {
     for (const area of VISUAL_SCENE_AREA_IDS) {
       enabledAreas[area] = false;
     }
@@ -13604,7 +13668,7 @@ export const createMahjongTableScene = (
   const visualCameraPresets = createVisualCameraPresets();
   const sceneStateStorage = getVisualSceneStateStorage();
   const persistedSceneState = readVisualSceneState(sceneStateStorage, roomSeed);
-  const authoredRoomMap = isCleanSlateMap ? null : getAuthoredVisualMapDocument(mapId);
+  const authoredRoomMap = isStandaloneProceduralMap ? null : getAuthoredVisualMapDocument(mapId);
   const persistedQuality = persistedDebugPreferences?.qualityMode;
   const requestedQuality =
     options.quality ?? (persistedQuality === "adaptive" ? "auto" : persistedQuality);
@@ -13616,9 +13680,19 @@ export const createMahjongTableScene = (
     position: new THREE.Vector3(0, 42, 22),
     target: new THREE.Vector3(0, 0, 0),
   };
+  const climbingGymSeatPreset: CameraPreset = {
+    position: new THREE.Vector3(0, STANDING_EYE_HEIGHT, DEBUGGING_THREE_WORLD_BOUNDS.maxZ - 26),
+    target: new THREE.Vector3(0, 2.4, DEBUGGING_THREE_WORLD_BOUNDS.maxZ - 90),
+  };
+  const climbingGymOverheadPreset: CameraPreset = {
+    position: new THREE.Vector3(0, 260, 280),
+    target: new THREE.Vector3(0, 0, 0),
+  };
   const activeSceneCameraPresets: Readonly<Record<SceneView, CameraPreset>> = isCleanSlateMap
     ? { seat: cleanSlateSeatPreset, overhead: cleanSlateOverheadPreset }
-    : cameraPresets;
+    : isClimbingGymMap
+      ? { seat: climbingGymSeatPreset, overhead: climbingGymOverheadPreset }
+      : cameraPresets;
   const activeVisualCameraPresets: Readonly<Record<VisualCameraPreset, CameraPreset>> =
     isCleanSlateMap
       ? {
@@ -13630,7 +13704,17 @@ export const createMahjongTableScene = (
           },
           assetReview: cleanSlateOverheadPreset,
         }
-      : visualCameraPresets;
+      : isClimbingGymMap
+        ? {
+            ...visualCameraPresets,
+            table: climbingGymSeatPreset,
+            roomReveal: {
+              position: new THREE.Vector3(100, 86, 120),
+              target: new THREE.Vector3(0, 0, 0),
+            },
+            assetReview: climbingGymOverheadPreset,
+          }
+        : visualCameraPresets;
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(COLORS.sky);
   // Start authored maps fully clear. Warehouse installs its map-local haze
@@ -13670,7 +13754,7 @@ export const createMahjongTableScene = (
   renderer.shadowMap.enabled = quality.shadows !== "off";
   // The warehouse uses softer shadow receivers to complement its high-bay
   // pools and ground-truth contact pass; keep the penthouse's sharper default.
-  renderer.shadowMap.type = isCleanSlateMap ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  renderer.shadowMap.type = isStandaloneProceduralMap ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.AgXToneMapping;
   renderer.toneMappingExposure = 1.02;
@@ -13709,16 +13793,16 @@ export const createMahjongTableScene = (
   composer.addPass(new RenderPass(scene, camera));
   const gtaoPass = new GTAOPass(scene, camera, 512, 320);
   gtaoPass.output = GTAOPass.OUTPUT.Default;
-  gtaoPass.blendIntensity = isCleanSlateMap ? 1.05 : 0.72;
+  gtaoPass.blendIntensity = isStandaloneProceduralMap ? 1.05 : 0.72;
   // Ground-truth ambient occlusion supplies ray-style crate contact shading
   // in the warehouse; other maps keep it opt-in from the debug panel.
-  gtaoPass.enabled = isCleanSlateMap;
+  gtaoPass.enabled = isStandaloneProceduralMap;
   gtaoPass.updateGtaoMaterial({
-    radius: isCleanSlateMap ? 0.38 : 0.24,
+    radius: isStandaloneProceduralMap ? 0.38 : 0.24,
     distanceExponent: 1.15,
-    thickness: isCleanSlateMap ? 1.35 : 1.1,
+    thickness: isStandaloneProceduralMap ? 1.35 : 1.1,
     scale: 1.05,
-    samples: isCleanSlateMap ? 12 : 8,
+    samples: isStandaloneProceduralMap ? 12 : 8,
   });
   gtaoPass.updatePdMaterial({
     radius: 4,
@@ -13947,6 +14031,8 @@ export const createMahjongTableScene = (
   let debugBoundsVisible = false;
   let generatedRoomVariant = GENERATED_ROOM_PALETTES[0]?.label ?? "Northlight";
   let debuggingTwoMap: DebuggingTwoMapResources | null = null;
+  let climbingGymMap: ClimbingGymMapResources | null = null;
+  let standaloneMapResources: StandaloneProceduralMapResources | null = null;
   let debugFps = 60;
   let debugFrameTimeMs = 1000 / 60;
   let previousAnimationTimestamp = 0;
@@ -14331,6 +14417,8 @@ export const createMahjongTableScene = (
   let meleeDropRearmSuppressed = false;
   let staticPhysicsBoxes: readonly PhysicsBox[] = [];
   let dynamicPhysicsBoxes: readonly PhysicsBox[] = [];
+  let staticPhysicsSpatialIndex: PhysicsBoxSpatialIndex | null = null;
+  let dynamicPhysicsSpatialIndex: PhysicsBoxSpatialIndex | null = null;
   let appliedPhysicsVersion = -1;
   let ledgeClimbTransition: ClimbingTransition | null = null;
   let wallHangState: WallHangState | null = null;
@@ -15006,8 +15094,8 @@ export const createMahjongTableScene = (
   const captureSceneState = (): VisualSceneState => {
     const standingEyeHeight =
       !debugEnabled && activeDebugPreset === null
-        ? isCleanSlateMap
-          ? cleanSlateSeatPreset.position.y
+        ? isStandaloneProceduralMap
+          ? activeSceneCameraPresets.seat.position.y
           : TABLE_CAMERA_STANDING_EYE_HEIGHT
         : STANDING_EYE_HEIGHT;
     const cameraPosition: VisualSceneState["cameraPosition"] = [
@@ -15072,6 +15160,36 @@ export const createMahjongTableScene = (
     };
     lastSafePhysicsPosition = { ...physicsCharacterPosition };
   };
+  const queryStaticPhysicsBoxes = (
+    position: PhysicsVector,
+    radiusMeters: number,
+  ): readonly PhysicsBox[] =>
+    isClimbingGymMap && staticPhysicsSpatialIndex !== null
+      ? staticPhysicsSpatialIndex.query(position, radiusMeters)
+      : staticPhysicsBoxes;
+  const queryDynamicPhysicsBoxes = (
+    position: PhysicsVector,
+    radiusMeters: number,
+  ): readonly PhysicsBox[] =>
+    isClimbingGymMap && dynamicPhysicsSpatialIndex !== null
+      ? dynamicPhysicsSpatialIndex
+          .query(position, radiusMeters)
+          .filter((box) => box.dynamic !== true)
+      : dynamicPhysicsBoxes.filter((box) => box.dynamic !== true);
+  const queryTraversalPhysicsBoxes = (
+    position: PhysicsVector,
+    radiusMeters: number,
+  ): readonly PhysicsBox[] => {
+    if (!isClimbingGymMap || staticPhysicsSpatialIndex === null) {
+      return dynamicPhysicsBoxes.length === 0
+        ? staticPhysicsBoxes
+        : [...staticPhysicsBoxes, ...dynamicPhysicsBoxes];
+    }
+    return [
+      ...queryStaticPhysicsBoxes(position, radiusMeters),
+      ...queryDynamicPhysicsBoxes(position, radiusMeters),
+    ];
+  };
   const clearWallTraversal = (): void => {
     wallHangState = null;
     wallClimbTransition = null;
@@ -15107,10 +15225,10 @@ export const createMahjongTableScene = (
     if (wall === null || wallClimbTransition !== null) {
       return false;
     }
-    const wallClimbPhysicsBoxes = [
-      ...staticPhysicsBoxes,
-      ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
-    ];
+    const wallClimbPhysicsBoxes = queryTraversalPhysicsBoxes(
+      wall.target,
+      CLIMBING_GYM_PHYSICS_QUERY_RADIUS_METERS,
+    );
     const sourceBox = wallClimbPhysicsBoxes.find(
       (box) => resolvePhysicsBoxObstacleId(box) === wall.sourceObstacleId,
     );
@@ -15686,11 +15804,11 @@ export const createMahjongTableScene = (
     lastMovementTapAtByKey.clear();
 
     const spawnPosition =
-      isCleanSlateMap && debuggingTwoMap !== null
-        ? debuggingTwoMap.spawn
+      isStandaloneProceduralMap && standaloneMapResources !== null
+        ? standaloneMapResources.spawn
         : resolveRandomSpawnPosition();
     const spawnSurfaceY =
-      isCleanSlateMap && debuggingTwoMap !== null
+      isStandaloneProceduralMap && standaloneMapResources !== null
         ? spawnPosition.y
         : spawnPosition.y - PLAYER_COLLIDER_CENTER_HEIGHT;
     firstPersonGroundY = spawnSurfaceY;
@@ -15716,11 +15834,11 @@ export const createMahjongTableScene = (
       ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
     ];
     const fallbackSpawn =
-      isCleanSlateMap && debuggingTwoMap !== null
+      isStandaloneProceduralMap && standaloneMapResources !== null
         ? {
-            x: debuggingTwoMap.spawn.x,
-            y: debuggingTwoMap.spawn.y + PLAYER_CAPSULE_CENTER_HEIGHT,
-            z: debuggingTwoMap.spawn.z,
+            x: standaloneMapResources.spawn.x,
+            y: standaloneMapResources.spawn.y + PLAYER_CAPSULE_CENTER_HEIGHT,
+            z: standaloneMapResources.spawn.z,
           }
         : resolveRandomSpawnPosition();
     const recoveryPosition = resolvePlayerRecoveryPosition(
@@ -15820,13 +15938,13 @@ export const createMahjongTableScene = (
     const maxZ = activeWorldBounds.maxZ - WORLD_SPAWN_MARGIN;
     const playerX = camera.position.x;
     const playerZ = camera.position.z;
-    const spawnRadius = isCleanSlateMap
+    const spawnRadius = isStandaloneProceduralMap
       ? Math.min(
           (activeWorldBounds.maxX - activeWorldBounds.minX) / 2 - WORLD_SPAWN_MARGIN,
           (activeWorldBounds.maxZ - activeWorldBounds.minZ) / 2 - WORLD_SPAWN_MARGIN,
         ) * 0.78
       : SIMULANT_SPAWN_RADIUS_METERS;
-    const minimumStartDistance = isCleanSlateMap
+    const minimumStartDistance = isStandaloneProceduralMap
       ? Math.min(
           SIMULANT_MIN_START_DISTANCE_METERS,
           Math.min(
@@ -16149,8 +16267,8 @@ export const createMahjongTableScene = (
     resetSimulantWeaponHunt();
     simulantRagdollState = null;
     const position =
-      isCleanSlateMap && debuggingTwoMap !== null
-        ? debuggingTwoMap.simulantSpawn
+      isStandaloneProceduralMap && standaloneMapResources !== null
+        ? standaloneMapResources.simulantSpawn
         : resolveSimulantSpawnPosition();
     simulantPosition.set(position.x, position.y, position.z);
     simulantWorldVelocity = { x: 0, y: 0, z: 0 };
@@ -16294,7 +16412,7 @@ export const createMahjongTableScene = (
       return;
     }
     if (
-      isCleanSlateMap &&
+      isStandaloneProceduralMap &&
       (preset === "focusCalibration" ||
         preset === "climbingGym" ||
         preset === "parametricBarracks" ||
@@ -16304,7 +16422,7 @@ export const createMahjongTableScene = (
       setView("seat");
       return;
     }
-    const presetArea: VisualSceneAreaId | null = isCleanSlateMap
+    const presetArea: VisualSceneAreaId | null = isStandaloneProceduralMap
       ? null
       : preset === "focusCalibration"
         ? "focusCalibration"
@@ -16563,12 +16681,12 @@ export const createMahjongTableScene = (
     setView("seat");
     onWindowBlur();
     ledgeClimbTransition = null;
-    firstPersonGroundY = isCleanSlateMap ? WAREHOUSE_FLOOR_TOP_Y : 0;
+    firstPersonGroundY = 0;
     isCrouched = state.isCrouched;
     isWalkingMode = isCrouched;
     eyeHeight = !debugEnabled
-      ? isCleanSlateMap
-        ? cleanSlateSeatPreset.position.y
+      ? isStandaloneProceduralMap
+        ? activeSceneCameraPresets.seat.position.y
         : TABLE_CAMERA_STANDING_EYE_HEIGHT
       : isCrouched
         ? SEATED_EYE_HEIGHT
@@ -16627,7 +16745,11 @@ export const createMahjongTableScene = (
     debugFogDensity = 0;
     // Fog is intentionally not a general debug effect. The warehouse owns a
     // fixed dark-room haze; the authored penthouse remains clear.
-    scene.fog = isCleanSlateMap ? createWarehouseFog() : null;
+    scene.fog = isCleanSlateMap
+      ? createWarehouseFog()
+      : isClimbingGymMap
+        ? createClimbingGymFog()
+        : null;
     persistDebugPreferences();
   };
 
@@ -16822,7 +16944,7 @@ export const createMahjongTableScene = (
   };
 
   const setDebugAreaEnabled = (area: VisualSceneAreaId, enabled: boolean): void => {
-    if (isCleanSlateMap || !debugEnabled || enabledAreas[area] === enabled) {
+    if (isStandaloneProceduralMap || !debugEnabled || enabledAreas[area] === enabled) {
       return;
     }
     enabledAreas[area] = enabled;
@@ -16957,7 +17079,7 @@ export const createMahjongTableScene = (
   });
   setView(initialView);
 
-  const architectureResources = isCleanSlateMap
+  const architectureResources = isStandaloneProceduralMap
     ? createCleanSlateArchitectureResources()
     : addFloor(scene, quality);
   glassSurfaces = architectureResources.glassSurfaces;
@@ -16991,6 +17113,52 @@ export const createMahjongTableScene = (
         options.onExplorationAreaChange?.(area);
       },
       debuggingTwoMap,
+    );
+    standaloneMapResources = debuggingTwoMap;
+    loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
+  } else if (isClimbingGymMap) {
+    // Debugging 03 is a standalone procedural course. It intentionally omits
+    // the authored penthouse, city chunks, combat props, and the Warehouse
+    // rack runtime while retaining the shared movement/traversal controller.
+    const environmentRootForCourse = scene.getObjectByName("EnvironmentRoot") ?? null;
+    if (environmentRootForCourse !== null) {
+      environmentRootForCourse.removeFromParent();
+      disposeObject(environmentRootForCourse);
+    }
+    glassSurfaces = [];
+    const climbingGymSurfaceTextures = architectureResources.surfaceTextures;
+    climbingGymMap = createDebuggingThreeMap(scene, roomSeed, {
+      createMaterial: (color, roughness, metalness) =>
+        createMaterial(
+          color,
+          roughness,
+          metalness,
+          climbingGymSurfaceTextures.wall,
+          climbingGymSurfaceTextures.detail,
+        ),
+      createAccentMaterial: (color, roughness, metalness, emissiveIntensity) =>
+        createAccentMaterial(
+          color,
+          roughness,
+          metalness,
+          emissiveIntensity,
+          climbingGymSurfaceTextures.detail,
+        ),
+      createFloorMaterial: () =>
+        createEpoxyFloorMaterial(
+          climbingGymSurfaceTextures.floor,
+          climbingGymSurfaceTextures.detail,
+        ),
+    });
+    standaloneMapResources = climbingGymMap;
+    generatedRoomVariant = climbingGymMap.variant;
+    explorationArea = climbingGymMap.explorationArea;
+    explorationWorld = createStaticCourseExplorationWorld(
+      climbingGymMap.explorationArea,
+      (area) => {
+        explorationArea = area;
+        options.onExplorationAreaChange?.(area);
+      },
     );
     loadedExplorationChunks = explorationWorld.getLoadedChunkCount();
   } else {
@@ -17228,10 +17396,12 @@ export const createMahjongTableScene = (
   cyanMaterials = [
     ...architectureResources.ambient.cyanMaterials,
     ...(debuggingTwoMap?.cyanMaterials ?? []),
+    ...(climbingGymMap?.cyanMaterials ?? []),
   ];
   redMaterials = [
     ...architectureResources.ambient.redMaterials,
     ...(debuggingTwoMap?.redMaterials ?? []),
+    ...(climbingGymMap?.redMaterials ?? []),
   ];
   scene.traverse((object) => {
     if (!("material" in object)) {
@@ -17270,8 +17440,8 @@ export const createMahjongTableScene = (
   debugBoundsRoot.name = "DebugRoot";
   debugBoundsRoot.userData.dofIgnore = true;
   debugBoundsRoot.visible = false;
-  const debugBoundTargets = isCleanSlateMap
-    ? [debuggingTwoMap?.root ?? null]
+  const debugBoundTargets = isStandaloneProceduralMap
+    ? [standaloneMapResources?.root ?? null]
     : penthouseEnabled
       ? [scene.getObjectByName("EnvironmentRoot"), table, wallRoot]
       : [];
@@ -17422,12 +17592,19 @@ export const createMahjongTableScene = (
   container.dataset.simulantDeathRagdoll = "false";
   container.dataset.playerMeleeImpactOpacity = "0";
   container.dataset.playerMeleeFocusShiftMeters = "0";
+  const standaloneExtraPhysicsBoxes = isClimbingGymMap
+    ? (climbingGymMap?.physicsBoxes ?? [])
+    : (debuggingTwoMap?.staticPhysicsBoxes ?? debuggingTwoMap?.physicsBoxes ?? []);
   staticPhysicsBoxes = createStaticPhysicsBoxes(
     scene,
     activeWorldBounds,
-    debuggingTwoMap?.staticPhysicsBoxes ?? debuggingTwoMap?.physicsBoxes ?? [],
+    standaloneExtraPhysicsBoxes,
   );
-  const weaponReservedRects: readonly WeaponSpawnRect[] = isCleanSlateMap
+  staticPhysicsSpatialIndex = isClimbingGymMap
+    ? createPhysicsBoxSpatialIndex(staticPhysicsBoxes)
+    : null;
+  dynamicPhysicsSpatialIndex = null;
+  const weaponReservedRects: readonly WeaponSpawnRect[] = isStandaloneProceduralMap
     ? []
     : PLAY_AREA_BOUNDS.map((bounds) => ({
         minX: bounds.minX,
@@ -17435,8 +17612,8 @@ export const createMahjongTableScene = (
         minZ: bounds.minZ,
         maxZ: bounds.maxZ,
       }));
-  const weaponPickups = isCleanSlateMap
-    ? generateWeaponPickupsOnEdges(roomSeed, DEBUGGING_TWO_WORLD_BOUNDS)
+  const weaponPickups = isStandaloneProceduralMap
+    ? generateWeaponPickupsOnEdges(roomSeed, activeWorldBounds)
     : generateWeaponPickups(roomSeed, {
         worldHalfSize: EXPLORATION_WORLD_HALF_SIZE,
         reservedRects: weaponReservedRects,
@@ -17669,6 +17846,9 @@ export const createMahjongTableScene = (
   const initialPhysicsBoxes = explorationWorld.getPhysicsBoxes();
   fallbackPhysicsRuntime.setDynamicBoxes(initialPhysicsBoxes);
   dynamicPhysicsBoxes = initialPhysicsBoxes;
+  dynamicPhysicsSpatialIndex = isClimbingGymMap
+    ? createPhysicsBoxSpatialIndex(dynamicPhysicsBoxes)
+    : null;
   appliedPhysicsVersion = explorationWorld.getPhysicsVersion();
   container.dataset.physicsReady = "fallback";
   void createMahjongPhysics(staticPhysicsBoxes).then(
@@ -17683,6 +17863,9 @@ export const createMahjongTableScene = (
       const nextPhysicsBoxes = explorationWorld?.getPhysicsBoxes() ?? [];
       runtime.setDynamicBoxes(nextPhysicsBoxes);
       dynamicPhysicsBoxes = nextPhysicsBoxes;
+      dynamicPhysicsSpatialIndex = isClimbingGymMap
+        ? createPhysicsBoxSpatialIndex(dynamicPhysicsBoxes)
+        : null;
       appliedPhysicsVersion = explorationWorld?.getPhysicsVersion() ?? 0;
       container.dataset.physicsReady = "true";
     },
@@ -18404,10 +18587,14 @@ export const createMahjongTableScene = (
       let coverSnapDelta: PhysicsVector = { x: 0, y: 0, z: 0 };
       if (physicsRuntime !== null) {
         camera.position.copy(movementStart);
-        const traversalPhysicsBoxes = [
-          ...staticPhysicsBoxes,
-          ...dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
-        ];
+        const traversalPhysicsBoxes = queryTraversalPhysicsBoxes(
+          physicsCharacterPosition ?? {
+            x: movementStart.x,
+            y: movementStart.y - (eyeHeight - PLAYER_CAPSULE_CENTER_HEIGHT),
+            z: movementStart.z,
+          },
+          CLIMBING_GYM_PHYSICS_QUERY_RADIUS_METERS,
+        );
         const resolveTraversalSourceBox = (obstacleId: string): PhysicsBox | null =>
           traversalPhysicsBoxes.find((box) => resolvePhysicsBoxObstacleId(box) === obstacleId) ??
           null;
@@ -18791,8 +18978,14 @@ export const createMahjongTableScene = (
                 characterPosition,
                 desiredHorizontalDelta,
                 feetY,
-                staticPhysicsBoxes,
-                dynamicPhysicsBoxes.filter((box) => box.dynamic !== true),
+                queryStaticPhysicsBoxes(
+                  characterPosition,
+                  CLIMBING_GYM_PHYSICS_QUERY_RADIUS_METERS,
+                ),
+                queryDynamicPhysicsBoxes(
+                  characterPosition,
+                  CLIMBING_GYM_PHYSICS_QUERY_RADIUS_METERS,
+                ),
               );
               if (
                 ledgeGrabResolution !== null &&
@@ -19282,10 +19475,10 @@ export const createMahjongTableScene = (
         y: camera.position.y - (eyeHeight - PLAYER_COLLIDER_CENTER_HEIGHT),
         z: camera.position.z,
       };
-      const wallContactBoxes =
-        dynamicPhysicsBoxes.length === 0
-          ? staticPhysicsBoxes
-          : [...staticPhysicsBoxes, ...dynamicPhysicsBoxes];
+      const wallContactBoxes = queryTraversalPhysicsBoxes(
+        wallContactPosition,
+        CLIMBING_GYM_WALL_QUERY_RADIUS_METERS,
+      );
       wallContact = resolvePlayerWallContact(wallContactPosition, wallContactBoxes, {
         radius: PLAYER_COLLIDER_RADIUS,
         halfHeight: PLAYER_COLLIDER_HALF_HEIGHT,
@@ -19595,6 +19788,9 @@ export const createMahjongTableScene = (
       const nextPhysicsBoxes = explorationWorld?.getPhysicsBoxes() ?? [];
       physicsRuntime.setDynamicBoxes(nextPhysicsBoxes);
       dynamicPhysicsBoxes = nextPhysicsBoxes;
+      dynamicPhysicsSpatialIndex = isClimbingGymMap
+        ? createPhysicsBoxSpatialIndex(dynamicPhysicsBoxes)
+        : null;
       appliedPhysicsVersion = nextPhysicsVersion;
     }
     loadedExplorationChunks = explorationWorld?.getLoadedChunkCount() ?? 0;
@@ -19640,7 +19836,7 @@ export const createMahjongTableScene = (
     pupilDiameterMm = THREE.MathUtils.damp(
       pupilDiameterMm,
       resolveHumanEyePupilDiameter(
-        resolveHumanEyeAdaptationLuminance(estimatedLuminance, isCleanSlateMap),
+        resolveHumanEyeAdaptationLuminance(estimatedLuminance, isStandaloneProceduralMap),
       ),
       BOKEH_PUPIL_ADAPTATION_DAMPING,
       delta,
@@ -19875,7 +20071,7 @@ export const createMahjongTableScene = (
       explorationWorld?.dispose();
       explorationWorld = null;
       disposeObject(scene);
-      for (const texture of debuggingTwoMap?.textures ?? []) {
+      for (const texture of standaloneMapResources?.textures ?? []) {
         texture.dispose();
       }
       simpleGlassMaterial.dispose();

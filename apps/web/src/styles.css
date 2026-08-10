@@ -1025,7 +1025,10 @@ button[aria-pressed="true"] {
   z-index: auto;
   inset: auto;
   display: grid;
-  width: 100%;
+  width: min(50vw, 24rem);
+  max-width: 50vw;
+  justify-self: end;
+  margin-left: auto;
   gap: 0.35rem;
   padding: 0.8rem 0.95rem;
   color: #eef4f1;
@@ -1174,7 +1177,8 @@ button[aria-pressed="true"] {
   right: max(1rem, env(safe-area-inset-right));
   bottom: max(1.1rem, env(safe-area-inset-bottom));
   display: grid;
-  width: min(25rem, calc(100% - 2rem));
+  width: min(50vw, 25rem);
+  max-width: 50vw;
   gap: 0.36rem;
   padding: 0.55rem 0.7rem 0.6rem;
   color: #f6f7f4;
@@ -1587,7 +1591,8 @@ button[aria-pressed="true"] {
     right: 0.6rem;
     bottom: 11.4rem;
     left: auto;
-    width: min(20rem, calc(100% - 1.2rem));
+    width: min(50vw, 20rem);
+    max-width: 50vw;
   }
 
   .scene-overlay-intro {
@@ -1667,7 +1672,8 @@ button[aria-pressed="true"] {
   .scene-weapons {
     right: 0.7rem;
     bottom: 7.8rem;
-    width: min(22rem, calc(65% - 0.7rem));
+    width: min(50vw, 22rem);
+    max-width: 50vw;
   }
 
   .mobile-touch-controls {

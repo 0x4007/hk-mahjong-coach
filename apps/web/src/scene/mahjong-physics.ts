@@ -35,6 +35,112 @@ export interface PhysicsBox {
   readonly angularDamping?: number;
 }
 
+/**
+ * Coarse, deterministic broad-phase lookup for the hand-authored physics
+ * helpers. Rapier already owns its own broad phase; this index keeps the
+ * JavaScript fallback and traversal probes from scanning every block in the
+ * 750 m climbing field on every animation frame.
+ */
+export interface PhysicsBoxSpatialIndex {
+  readonly query: (position: PhysicsVector, radiusMeters: number) => readonly PhysicsBox[];
+}
+
+const PHYSICS_INDEX_CELL_SIZE_METERS = 16;
+const PHYSICS_INDEX_MAX_CELLS_PER_BOX = 128;
+
+const finiteNonNegative = (value: number): number =>
+  Number.isFinite(value) ? Math.max(0, Math.abs(value)) : 0;
+
+const resolvePhysicsIndexCell = (value: number): number =>
+  Math.floor(value / PHYSICS_INDEX_CELL_SIZE_METERS);
+
+const resolvePhysicsIndexCellKey = (cellX: number, cellZ: number): string =>
+  `${String(cellX)}:${String(cellZ)}`;
+
+/** Build a coarse spatial index while preserving the source-box order. */
+export const createPhysicsBoxSpatialIndex = (
+  boxes: readonly PhysicsBox[],
+): PhysicsBoxSpatialIndex => {
+  const cells = new Map<string, PhysicsBox[]>();
+  const largeBoxes: PhysicsBox[] = [];
+  const order = new Map<PhysicsBox, number>();
+
+  boxes.forEach((box, index) => {
+    order.set(box, index);
+    const halfX = finiteNonNegative(box.halfExtents.x);
+    const halfZ = finiteNonNegative(box.halfExtents.z);
+    // A conservative horizontal radius keeps rotated cuboids in the same
+    // broad-phase cells as their local-frame traversal tests.
+    const broadHalfExtent = Math.hypot(halfX, halfZ);
+    const minCellX = resolvePhysicsIndexCell(box.center.x - broadHalfExtent);
+    const maxCellX = resolvePhysicsIndexCell(box.center.x + broadHalfExtent);
+    const minCellZ = resolvePhysicsIndexCell(box.center.z - broadHalfExtent);
+    const maxCellZ = resolvePhysicsIndexCell(box.center.z + broadHalfExtent);
+    const cellCount = (maxCellX - minCellX + 1) * (maxCellZ - minCellZ + 1);
+    if (!Number.isFinite(cellCount) || cellCount > PHYSICS_INDEX_MAX_CELLS_PER_BOX) {
+      largeBoxes.push(box);
+      return;
+    }
+    for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += 1) {
+        const key = resolvePhysicsIndexCellKey(cellX, cellZ);
+        const cell = cells.get(key);
+        if (cell === undefined) {
+          cells.set(key, [box]);
+        } else {
+          cell.push(box);
+        }
+      }
+    }
+  });
+
+  return {
+    query: (position, radiusMeters) => {
+      if (
+        !Number.isFinite(position.x) ||
+        !Number.isFinite(position.z) ||
+        !Number.isFinite(radiusMeters)
+      ) {
+        return boxes;
+      }
+      const radius = Math.max(0, radiusMeters);
+      const minCellX = resolvePhysicsIndexCell(position.x - radius);
+      const maxCellX = resolvePhysicsIndexCell(position.x + radius);
+      const minCellZ = resolvePhysicsIndexCell(position.z - radius);
+      const maxCellZ = resolvePhysicsIndexCell(position.z + radius);
+      // Large boxes (the course floor is intentionally one) are kept out of
+      // the cell table to avoid populating thousands of buckets. They still
+      // need a coarse distance check here; returning every large box for
+      // every query would put the floor back into the per-frame scan and
+      // would also report it when a query is outside its actual footprint.
+      const matches = new Set<PhysicsBox>();
+      for (const box of largeBoxes) {
+        const horizontalRadius =
+          Math.hypot(finiteNonNegative(box.halfExtents.x), finiteNonNegative(box.halfExtents.z)) +
+          radius;
+        if (Math.hypot(position.x - box.center.x, position.z - box.center.z) <= horizontalRadius) {
+          matches.add(box);
+        }
+      }
+      for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+        for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += 1) {
+          for (const box of cells.get(resolvePhysicsIndexCellKey(cellX, cellZ)) ?? []) {
+            matches.add(box);
+          }
+        }
+      }
+      return [...matches]
+        .filter(
+          (box) =>
+            Math.hypot(position.x - box.center.x, position.z - box.center.z) <=
+            Math.hypot(finiteNonNegative(box.halfExtents.x), finiteNonNegative(box.halfExtents.z)) +
+              radius,
+        )
+        .sort((left, right) => (order.get(left) ?? 0) - (order.get(right) ?? 0));
+    },
+  };
+};
+
 export type PhysicsContactKind = "support" | "wall" | "ceiling";
 
 export interface PhysicsContact {
@@ -188,11 +294,17 @@ export const createFallbackMahjongPhysics = (
   staticBoxes: readonly PhysicsBox[],
 ): MahjongPhysicsRuntime => {
   let activeBoxes: readonly PhysicsBox[] = [...staticBoxes];
+  let activeSpatialIndex = createPhysicsBoxSpatialIndex(activeBoxes);
 
   const move = (position: PhysicsVector, desiredDelta: PhysicsVector): PhysicsMovement => {
     let next: PhysicsVector = { ...position };
     const collisionBoxes = new Set<PhysicsBox>();
     const contactByBox = new Map<PhysicsBox, PhysicsContact>();
+    const movementDistance = Math.hypot(desiredDelta.x, desiredDelta.z);
+    const nearbyBoxes = activeSpatialIndex.query(
+      position,
+      FALLBACK_CAPSULE_RADIUS + movementDistance + FALLBACK_EPSILON,
+    );
     const registerContact = (
       box: PhysicsBox,
       normal: PhysicsVector,
@@ -214,7 +326,7 @@ export const createFallbackMahjongPhysics = (
     const desiredY = position.y + desiredDelta.y;
     let verticalResolved = false;
     if (desiredDelta.y < -FALLBACK_EPSILON) {
-      for (const box of activeBoxes) {
+      for (const box of nearbyBoxes) {
         if (!fallbackHorizontalOverlap(position.x, position.z, box)) {
           continue;
         }
@@ -233,7 +345,7 @@ export const createFallbackMahjongPhysics = (
       }
     } else if (desiredDelta.y > FALLBACK_EPSILON) {
       next = { ...next, y: desiredY };
-      for (const box of activeBoxes) {
+      for (const box of nearbyBoxes) {
         if (!fallbackHorizontalOverlap(position.x, position.z, box)) {
           continue;
         }
@@ -257,7 +369,7 @@ export const createFallbackMahjongPhysics = (
         return;
       }
       const candidate = next[axis] + amount;
-      for (const box of activeBoxes) {
+      for (const box of nearbyBoxes) {
         if (!fallbackVerticalOverlap(next.y, box)) {
           continue;
         }
@@ -323,7 +435,7 @@ export const createFallbackMahjongPhysics = (
     // level; upward motion must remain airborne.
     let grounded = false;
     if (desiredDelta.y <= FALLBACK_EPSILON) {
-      const support = fallbackSupportTop(next.x, next.y, next.z, activeBoxes);
+      const support = fallbackSupportTop(next.x, next.y, next.z, nearbyBoxes);
       if (support !== null) {
         const supportedY = support.topY + FALLBACK_CAPSULE_CENTER_HEIGHT;
         if (next.y <= supportedY + PLAYER_SUPPORT_SNAP_HEIGHT + FALLBACK_EPSILON) {
@@ -350,6 +462,7 @@ export const createFallbackMahjongPhysics = (
     move,
     setDynamicBoxes: (boxes) => {
       activeBoxes = [...staticBoxes, ...boxes.filter((box) => box.dynamic !== true)];
+      activeSpatialIndex = createPhysicsBoxSpatialIndex(activeBoxes);
     },
     applyImpulseToDynamicBody: () => {
       // Dynamic props are intentionally visual-only in the fallback.
@@ -357,6 +470,7 @@ export const createFallbackMahjongPhysics = (
     getDynamicBodyStates: () => [],
     dispose: () => {
       activeBoxes = [];
+      activeSpatialIndex = createPhysicsBoxSpatialIndex(activeBoxes);
     },
   };
 };

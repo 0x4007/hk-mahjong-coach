@@ -48,6 +48,7 @@ import {
 } from "./scene/mahjong-table.js";
 import {
   DEFAULT_VISUAL_MAP_ID,
+  isStandaloneProceduralVisualMap,
   normalizeVisualMapId,
   VISUAL_MAP_CATALOG,
   type VisualMapId,
@@ -478,7 +479,7 @@ const VisualDebugPanel = ({
   onNextRoom,
   onRoomSeedSubmit,
 }: VisualDebugPanelProps): React.JSX.Element => {
-  const isCleanSlateMap = mapId === "debugging-02";
+  const isCleanSlateMap = isStandaloneProceduralVisualMap(mapId);
   const activeGunDefinition =
     weaponState.activeWeapon === null ? null : WEAPON_DEFINITIONS[weaponState.activeWeapon];
   const activeGunMelee =
@@ -491,11 +492,17 @@ const VisualDebugPanel = ({
     readonly value: VisualCameraPreset;
     readonly label: string;
   }[] = isCleanSlateMap
-    ? [
-        { value: "table", label: "Warehouse start" },
-        { value: "roomReveal", label: "Warehouse reveal" },
-        { value: "assetReview", label: "Warehouse overhead" },
-      ]
+    ? mapId === "debugging-03"
+      ? [
+          { value: "table", label: "Gym start" },
+          { value: "roomReveal", label: "Gym reveal" },
+          { value: "assetReview", label: "Gym overhead" },
+        ]
+      : [
+          { value: "table", label: "Warehouse start" },
+          { value: "roomReveal", label: "Warehouse reveal" },
+          { value: "assetReview", label: "Warehouse overhead" },
+        ]
     : debugCameraPresets;
   const [snapshot, setSnapshot] = React.useState<SceneDebugSnapshot>(() =>
     mount.debug.getSnapshot(),
