@@ -499,6 +499,27 @@ describe("continuous head-motion movement scenarios", () => {
     );
   });
 
+  it("compresses a five-metre fall toward a one-metre eye without free-fall bias", () => {
+    const normal = resultFor("normal-jump-landing");
+    const severe = resultFor("severe-fall");
+    const severeMinimum = minimumVerticalOffset(severe);
+    const airborneSevere = severe.trace.filter((sample) => !sample.grounded);
+
+    expect(severeMinimum).toBeGreaterThanOrEqual(-0.9);
+    expect(severeMinimum).toBeLessThanOrEqual(-0.6);
+    expect(Math.abs(minimumVerticalOffset(normal))).toBeLessThan(0.6);
+    expect(
+      Math.max(
+        ...airborneSevere.map((sample) => Math.abs(sample.camera.headMotion.translation.up)),
+      ),
+    ).toBe(0);
+    const severeHeadMinimum = Math.min(
+      ...severe.trace.map((sample) => sample.camera.headMotion.translation.up),
+    );
+    expect(severeHeadMinimum).toBeGreaterThanOrEqual(-0.9);
+    expect(severeHeadMinimum).toBeLessThanOrEqual(-0.6);
+  });
+
   it("cancels a removed ledge before any false completion", () => {
     const result = resultFor("ledge-contact-loss");
     const events = result.orderedEvents.map((entry) => entry.event);

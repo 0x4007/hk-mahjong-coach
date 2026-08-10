@@ -1,5 +1,23 @@
 # Architecture and implementation log
 
+## 2026-08-10 — Unified momentum/impulse first-person response
+
+`apps/web/src/scene/head-motion.ts` is now the shared presentation solver for first-person translation and rotation. It
+accepts local-frame body delta-v with typed sources (`locomotion`, `take-off`, `collision-stop`, `support-stop`,
+`traversal`, `weapon`, or `melee`), integrates every axis with the same analytic second-order form, and publishes a
+deeply immutable `HeadMotionSnapshot`. The solver clamps its own bounds; the camera boundary then applies support and
+ceiling clearance and records which final constraint was active.
+
+Physics remains authoritative for capsule position and velocity. The live scene projects the resolved world delta-v into
+the yaw-only local frame once before submission. Airborne gravity is not submitted every frame, so free fall cannot build
+a fake landing load. Gait and breathing are solver targets, and the camera/viewmodel/reticule/aim/focus presentation path
+continues to consume one composed output after physics resolves the base pose.
+
+The deterministic movement simulator stores the head snapshot in every frame trace. The severe-fall fixture measures the
+impact response as a `0.60–0.90 m` downward camera offset from the `1.75 m` standing eye, while a normal jump remains
+shallower and airborne frames remain unbiased. This is an experimental visual-table prototype; it does not complete the
+visual-table milestone or provide browser/HMR/Playwright acceptance.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the

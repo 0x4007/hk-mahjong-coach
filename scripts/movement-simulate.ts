@@ -8,6 +8,7 @@ import {
   type CameraMotionOffsets,
   type CameraMotionUpdateInput,
 } from "../apps/web/src/scene/camera-motion.js";
+import type { HeadImpulse, HeadMotionSnapshot } from "../apps/web/src/scene/head-motion.js";
 import {
   createFallbackMahjongPhysics,
   createMahjongPhysics,
@@ -141,7 +142,13 @@ export type MovementTraceNumericField =
   | "camera.offsets.headBobPitch"
   | "camera.offsets.verticalOffset"
   | "camera.offsets.aimSwayX"
-  | "camera.offsets.aimSwayY";
+  | "camera.offsets.aimSwayY"
+  | "camera.headMotion.translation.right"
+  | "camera.headMotion.translation.up"
+  | "camera.headMotion.translation.forward"
+  | "camera.headMotion.translationVelocity.right"
+  | "camera.headMotion.translationVelocity.up"
+  | "camera.headMotion.translationVelocity.forward";
 
 export interface MovementRangeExpectation {
   readonly id: string;
@@ -225,6 +232,7 @@ export interface MovementFrameTrace {
   readonly camera: {
     readonly input: MovementCameraInputTrace;
     readonly offsets: CameraMotionOffsets;
+    readonly headMotion: HeadMotionSnapshot;
   };
   readonly presentation: {
     readonly visibleReticleNdc: Readonly<{ x: number; y: number }>;
@@ -415,6 +423,12 @@ const traceFields = new Set<MovementTraceNumericField>([
   "camera.offsets.verticalOffset",
   "camera.offsets.aimSwayX",
   "camera.offsets.aimSwayY",
+  "camera.headMotion.translation.right",
+  "camera.headMotion.translation.up",
+  "camera.headMotion.translation.forward",
+  "camera.headMotion.translationVelocity.right",
+  "camera.headMotion.translationVelocity.up",
+  "camera.headMotion.translationVelocity.forward",
 ]);
 
 const parseRangeExpectations = (value: unknown): readonly MovementRangeExpectation[] => {
@@ -1013,6 +1027,18 @@ const traceNumber = (sample: MovementFrameTrace, field: MovementTraceNumericFiel
       return sample.camera.offsets.aimSwayX;
     case "camera.offsets.aimSwayY":
       return sample.camera.offsets.aimSwayY;
+    case "camera.headMotion.translation.right":
+      return sample.camera.headMotion.translation.right;
+    case "camera.headMotion.translation.up":
+      return sample.camera.headMotion.translation.up;
+    case "camera.headMotion.translation.forward":
+      return sample.camera.headMotion.translation.forward;
+    case "camera.headMotion.translationVelocity.right":
+      return sample.camera.headMotion.translationVelocity.right;
+    case "camera.headMotion.translationVelocity.up":
+      return sample.camera.headMotion.translationVelocity.up;
+    case "camera.headMotion.translationVelocity.forward":
+      return sample.camera.headMotion.translationVelocity.forward;
   }
 };
 
@@ -1376,6 +1402,41 @@ export const runMovementScenario = async (
           },
         );
         const posture = controllerOutput.posture;
+        const resolvedLocalDeltaVelocity = {
+          right: localAcceleration.right * deltaSeconds,
+          up: localAcceleration.up * deltaSeconds,
+          forward: localAcceleration.forward * deltaSeconds,
+        };
+        const traversalActive = traversal !== null && traversal.kind !== "wall-contact";
+        const collisionStop =
+          movement.collisions > 0 &&
+          movement.contacts.some(
+            (contact) => contact.kind === "wall" || contact.kind === "ceiling",
+          );
+        const headImpulse: HeadImpulse | undefined =
+          !priorGrounded && grounded && priorVelocity.y < -Number.EPSILON
+            ? { source: "support-stop", deltaVelocity: resolvedLocalDeltaVelocity }
+            : controllerOutput.jumpAction !== null
+              ? { source: "take-off", deltaVelocity: resolvedLocalDeltaVelocity }
+              : traversalActive
+                ? { source: "traversal", deltaVelocity: resolvedLocalDeltaVelocity }
+                : collisionStop &&
+                    (Math.abs(resolvedLocalDeltaVelocity.right) > Number.EPSILON ||
+                      Math.abs(resolvedLocalDeltaVelocity.forward) > Number.EPSILON)
+                  ? { source: "collision-stop", deltaVelocity: resolvedLocalDeltaVelocity }
+                  : Math.abs(resolvedLocalDeltaVelocity.right) > Number.EPSILON ||
+                      Math.abs(resolvedLocalDeltaVelocity.forward) > Number.EPSILON
+                    ? {
+                        source: "locomotion",
+                        deltaVelocity: {
+                          ...resolvedLocalDeltaVelocity,
+                          // Free-fall gravity is not a repeated impact. A
+                          // vertical delta belongs in the stream only when
+                          // physics has support or an explicit action event.
+                          up: grounded ? resolvedLocalDeltaVelocity.up : 0,
+                        },
+                      }
+                    : undefined;
         const baseCameraY =
           position.y -
           PLAYER_CAPSULE_CENTER_HEIGHT +
@@ -1385,7 +1446,6 @@ export const runMovementScenario = async (
           baseCameraY,
           activeBoxes,
         );
-        const traversalActive = traversal !== null && traversal.kind !== "wall-contact";
         const stabilizedByWall = step.zoom && traversal?.kind === "wall-contact";
         const cameraInput: CameraMotionUpdateInput = {
           deltaSeconds,
@@ -1401,6 +1461,8 @@ export const runMovementScenario = async (
           stabilizedByWall,
           grounded,
           traversalActive,
+          ...(headImpulse === undefined ? {} : { headImpulse }),
+          suppressContinuousVerticalImpulse: true,
           ...(traversalActive && traversal !== null
             ? { traversalDurationSeconds: traversal.duration }
             : {}),
@@ -1456,7 +1518,11 @@ export const runMovementScenario = async (
           events: frameEvents,
           o2: vitals.o2,
           vitals,
-          camera: { input: cameraInputTrace, offsets: cameraOffsets },
+          camera: {
+            input: cameraInputTrace,
+            offsets: cameraOffsets,
+            headMotion: cameraDamper.getHeadMotionSnapshot(),
+          },
           presentation: {
             visibleReticleNdc: reticle.aimNdc,
             aimRayNdc: reticle.aimNdc,

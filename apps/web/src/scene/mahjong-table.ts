@@ -206,6 +206,7 @@ import {
   type CameraMotionUpdateInput,
   type CameraVerticalOffsetBounds,
 } from "./camera-motion.js";
+import type { HeadImpulse } from "./head-motion.js";
 import {
   createDamageVignettePass,
   createO2BlurPass,
@@ -19404,22 +19405,23 @@ export const createMahjongTableScene = (
         forward: cameraMotionForward,
         up: cameraMotionUp,
       };
-      let localAcceleration: CameraLocalAcceleration =
+      const localAcceleration: CameraLocalAcceleration =
         resolveCameraLocalAccelerationFromVelocityDelta(
           resolvedWorldVelocity,
           previousPresentationWorldVelocity,
           velocityDeltaSeconds,
           cameraMotionFrame,
         );
-      if (supportStop) {
-        // A downward velocity removed by support is felt as a downward load,
-        // so keep the camera's weight-response sign opposite the raw upward
-        // contact impulse while retaining the measured delta-v magnitude.
-        localAcceleration = {
-          ...localAcceleration,
-          up: previousPresentationWorldVelocity.y / velocityDeltaSeconds,
-        };
-      }
+      // The impulse stream is local to the yaw-only body frame. Project the
+      // resolved physics delta once before the shared head solver consumes it.
+      const resolvedLocalDeltaVelocity = {
+        right: localAcceleration.right * velocityDeltaSeconds,
+        up: localAcceleration.up * velocityDeltaSeconds,
+        forward: localAcceleration.forward * velocityDeltaSeconds,
+      };
+      const hasHorizontalDeltaVelocity =
+        Math.abs(resolvedLocalDeltaVelocity.right) > Number.EPSILON ||
+        Math.abs(resolvedLocalDeltaVelocity.forward) > Number.EPSILON;
       const activeTraversal =
         ledgeClimbTransition !== null && ledgeClimbTransition.phase === "vault"
           ? {
@@ -19430,6 +19432,24 @@ export const createMahjongTableScene = (
                 duration: wallClimbTransition.duration,
               }
             : null;
+      const headImpulse: HeadImpulse | undefined = supportStop
+        ? { source: "support-stop", deltaVelocity: resolvedLocalDeltaVelocity }
+        : controllerOutput.jumpAction !== null
+          ? { source: "take-off", deltaVelocity: resolvedLocalDeltaVelocity }
+          : activeTraversal !== null
+            ? { source: "traversal", deltaVelocity: resolvedLocalDeltaVelocity }
+            : hasHorizontalDeltaVelocity
+              ? {
+                  source: "locomotion",
+                  deltaVelocity: {
+                    ...resolvedLocalDeltaVelocity,
+                    // Airborne gravity is not a repeated impact. Let only
+                    // explicit take-off, traversal, and support events carry
+                    // vertical delta-v into the head solver.
+                    up: grounded ? resolvedLocalDeltaVelocity.up : 0,
+                  },
+                }
+              : undefined;
       const presentationCapsulePosition = physicsCharacterPosition ?? {
         x: camera.position.x,
         y: baseCameraY - eyeHeight + PLAYER_COLLIDER_CENTER_HEIGHT,
@@ -19453,6 +19473,8 @@ export const createMahjongTableScene = (
         coverMode,
         coverLean: resolveCoverLeanInput(coverMode, right),
         grounded,
+        ...(headImpulse === undefined ? {} : { headImpulse }),
+        suppressContinuousVerticalImpulse: true,
         verticalOffsetBounds: resolveCameraVerticalOffsetBounds(
           presentationCapsulePosition,
           baseCameraY,

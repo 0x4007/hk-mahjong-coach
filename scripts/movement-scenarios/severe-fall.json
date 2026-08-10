@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "severe-fall",
-  "description": "Fall from a fixed high airborne start without tunnelling and produce the strongest landing response.",
+  "description": "Fall from a fixed high airborne start without tunnelling. The shared head response compresses the 1.75 m standing eye toward 1.0 m (0.60-0.90 m offset) at impact.",
   "seed": "continuous-head-motion/severe-fall/v2",
   "physics": { "runtime": "fallback" },
   "start": { "position": [0, 8, 0], "velocity": [0, 0, 0], "grounded": false, "o2": 100 },
@@ -31,7 +31,18 @@
         "field": "camera.offsets.verticalOffset",
         "at": "min",
         "label": "severe-fall",
-        "max": -0.02
+        "min": -0.9,
+        "max": -0.6,
+        "tolerance": 0.02
+      },
+      {
+        "id": "severe-head-snapshot-compression",
+        "field": "camera.headMotion.translation.up",
+        "at": "min",
+        "label": "severe-fall",
+        "min": -0.9,
+        "max": -0.6,
+        "tolerance": 0.02
       }
     ]
   }

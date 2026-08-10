@@ -4,6 +4,15 @@ import {
   resolveO2Stability,
 } from "./o2-stability.js";
 import { PLAYER_MOVE_SPEED_METERS_PER_SECOND, PLAYER_WALK_SPEED_RATIO } from "./world-scale.js";
+import {
+  createHeadMotionState,
+  HEAD_MOTION_DEFAULT_OPTIONS,
+  integrateHeadMotion,
+  type HeadImpulse,
+  type HeadMotionSnapshot,
+  type HeadMotionState,
+  type HeadMotionVector,
+} from "./head-motion.js";
 
 /**
  * Acceleration expressed in the player's local frame.
@@ -71,6 +80,12 @@ export interface CameraMotionUpdateInput {
   readonly traversalDurationSeconds?: number;
   /** Support and ceiling clearance measured from the post-physics base camera pose. */
   readonly verticalOffsetBounds?: CameraVerticalOffsetBounds;
+  /** One physics-resolved body impulse. Gravity-only airborne frames omit it. */
+  readonly headImpulse?: HeadImpulse;
+  /** Disable legacy continuous vertical acceleration conversion for live physics. */
+  readonly suppressContinuousVerticalImpulse?: boolean;
+  /** Optional deterministic target injected into the shared head solver. */
+  readonly headMotionTarget?: HeadMotionVector;
 }
 
 export interface CameraWeaponShotInput {
@@ -173,6 +188,8 @@ export interface CameraMotionDamper {
   readonly clearBob: () => void;
   readonly reset: () => void;
   readonly getOffsets: () => CameraMotionOffsets;
+  /** Last immutable shared head snapshot used by every perspective consumer. */
+  readonly getHeadMotionSnapshot: () => HeadMotionSnapshot;
 }
 
 /** Horizontal acceleration that reaches the same maximum response as a full sprint roll. */
@@ -320,6 +337,8 @@ const CAMERA_DEATH_TUMBLE_DROP_METERS = -0.58;
 /** Keeps the pitch response visible after the impulse starts settling. */
 export const CAMERA_WEIGHT_PITCH_POSITION_SCALE = 0.2;
 export const CAMERA_WEIGHT_PITCH_MAX = 0.14;
+/** Shared vertical translation bound before support/ceiling bounds are applied. */
+export const CAMERA_HEAD_TRANSLATION_UP_LIMIT = HEAD_MOTION_DEFAULT_OPTIONS.limits.translation.up;
 /** Damage value used to normalize the four visual weapon profiles. */
 export const CAMERA_RECOIL_REFERENCE_DAMAGE = 100;
 /** The CSS radius of the outer reticle ring at the default 16 px root size. */
@@ -871,8 +890,10 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let bobAmount = 0;
   let breathingPhase = 0;
   let aimSwayPhase = 0;
-  let weightShift = 0;
-  let weightVelocity = 0;
+  let headMotionState: HeadMotionState = createHeadMotionState();
+  let headMotionSnapshot: HeadMotionSnapshot = integrateHeadMotion(headMotionState, {
+    deltaSeconds: 0,
+  }).snapshot;
   let recoilYaw = 0;
   let recoilYawVelocity = 0;
   let recoilPitch = 0;
@@ -913,13 +934,15 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     bobAmount = 0;
     breathingPhase = 0;
     aimSwayPhase = 0;
+    headMotionState = createHeadMotionState();
+    headMotionSnapshot = integrateHeadMotion(headMotionState, { deltaSeconds: 0 }).snapshot;
     offsets = {
       ...offsets,
       headBob: 0,
       headBobLateral: 0,
       headBobDepth: 0,
       headBobPitch: 0,
-      verticalOffset: weightShift,
+      verticalOffset: headMotionSnapshot.translation.up,
       aimSwayX: 0,
       aimSwayY: 0,
     };
@@ -944,8 +967,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     bobAmount = 0;
     breathingPhase = 0;
     aimSwayPhase = 0;
-    weightShift = 0;
-    weightVelocity = 0;
+    headMotionState = createHeadMotionState();
+    headMotionSnapshot = integrateHeadMotion(headMotionState, { deltaSeconds: 0 }).snapshot;
     recoilYaw = 0;
     recoilYawVelocity = 0;
     recoilPitch = 0;
@@ -1179,7 +1202,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         (CAMERA_BREATHING_MAX_FREQUENCY - CAMERA_BREATHING_MIN_FREQUENCY) *
           effectiveBreathlessness);
     const breathingBob = Math.sin(breathingPhase) * breathingAmplitude;
-    const headBob = gait.headBob + breathingBob;
+    const headBobTarget = gait.headBob + breathingBob;
 
     const stability = resolveO2Stability({
       oxygenRatio,
@@ -1198,11 +1221,42 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         ? Math.cos(aimSwayPhase * 0.83) * stability.reticleSwayRadians * 0.78
         : 0;
 
-    weightVelocity += resolveCameraVerticalWeightImpulse(localAcceleration.up, deltaSeconds);
-    weightVelocity += -weightShift * CAMERA_WEIGHT_SPRING * deltaSeconds;
-    weightVelocity *= Math.exp(-CAMERA_WEIGHT_DAMPING * deltaSeconds);
-    weightShift += weightVelocity * deltaSeconds;
-    weightShift = clamp(weightShift, -0.45, 0.22);
+    const compatibilityImpulse =
+      input.headImpulse === undefined
+        ? {
+            source: "locomotion" as const,
+            // Legacy callers provide acceleration in the head-response sign
+            // convention. The live physics path supplies an explicit body
+            // delta-v instead, which the shared solver reverses once. Gravity
+            // is deliberately omitted from this compatibility path when the
+            // live loop marks an airborne frame as continuous free fall.
+            deltaVelocity: {
+              right: -localAcceleration.right * deltaSeconds,
+              up:
+                input.suppressContinuousVerticalImpulse === true
+                  ? 0
+                  : -localAcceleration.up * deltaSeconds,
+              forward: -localAcceleration.forward * deltaSeconds,
+            },
+          }
+        : undefined;
+    const headMotionInput = {
+      deltaSeconds,
+      targetTranslation: {
+        right: gait.headBobLateral,
+        up: input.headMotionTarget?.up ?? headBobTarget,
+        forward: gait.headBobDepth,
+      },
+    };
+    const headImpulse = input.headImpulse ?? compatibilityImpulse;
+    const headMotion =
+      headImpulse === undefined
+        ? integrateHeadMotion(headMotionState, headMotionInput)
+        : integrateHeadMotion(headMotionState, { ...headMotionInput, impulse: headImpulse });
+    headMotionState = headMotion.state;
+    headMotionSnapshot = headMotion.snapshot;
+    const weightShift = headMotionSnapshot.translation.up - headBobTarget;
+    const weightVelocity = headMotionSnapshot.translationVelocity.up;
     const weightPitch = -(
       weightVelocity * CAMERA_WEIGHT_PITCH_VELOCITY_SCALE +
       weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
@@ -1296,7 +1350,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     }
     const viewmodelTransition = traversalTransition ?? switchTransition;
 
-    const rawVerticalOffset = headBob + weightShift + deathDrop;
+    const rawVerticalOffset = headMotionSnapshot.translation.up + deathDrop;
     const verticalOffsetBounds = input.verticalOffsetBounds;
     const verticalOffset =
       verticalOffsetBounds === undefined
@@ -1306,13 +1360,23 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
             Math.min(verticalOffsetBounds.min, verticalOffsetBounds.max),
             Math.max(verticalOffsetBounds.min, verticalOffsetBounds.max),
           );
+    if (verticalOffsetBounds !== undefined && verticalOffset !== rawVerticalOffset) {
+      const lowerBound = Math.min(verticalOffsetBounds.min, verticalOffsetBounds.max);
+      const upperBound = Math.max(verticalOffsetBounds.min, verticalOffsetBounds.max);
+      headMotionSnapshot = Object.freeze({
+        ...headMotionSnapshot,
+        translationClamped: true,
+        supportClamped: rawVerticalOffset < lowerBound,
+        ceilingClamped: rawVerticalOffset > upperBound,
+      });
+    }
     offsets = {
       roll: accelerationRoll + coverLeanRoll + deathRoll,
       coverLeanRoll,
       coverLeanOffset,
-      headBob,
-      headBobLateral: gait.headBobLateral,
-      headBobDepth: gait.headBobDepth,
+      headBob: headBobTarget,
+      headBobLateral: gaitEnabled ? headMotionSnapshot.translation.right : 0,
+      headBobDepth: gaitEnabled ? headMotionSnapshot.translation.forward : 0,
       headBobPitch,
       weightShift,
       verticalOffset,
@@ -1340,5 +1404,6 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     clearBob,
     reset,
     getOffsets: () => offsets,
+    getHeadMotionSnapshot: () => headMotionSnapshot,
   };
 };

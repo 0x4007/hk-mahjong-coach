@@ -1,5 +1,17 @@
 # Implementation status
 
+## 2026-08-10 — Unified momentum/impulse head motion (experimental)
+
+- Added the typed `head-motion.ts` solver. It integrates bounded local translation and rotation with one analytic
+  second-order response, signed body delta-v impulses, immutable snapshots, and translation/rotation clamp flags.
+- Camera gait and breathing targets, physics take-off/support-stop/traversal events, and live/simulated locomotion now
+  enter that shared stream. Free-fall gravity is omitted unless physics reports an explicit action or contact event.
+- The movement simulator records the complete head snapshot and the severe-fall fixture checks a `-0.60` to `-0.90 m`
+  eye-height compression, no airborne translation bias, and a weaker normal-jump response. Reticle, aim-ray, and focus-ray
+  traces remain identical.
+- Validation is in progress on the canonical `continuous-head-motion-3` worktree. Browser, HMR, Playwright, and rendered
+  acceptance are intentionally excluded; the user must perform the one-window visual check after deterministic gates.
+
 ## 2026-08-08 — Damaged Warehouse servers lose their status lights
 
 - Added a per-cabinet damage presentation state to the Warehouse rack resource. A projectile or melee impact marks the
