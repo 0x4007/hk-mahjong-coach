@@ -1,1 +1,7 @@
-export const COACHING_TEMPLATE_VERSION = "1.0.0" as const;
+export * from "./coach.js";
+export * from "./curriculum.js";
+export * from "./drills.js";
+export * from "./mastery.js";
+export * from "./narrator.js";
+export * from "./review.js";
+export * from "./types.js";

@@ -1,0 +1,148 @@
+name: natural simulation
+
+on:
+  workflow_dispatch:
+    inputs:
+      hands:
+        description: "Total fully natural shuffled-wall hands"
+        required: true
+        default: "500"
+        type: string
+      shards:
+        description: "Deterministic shards (1-20; Free plan runs at most 20 concurrently)"
+        required: true
+        default: "20"
+        type: string
+      seed_namespace:
+        description: "Stable seed namespace for this gate"
+        required: true
+        default: "m4-natural-ci-v1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: natural-simulation-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  shard:
+    name: natural shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - name: Select active shard
+        id: select
+        env:
+          REQUESTED_SHARDS: ${{ inputs.shards }}
+        run: |
+          case "$REQUESTED_SHARDS" in
+            ''|*[!0-9]*)
+              echo "shards must be a decimal integer" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$REQUESTED_SHARDS" -lt 1 ] || [ "$REQUESTED_SHARDS" -gt 20 ]; then
+            echo "shards must be from 1 through 20" >&2
+            exit 1
+          fi
+          if [ "${{ matrix.shard }}" -lt "$REQUESTED_SHARDS" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+      - uses: pnpm/action-setup@v4
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+        with:
+          version: 11.18.0
+      - uses: actions/setup-node@v4
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+      - run: pnpm build:packages
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+      - name: Write deterministic shard config
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+        run: |
+          mkdir -p .ci
+          cat > .ci/simulation-shard.json <<'JSON'
+          {
+            "schemaVersion": 1,
+            "totalHands": ${{ toJSON(inputs.hands) }},
+            "shardCount": ${{ toJSON(inputs.shards) }},
+            "shardIndex": ${{ toJSON(matrix.shard) }},
+            "seedNamespace": ${{ toJSON(inputs.seed_namespace) }}
+          }
+          JSON
+      - name: Run natural shard
+        if: ${{ steps.select.outputs.enabled == 'true' }}
+        run: pnpm exec tsx scripts/simulation-ci-shard.ts
+      - name: Upload redacted shard receipt
+        if: ${{ always() && steps.select.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: natural-simulation-shard-${{ matrix.shard }}
+          path: .ci/simulation-shard-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  aggregate:
+    name: aggregate natural gate
+    if: always()
+    needs: shard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.18.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:packages
+      - name: Download shard receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: natural-simulation-shard-*
+          path: .ci/receipts
+          merge-multiple: true
+      - name: Write aggregate config
+        run: |
+          mkdir -p .ci
+          cat > .ci/simulation-aggregate.json <<'JSON'
+          {
+            "schemaVersion": 1,
+            "totalHands": ${{ toJSON(inputs.hands) }},
+            "shardCount": ${{ toJSON(inputs.shards) }},
+            "seedNamespace": ${{ toJSON(inputs.seed_namespace) }}
+          }
+          JSON
+      - name: Verify all shard receipts
+        run: pnpm exec tsx scripts/simulation-ci-aggregate.ts
+      - name: Upload aggregate receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: natural-simulation-aggregate
+          path: .ci/simulation-aggregate.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Require all shard jobs to pass
+        if: ${{ needs.shard.result != 'success' }}
+        run: |
+          echo "One or more natural simulation shard jobs failed."
+          exit 1

@@ -26,6 +26,7 @@
     "types": ["node", "vitest/globals"],
     "paths": {
       "@hk-mahjong/core": ["./packages/core/src/index.ts"],
+      "@hk-mahjong/core/public": ["./packages/core/src/public.ts"],
       "@hk-mahjong/hk-rules": ["./packages/hk-rules/src/index.ts"],
       "@hk-mahjong/analysis": ["./packages/analysis/src/index.ts"],
       "@hk-mahjong/bots": ["./packages/bots/src/index.ts"],

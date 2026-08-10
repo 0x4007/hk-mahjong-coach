@@ -6,6 +6,7 @@ const fromRoot = (path: string): string => fileURLToPath(new URL(path, import.me
 export default defineConfig({
   resolve: {
     alias: {
+      "@hk-mahjong/core/public": fromRoot("./packages/core/src/public.ts"),
       "@hk-mahjong/core": fromRoot("./packages/core/src/index.ts"),
       "@hk-mahjong/hk-rules": fromRoot("./packages/hk-rules/src/index.ts"),
       "@hk-mahjong/analysis": fromRoot("./packages/analysis/src/index.ts"),
@@ -21,13 +22,33 @@ export default defineConfig({
     include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
-      reporter: ["text", "json-summary", "html"],
-      include: ["packages/{core,hk-rules,protocol}/src/**/*.ts"],
+      reporter: ["text", "json", "json-summary", "html"],
+      include: ["packages/{core,hk-rules,protocol,analysis,bots}/src/**/*.ts"],
       thresholds: {
-        statements: 95,
-        branches: 95,
-        functions: 95,
-        lines: 95,
+        "packages/core/src/**/*.ts": {
+          statements: 95,
+          branches: 95,
+          functions: 95,
+          lines: 95,
+        },
+        "packages/hk-rules/src/**/*.ts": {
+          statements: 95,
+          branches: 95,
+          functions: 95,
+          lines: 95,
+        },
+        "packages/protocol/src/**/*.ts": {
+          statements: 95,
+          branches: 95,
+          functions: 95,
+          lines: 95,
+        },
+        "packages/analysis/src/**/*.ts": {
+          statements: 85,
+        },
+        "packages/bots/src/**/*.ts": {
+          statements: 85,
+        },
       },
     },
   },

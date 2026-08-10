@@ -491,6 +491,7 @@ export const validateRuleset = (input: unknown): RulesetValidationResult => {
     if (error instanceof RulesetValidationError) {
       return { valid: false, issues: error.issues };
     }
+    /* v8 ignore next -- resolveRuleset normalizes schema failures to RulesetValidationError */
     throw error;
   }
 };
