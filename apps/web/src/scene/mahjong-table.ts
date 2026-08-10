@@ -1809,6 +1809,7 @@ const resolveReticleMotionOffset = (
     Partial<Pick<CameraMotionOffsets, "coverLeanRoll" | "headBobLateral" | "headBobPitch">>,
 ): ReticleBobbingOffset => {
   const reticleRoll = motion.roll - (motion.coverLeanRoll ?? 0);
+  const sharedPitch = motion.headBobPitch ?? motion.recoilPitch;
   return {
     x:
       reticleRoll * RETICLE_SWAY_PIXELS_PER_RADIAN +
@@ -1817,9 +1818,8 @@ const resolveReticleMotionOffset = (
       motion.recoilYaw * RETICLE_RECOIL_PIXELS_PER_RADIAN,
     y:
       motion.verticalOffset * RETICLE_HEAD_BOB_PIXELS_PER_METER +
-      (motion.headBobPitch ?? 0) * RETICLE_HEAD_BOB_PITCH_PIXELS_PER_RADIAN +
-      motion.aimSwayY * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN +
-      motion.recoilPitch * RETICLE_RECOIL_PIXELS_PER_RADIAN,
+      sharedPitch * RETICLE_HEAD_BOB_PITCH_PIXELS_PER_RADIAN +
+      motion.aimSwayY * RETICLE_AIM_SWAY_PIXELS_PER_RADIAN,
   };
 };
 
@@ -17756,7 +17756,7 @@ export const createMahjongTableScene = (
       Math.abs(motion.recoilPitch) > 0.0001 ||
       Math.abs(motion.headBobPitch) > 0.0001
     ) {
-      cameraRecoilEuler.set(motion.recoilPitch + motion.headBobPitch, motion.recoilYaw, 0);
+      cameraRecoilEuler.set(motion.headBobPitch, motion.recoilYaw, 0);
       cameraRecoilMatrix.makeRotationFromEuler(cameraRecoilEuler);
       camera.matrix.multiply(cameraRecoilMatrix);
       camera.matrixWorldNeedsUpdate = true;

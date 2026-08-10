@@ -10,6 +10,7 @@ import {
   integrateHeadMotion,
   type HeadImpulse,
   type HeadMotionSnapshot,
+  type HeadRotationVector,
   type HeadMotionState,
   type HeadMotionVector,
 } from "./head-motion.js";
@@ -694,22 +695,6 @@ export const resolveCameraMeleeImpactImpulse = (
   };
 };
 
-/**
- * Integrate one axis of the shared underdamped recoil response. A shot adds a
- * displacement immediately; the spring supplies the universal recovery and
- * opposite-side overshoot. No weapon metadata is needed here.
- */
-const integrateRecoilAxis = (
-  offset: number,
-  velocity: number,
-  deltaSeconds: number,
-): readonly [number, number] => {
-  let nextVelocity = velocity - offset * CAMERA_RECOIL_SPRING * deltaSeconds;
-  nextVelocity *= Math.exp(-CAMERA_RECOIL_DAMPING * deltaSeconds);
-  const nextOffset = offset + nextVelocity * deltaSeconds;
-  return [nextOffset, nextVelocity];
-};
-
 interface PendingRecoilRecovery {
   remainingSeconds: number;
   yawVelocity: number;
@@ -732,6 +717,28 @@ export const resolveCameraVerticalWeightImpulse = (
     -CAMERA_WEIGHT_IMPULSE_MAX,
     CAMERA_WEIGHT_IMPULSE_MAX,
   );
+};
+
+/** One small event-time step keeps action kicks visible before the next frame. */
+const HEAD_IMPULSE_PRESENTATION_STEP_SECONDS = 1 / 60;
+
+const createAngularHeadImpulse = (
+  source: Extract<HeadImpulse["source"], "weapon" | "melee">,
+  angularDeltaVelocity: HeadRotationVector,
+): HeadImpulse => ({
+  source,
+  deltaVelocity: { right: 0, up: 0, forward: 0 },
+  angularDeltaVelocity,
+});
+
+const resolveImmediateAngularDeltaVelocity = (yaw: number, pitch: number): HeadRotationVector => {
+  const scale = Math.max(Number.EPSILON, HEAD_MOTION_DEFAULT_OPTIONS.impulseScale);
+  const step = HEAD_IMPULSE_PRESENTATION_STEP_SECONDS;
+  return {
+    pitch: -pitch / (scale * step),
+    yaw: -yaw / (scale * step),
+    roll: 0,
+  };
 };
 
 export const resolveCameraViewmodelOffset = (
@@ -871,10 +878,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let headMotionSnapshot: HeadMotionSnapshot = integrateHeadMotion(headMotionState, {
     deltaSeconds: 0,
   }).snapshot;
-  let recoilYaw = 0;
-  let recoilYawVelocity = 0;
-  let recoilPitch = 0;
-  let recoilPitchVelocity = 0;
+  let lastHeadMotionTargetTranslation: HeadMotionVector = { right: 0, up: 0, forward: 0 };
+  let lastHeadMotionTargetRotation: HeadRotationVector = { pitch: 0, yaw: 0, roll: 0 };
   let viewmodelRecoilDepth = 0;
   const pendingRecoilRecoveries: PendingRecoilRecovery[] = [];
   let crouchAmount = 0;
@@ -944,10 +949,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     aimSwayPhase = 0;
     headMotionState = createHeadMotionState();
     headMotionSnapshot = integrateHeadMotion(headMotionState, { deltaSeconds: 0 }).snapshot;
-    recoilYaw = 0;
-    recoilYawVelocity = 0;
-    recoilPitch = 0;
-    recoilPitchVelocity = 0;
+    lastHeadMotionTargetTranslation = { right: 0, up: 0, forward: 0 };
+    lastHeadMotionTargetRotation = { pitch: 0, yaw: 0, roll: 0 };
     viewmodelRecoilDepth = 0;
     pendingRecoilRecoveries.length = 0;
     crouchAmount = 0;
@@ -966,6 +969,82 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     offsets = createDefaultOffsets();
   };
 
+  const applyImmediateHeadImpulse = (impulse: HeadImpulse): void => {
+    const result = integrateHeadMotion(headMotionState, {
+      deltaSeconds: HEAD_IMPULSE_PRESENTATION_STEP_SECONDS,
+      targetTranslation: lastHeadMotionTargetTranslation,
+      targetRotation: lastHeadMotionTargetRotation,
+      impulse,
+    });
+    // The action callback runs between simulation frames. Advance only the
+    // axes touched by this event; otherwise a yaw-only hit would also advance
+    // a previously settling pitch (and vice versa) before the next real frame.
+    const translation = impulse.deltaVelocity;
+    const angular = impulse.angularDeltaVelocity ?? { pitch: 0, yaw: 0, roll: 0 };
+    const translationActive = {
+      right: Math.abs(translation.right) > Number.EPSILON,
+      up: Math.abs(translation.up) > Number.EPSILON,
+      forward: Math.abs(translation.forward) > Number.EPSILON,
+    };
+    const rotationActive = {
+      pitch: Math.abs(angular.pitch) > Number.EPSILON,
+      yaw: Math.abs(angular.yaw) > Number.EPSILON,
+      roll: Math.abs(angular.roll) > Number.EPSILON,
+    };
+    const nextState: HeadMotionState = Object.freeze({
+      ...result.state,
+      translation: Object.freeze({
+        right: translationActive.right
+          ? result.state.translation.right
+          : headMotionState.translation.right,
+        up: translationActive.up ? result.state.translation.up : headMotionState.translation.up,
+        forward: translationActive.forward
+          ? result.state.translation.forward
+          : headMotionState.translation.forward,
+      }),
+      translationVelocity: Object.freeze({
+        right: translationActive.right
+          ? result.state.translationVelocity.right
+          : headMotionState.translationVelocity.right,
+        up: translationActive.up
+          ? result.state.translationVelocity.up
+          : headMotionState.translationVelocity.up,
+        forward: translationActive.forward
+          ? result.state.translationVelocity.forward
+          : headMotionState.translationVelocity.forward,
+      }),
+      rotation: Object.freeze({
+        pitch: rotationActive.pitch ? result.state.rotation.pitch : headMotionState.rotation.pitch,
+        yaw: rotationActive.yaw ? result.state.rotation.yaw : headMotionState.rotation.yaw,
+        roll: rotationActive.roll ? result.state.rotation.roll : headMotionState.rotation.roll,
+      }),
+      rotationVelocity: Object.freeze({
+        pitch: rotationActive.pitch
+          ? result.state.rotationVelocity.pitch
+          : headMotionState.rotationVelocity.pitch,
+        yaw: rotationActive.yaw
+          ? result.state.rotationVelocity.yaw
+          : headMotionState.rotationVelocity.yaw,
+        roll: rotationActive.roll
+          ? result.state.rotationVelocity.roll
+          : headMotionState.rotationVelocity.roll,
+      }),
+    });
+    headMotionState = nextState;
+    headMotionSnapshot = Object.freeze({
+      ...result.snapshot,
+      ...nextState,
+      translationClamped:
+        (translationActive.right && result.snapshot.translationClamped) ||
+        (translationActive.up && result.snapshot.translationClamped) ||
+        (translationActive.forward && result.snapshot.translationClamped),
+      rotationClamped:
+        (rotationActive.pitch && result.snapshot.rotationClamped) ||
+        (rotationActive.yaw && result.snapshot.rotationClamped) ||
+        (rotationActive.roll && result.snapshot.rotationClamped),
+    });
+  };
+
   const applyWeaponShotImpulse = (shot: CameraWeaponShotInput): CameraMotionOffsets => {
     viewmodelRecoilDepth = Math.min(
       1,
@@ -973,8 +1052,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     );
     const impulse = resolveCameraWeaponShotImpulse(shot);
     if (impulse.yaw !== 0 || impulse.pitch !== 0) {
-      recoilYaw += impulse.yaw;
-      recoilPitch += impulse.pitch;
+      applyImmediateHeadImpulse(
+        createAngularHeadImpulse(
+          "weapon",
+          resolveImmediateAngularDeltaVelocity(impulse.yaw, impulse.pitch),
+        ),
+      );
       const recoveryVelocity =
         CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
       pendingRecoilRecoveries.push({
@@ -983,7 +1066,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         pitchVelocity: -impulse.pitch * recoveryVelocity,
       });
     }
-    offsets = { ...offsets, recoilYaw, recoilPitch, viewmodelRecoilDepth };
+    offsets = {
+      ...offsets,
+      recoilYaw: headMotionSnapshot.rotation.yaw,
+      recoilPitch: headMotionSnapshot.rotation.pitch,
+      viewmodelRecoilDepth,
+    };
     return offsets;
   };
 
@@ -992,8 +1080,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     if (impulse.yaw === 0 && impulse.pitch === 0) {
       return offsets;
     }
-    recoilYaw += impulse.yaw;
-    recoilPitch += impulse.pitch;
+    applyImmediateHeadImpulse(
+      createAngularHeadImpulse(
+        "melee",
+        resolveImmediateAngularDeltaVelocity(impulse.yaw, impulse.pitch),
+      ),
+    );
     const recoveryVelocity =
       CAMERA_RECOIL_RETURN_VELOCITY * CAMERA_RECOIL_RECOVERY_OVERSHOOT_MULTIPLIER;
     pendingRecoilRecoveries.push({
@@ -1001,7 +1093,11 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       yawVelocity: -impulse.yaw * recoveryVelocity,
       pitchVelocity: -impulse.pitch * recoveryVelocity,
     });
-    offsets = { ...offsets, recoilYaw, recoilPitch };
+    offsets = {
+      ...offsets,
+      recoilYaw: headMotionSnapshot.rotation.yaw,
+      recoilPitch: headMotionSnapshot.rotation.pitch,
+    };
     return offsets;
   };
 
@@ -1210,6 +1306,30 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         roll: accelerationRollSource,
       },
     };
+    lastHeadMotionTargetTranslation = headMotionInput.targetTranslation;
+    lastHeadMotionTargetRotation = headMotionInput.targetRotation;
+    const recoveryImpulses: HeadImpulse[] = [];
+    let pendingRecoveryCount = 0;
+    const impulseScale = Math.max(Number.EPSILON, HEAD_MOTION_DEFAULT_OPTIONS.impulseScale);
+    for (const pendingRecovery of pendingRecoilRecoveries) {
+      const remainingSeconds = pendingRecovery.remainingSeconds - deltaSeconds;
+      if (remainingSeconds <= 0) {
+        recoveryImpulses.push(
+          createAngularHeadImpulse("weapon", {
+            pitch: -pendingRecovery.pitchVelocity / impulseScale,
+            yaw: -pendingRecovery.yawVelocity / impulseScale,
+            roll: 0,
+          }),
+        );
+        continue;
+      }
+      pendingRecoilRecoveries[pendingRecoveryCount] = {
+        ...pendingRecovery,
+        remainingSeconds,
+      };
+      pendingRecoveryCount += 1;
+    }
+    pendingRecoilRecoveries.length = pendingRecoveryCount;
     const baseHeadImpulse = input.headImpulse ?? compatibilityImpulse;
     const hasAngularStop =
       Math.abs(angularStopDeltaVelocity.pitch) > Number.EPSILON ||
@@ -1223,10 +1343,14 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
           angularDeltaVelocity: angularStopDeltaVelocity,
         }
       : baseHeadImpulse;
+    const frameHeadImpulses = [
+      ...recoveryImpulses,
+      ...(headImpulse === undefined ? [] : [headImpulse]),
+    ];
     const headMotion =
-      headImpulse === undefined
+      frameHeadImpulses.length === 0
         ? integrateHeadMotion(headMotionState, headMotionInput)
-        : integrateHeadMotion(headMotionState, { ...headMotionInput, impulse: headImpulse });
+        : integrateHeadMotion(headMotionState, { ...headMotionInput, impulses: frameHeadImpulses });
     headMotionState = headMotion.state;
     headMotionSnapshot = headMotion.snapshot;
     const weightShift = headMotionSnapshot.translation.up - headBobTarget;
@@ -1236,40 +1360,9 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
     );
     const headBobPitch = clamp(
-      weightPitch + headMotionSnapshot.rotation.pitch,
+      weightPitch + headMotionSnapshot.rotation.pitch + deathPitch,
       -CAMERA_WEIGHT_PITCH_MAX,
       CAMERA_WEIGHT_PITCH_MAX,
-    );
-
-    let pendingRecoveryCount = 0;
-    let recoveryYawVelocity = 0;
-    let recoveryPitchVelocity = 0;
-    for (const pendingRecovery of pendingRecoilRecoveries) {
-      const remainingSeconds = pendingRecovery.remainingSeconds - deltaSeconds;
-      if (remainingSeconds <= 0) {
-        recoveryYawVelocity += pendingRecovery.yawVelocity;
-        recoveryPitchVelocity += pendingRecovery.pitchVelocity;
-        continue;
-      }
-      pendingRecoilRecoveries[pendingRecoveryCount] = {
-        ...pendingRecovery,
-        remainingSeconds,
-      };
-      pendingRecoveryCount += 1;
-    }
-    pendingRecoilRecoveries.length = pendingRecoveryCount;
-    recoilYawVelocity += recoveryYawVelocity;
-    recoilPitchVelocity += recoveryPitchVelocity;
-
-    [recoilYaw, recoilYawVelocity] = integrateRecoilAxis(
-      recoilYaw,
-      recoilYawVelocity,
-      deltaSeconds,
-    );
-    [recoilPitch, recoilPitchVelocity] = integrateRecoilAxis(
-      recoilPitch,
-      recoilPitchVelocity,
-      deltaSeconds,
     );
     viewmodelRecoilDepth = damp(
       viewmodelRecoilDepth,
@@ -1354,8 +1447,8 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       headBobPitch,
       weightShift,
       verticalOffset,
-      recoilYaw,
-      recoilPitch: recoilPitch + deathPitch,
+      recoilYaw: headMotionSnapshot.rotation.yaw,
+      recoilPitch: headMotionSnapshot.rotation.pitch + deathPitch,
       viewmodelRecoilDepth,
       viewmodelOffset: resolveCameraViewmodelOffset(crouchAmount, aimAmount),
       viewmodelTransition,
