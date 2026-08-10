@@ -1,6 +1,6 @@
 {
   "name": "vault-2m-test",
-  "description": "Vault a measured two-metre block and expose the full continuous climb timing.",
+  "description": "Jump toward a measured two-metre block and expose the physics-only collision result.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -25,12 +25,12 @@
       "duration": 0.0166666666667,
       "forward": 1,
       "jump": true,
-      "label": "jump-to-two-metre-block"
+      "label": "jump-toward-two-metre-block"
     },
     {
       "duration": 1.2,
       "forward": 0,
-      "label": "complete-one-second-climb"
+      "label": "continue-one-point-two-seconds"
     }
   ]
 }

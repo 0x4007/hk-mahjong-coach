@@ -79,6 +79,21 @@ export const PLAYER_SUPPORT_SNAP_HEIGHT = worldUnitsFromMeters(PLAYER_SUPPORT_SN
 
 /** Shared movement acceleration values, expressed in metres-based units. */
 export const PLAYER_JUMP_SPEED_METERS_PER_SECOND = 13.2;
+/** Peak speed of the bounded slow-fast-slow wall-climb pull. */
+export const PLAYER_WALL_CLIMB_PEAK_SPEED_METERS_PER_SECOND = 4;
+/** Maximum upward/downward climb-motor velocity change per second. */
+export const PLAYER_WALL_CLIMB_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED = 72;
+/** Extra clearance between the capsule and a resolved wall top. */
+export const PLAYER_WALL_CLIMB_TOP_CLEARANCE_METERS = 0.02;
 export const WORLD_GRAVITY_METERS_PER_SECOND_SQUARED = 48;
 export const PLAYER_JUMP_SPEED = worldUnitsFromMeters(PLAYER_JUMP_SPEED_METERS_PER_SECOND);
+export const PLAYER_WALL_CLIMB_PEAK_SPEED = worldUnitsFromMeters(
+  PLAYER_WALL_CLIMB_PEAK_SPEED_METERS_PER_SECOND,
+);
+export const PLAYER_WALL_CLIMB_MAX_ACCELERATION = worldUnitsFromMeters(
+  PLAYER_WALL_CLIMB_MAX_ACCELERATION_METERS_PER_SECOND_SQUARED,
+);
+export const PLAYER_WALL_CLIMB_TOP_CLEARANCE = worldUnitsFromMeters(
+  PLAYER_WALL_CLIMB_TOP_CLEARANCE_METERS,
+);
 export const WORLD_GRAVITY = worldUnitsFromMeters(WORLD_GRAVITY_METERS_PER_SECOND_SQUARED);

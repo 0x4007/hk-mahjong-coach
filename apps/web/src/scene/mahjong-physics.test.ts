@@ -5,6 +5,13 @@ import {
   createMahjongPhysics,
   type PhysicsBox,
 } from "./mahjong-physics.js";
+import { PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, WORLD_GRAVITY } from "./world-scale.js";
+import { isPlayerTouchingWall } from "./wall-contact.js";
+import {
+  resolveWallClimbProgress,
+  resolveWallClimbTargetAtContact,
+  resolveWallClimbVelocity,
+} from "./wall-climb.js";
 
 const TEST_COLLIDERS: readonly PhysicsBox[] = [
   {
@@ -18,7 +25,7 @@ const TEST_COLLIDERS: readonly PhysicsBox[] = [
 ];
 
 describe("mahjong physics", () => {
-  it("keeps traversal collisions available in the fallback controller", () => {
+  it("keeps obstacle collisions available in the fallback controller", () => {
     const wall: PhysicsBox = {
       center: { x: 0, y: 2, z: -4 },
       halfExtents: { x: 0.5, y: 2, z: 0.5 },
@@ -47,6 +54,54 @@ describe("mahjong physics", () => {
       const movement = physics.move({ x: 0, y: 0.86, z: -0.3 }, { x: 0, y: 0, z: -0.8 });
       expect(movement.position.y).toBeCloseTo(0.22 + 0.86, 5);
       expect(movement.grounded).toBe(true);
+    } finally {
+      physics.dispose();
+    }
+  });
+
+  it("resolves a bounded wall pull through the capsule controller", () => {
+    const wall: PhysicsBox = {
+      center: { x: 0, y: 1, z: 0 },
+      halfExtents: { x: 1.5, y: 1, z: 0.12 },
+    };
+    const floor = TEST_COLLIDERS[0]!;
+    const physics = createFallbackMahjongPhysics([floor, wall]);
+    const dimensions = { radius: PLAYER_CAPSULE_RADIUS, halfHeight: PLAYER_CAPSULE_HALF_HEIGHT };
+    let position = { x: 0, y: 0.86, z: -0.38 };
+    let verticalVelocity = 7;
+    const resolution = resolveWallClimbTargetAtContact(position, [floor, wall], dimensions);
+    expect(resolution).not.toBeNull();
+    const targetY = resolution?.targetCenterY ?? 0;
+    const startY = position.y;
+    let crossedWall = false;
+    let maximumHeight = position.y;
+    try {
+      expect(isPlayerTouchingWall(position, [floor, wall], dimensions)).toBe(true);
+      for (let frame = 0; frame < 120; frame += 1) {
+        const delta = 1 / 60;
+        verticalVelocity -= WORLD_GRAVITY * delta;
+        verticalVelocity = resolveWallClimbVelocity({
+          currentVelocity: verticalVelocity,
+          progress: resolveWallClimbProgress(position.y, startY, targetY),
+          deltaSeconds: delta,
+        });
+        verticalVelocity = Math.min(verticalVelocity, Math.max(0, targetY - position.y) / delta);
+        const movement = physics.move(position, {
+          x: 0,
+          y: verticalVelocity * delta,
+          z: 5 * delta,
+        });
+        position = movement.position;
+        maximumHeight = Math.max(maximumHeight, position.y);
+        crossedWall ||= position.z > wall.center.z + wall.halfExtents.z + dimensions.radius;
+        if (movement.grounded) {
+          verticalVelocity = 0;
+        }
+      }
+
+      expect(maximumHeight).toBeGreaterThan(wall.center.y + wall.halfExtents.y);
+      expect(maximumHeight).toBeLessThanOrEqual(targetY + 0.01);
+      expect(crossedWall).toBe(true);
     } finally {
       physics.dispose();
     }

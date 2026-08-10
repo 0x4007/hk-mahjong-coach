@@ -1,6 +1,6 @@
 {
-  "name": "wall-hang-airborne-platform-test",
-  "description": "Approach a high platform during a jump and record the physics-only collision result.",
+  "name": "contact-climb-held-space-test",
+  "description": "Holding Space from the ground jump starts one bounded pull when airborne wall contact is reached.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -16,22 +16,23 @@
   },
   "staticBoxes": [
     {
-      "center": [0, 3.12, -4],
-      "halfExtents": [0.75, 0.08, 0.5]
+      "center": [0, 1.5, -4],
+      "halfExtents": [1.5, 1.5, 0.12]
     }
   ],
   "frames": [
     {
-      "duration": 0.3,
+      "duration": 0.14,
       "forward": 1,
       "sprint": true,
       "jump": true,
-      "label": "jump-toward-platform"
+      "label": "jump-into-wall-holding-space"
     },
     {
       "duration": 1.0,
       "forward": 1,
-      "label": "continue-after-contact"
+      "jump": true,
+      "label": "held-space-climb"
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "name": "vault-test",
-  "description": "Jump toward a low platform and verify the refined vault landing remains supported.",
+  "description": "Jump toward a low platform and record the physics-only contact and support result.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -25,12 +25,12 @@
       "duration": 0.0166666666667,
       "forward": 1,
       "jump": true,
-      "label": "jump-over-low-platform"
+      "label": "jump-toward-low-platform"
     },
     {
       "duration": 0.5,
       "forward": 0,
-      "label": "settle-on-platform"
+      "label": "continue-under-physics"
     }
   ]
 }

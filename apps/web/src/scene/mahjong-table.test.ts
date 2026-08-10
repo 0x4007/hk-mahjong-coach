@@ -3,8 +3,6 @@ import * as THREE from "three";
 
 import {
   clipExplorationRectAroundPenthouse,
-  CLIMBING_GYM_STANDING_EYE_HEIGHT,
-  CLIMBING_GYM_VAULT_HEIGHTS,
   collectScenePhysicsBoxes,
   createExplorationWorld,
   EXPLORATION_CHUNK_SIZE,
@@ -13,23 +11,8 @@ import {
   EXPLORATION_WORLD_HALF_SIZE,
   EXPLORATION_WORLD_SIZE_METERS,
   getVisualSceneStateStorageKey,
-  LEDGE_CLIMB_EYE_HEIGHT_METERS,
   PLAY_AREA_ORIGINS,
   PLAY_AREA_SIZE_METERS,
-  resolveLedgeClimbTargetCameraY,
-  resolveLedgeGrabTarget,
-  resolveLedgeClimbMomentum,
-  resolveVaultTarget,
-  resolveVaultTraversalArcHeight,
-  resolveVaultTraversalDuration,
-  resolveWallClimbTarget,
-  resolveWallHangTarget,
-  resolveWallHangTargetDetails,
-  WALL_HANG_MIN_TOP,
-  WALL_HANG_MAX_TOP_GAP,
-  WALL_HANG_REACH,
-  WALL_HANG_SIDE_BUFFER,
-  WALL_CLIMB_SPEED,
   isExplorationRectOutsidePenthouse,
   readVisualDebugPreferences,
   readVisualSceneState,
@@ -41,11 +24,14 @@ import {
   resolveCrouchedStateAfterSprint,
   resolveSprintRequestAfterO2Check,
   shouldInterruptReloadForSprint,
+  shouldTriggerJumpFromKeydown,
   resolveJumpLaunchSpeed,
   resolveReticleZoomViewOffset,
   resolveWeaponShotReticleOffset,
   ZOOM_RECOIL_FEEDBACK_MULTIPLIER,
   resolveDesktopAimInput,
+  resolveCoverLeanInput,
+  resolveCoverModeFromAimTransition,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
   isMovementDoubleTap,
@@ -57,7 +43,6 @@ import {
   writeVisualSceneState,
 } from "./mahjong-table.js";
 import type { VisualDebugPreferences, VisualSceneState } from "./mahjong-table.js";
-import type { PhysicsBox, PhysicsVector } from "./mahjong-physics.js";
 import {
   PLAYER_MOVE_SPEED_METERS_PER_SECOND,
   PLAYER_SPRINT_MULTIPLIER,
@@ -370,6 +355,24 @@ describe("left Command keyboard binding", () => {
   });
 });
 
+describe("cover mode", () => {
+  it("arms only when zoom is activated while wall contact is present", () => {
+    expect(resolveCoverModeFromAimTransition(false, false, true, true)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(false, true, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(false, true, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, false)).toBe(false);
+    expect(resolveCoverModeFromAimTransition(true, false, true, true)).toBe(true);
+    expect(resolveCoverModeFromAimTransition(true, true, false, true)).toBe(false);
+  });
+
+  it("uses explicit Z/C lean keys before strafe input", () => {
+    expect(resolveCoverLeanInput(false, true, false, 1)).toBe(0);
+    expect(resolveCoverLeanInput(true, true, false, 1)).toBe(-1);
+    expect(resolveCoverLeanInput(true, false, true, -1)).toBe(1);
+    expect(resolveCoverLeanInput(true, false, false, -0.4)).toBe(-0.4);
+  });
+});
+
 describe("movement sprint double-tap", () => {
   const movementKeys = [
     "KeyW",
@@ -405,6 +408,11 @@ describe("movement sprint double-tap", () => {
 });
 
 describe("jump posture", () => {
+  it("does not replay a held ground jump from keyboard repeat events", () => {
+    expect(shouldTriggerJumpFromKeydown(false)).toBe(true);
+    expect(shouldTriggerJumpFromKeydown(true)).toBe(false);
+  });
+
   it("automatically stands from crouch only when the jump is accepted", () => {
     expect(resolveCrouchedStateAfterJump(true, true)).toBe(false);
     expect(resolveCrouchedStateAfterJump(true, false)).toBe(true);
@@ -633,427 +641,6 @@ describe("append-only exploration chunks", () => {
       expect(origin.z - playAreaHalfSize).toBeGreaterThanOrEqual(-EXPLORATION_WORLD_HALF_SIZE);
       expect(origin.z + playAreaHalfSize).toBeLessThanOrEqual(EXPLORATION_WORLD_HALF_SIZE);
     }
-  });
-});
-
-describe("ledge vaulting helpers", () => {
-  it("maps leg-height vaults to an instant transition and two metres to one second", () => {
-    expect(resolveVaultTraversalDuration(0.45)).toBeCloseTo(0.04, 6);
-    expect(resolveVaultTraversalDuration(2)).toBeCloseTo(1, 6);
-    expect(resolveVaultTraversalDuration(1)).toBeGreaterThan(0.04);
-    expect(resolveVaultTraversalDuration(1)).toBeLessThan(1);
-    expect(resolveVaultTraversalArcHeight(0.45)).toBeCloseTo(0.03, 6);
-    expect(resolveVaultTraversalArcHeight(2)).toBeCloseTo(0.24, 6);
-  });
-
-  it("keeps a procedural rotated box on the same local vault path", () => {
-    const target = resolveVaultTarget({ x: 0.8, y: 0.86, z: -0.5 }, { x: 0, y: 0, z: 0.75 }, 0, [
-      {
-        center: { x: 0, y: 0.5, z: 0 },
-        halfExtents: { x: 0.2, y: 0.5, z: 2 },
-        rotationY: Math.PI / 2,
-      },
-    ]);
-
-    expect(target).not.toBeNull();
-    expect(target?.y).toBeCloseTo(1.86, 6);
-    expect(target?.x).toBeCloseTo(0.8, 6);
-    expect(target?.z).toBeGreaterThanOrEqual(-2 + 0.06);
-    expect(target?.z).toBeLessThanOrEqual(2 - 0.06);
-  });
-
-  it("publishes the measured climbing-gym height row in ascending order", () => {
-    expect(CLIMBING_GYM_VAULT_HEIGHTS).toHaveLength(50);
-    expect(CLIMBING_GYM_VAULT_HEIGHTS[0]).toBeCloseTo(0.1, 6);
-    for (let index = 1; index < CLIMBING_GYM_VAULT_HEIGHTS.length; index += 1) {
-      const previous = CLIMBING_GYM_VAULT_HEIGHTS[index - 1];
-      const current = CLIMBING_GYM_VAULT_HEIGHTS[index];
-      if (previous === undefined || current === undefined) {
-        throw new Error(`Missing climbing-gym height at index ${String(index)}`);
-      }
-      expect(current - previous).toBeCloseTo(0.1, 6);
-    }
-    expect(CLIMBING_GYM_VAULT_HEIGHTS.at(-1)).toBeCloseTo(5, 6);
-    expect(CLIMBING_GYM_STANDING_EYE_HEIGHT).toBeCloseTo(1.75, 6);
-    expect(CLIMBING_GYM_VAULT_HEIGHTS.at(-1)).toBeGreaterThan(CLIMBING_GYM_STANDING_EYE_HEIGHT);
-  });
-
-  it("returns a capsule-centre target for a low vault and keeps it on the platform", () => {
-    const fromPosition: PhysicsVector = { x: 0, y: 0.86, z: -0.6 };
-    const target = resolveVaultTarget(
-      fromPosition,
-      { x: 0, y: 0, z: 0.75 },
-      fromPosition.y - 0.86,
-      [
-        {
-          center: { x: 0, y: 0.11, z: 0 },
-          halfExtents: { x: 0.5, y: 0.11, z: 0.5 },
-        },
-      ],
-    );
-
-    expect(target).not.toBeNull();
-    expect(target?.y).toBeCloseTo(0.22 + 0.86);
-    expect(target?.z).toBeCloseTo(0.31);
-    expect(target?.z).toBeGreaterThanOrEqual(-0.5 + 0.06);
-    expect(target?.z).toBeLessThanOrEqual(0.5 - 0.06);
-  });
-
-  it("does not vault a low platform that is merely nearby or behind the player", () => {
-    const platform: PhysicsBox = {
-      center: { x: 0, y: 0.11, z: 0 },
-      halfExtents: { x: 0.5, y: 0.11, z: 0.5 },
-    };
-
-    expect(
-      resolveVaultTarget({ x: 0, y: 0.86, z: -1.5 }, { x: 0, y: 0, z: 1 }, 0, [platform]),
-    ).toBeNull();
-    expect(
-      resolveVaultTarget({ x: 0, y: 0.86, z: 0.7 }, { x: 0, y: 0, z: 1 }, 0, [platform]),
-    ).toBeNull();
-  });
-
-  it("nudges ledge grab targets forward onto a supported landing zone", () => {
-    const playerColliderCenterHeight = 0.86;
-    const fromPosition: PhysicsVector = { x: 0, y: playerColliderCenterHeight, z: -0.6 };
-    const delta: PhysicsVector = { x: 0, y: 0, z: 0.6 };
-    const boxes: PhysicsBox[] = [
-      {
-        center: { x: 0, y: 0.5, z: 0 },
-        halfExtents: { x: 0.5, y: 0.5, z: 0.5 },
-      },
-    ];
-    const target = resolveLedgeGrabTarget(
-      fromPosition,
-      delta,
-      fromPosition.y - playerColliderCenterHeight,
-      boxes,
-      [],
-    );
-
-    expect(target).not.toBeNull();
-    expect(target?.x).toBeCloseTo(0);
-    expect(target?.z).toBeGreaterThan(fromPosition.z + delta.z);
-    expect(target?.z).toBeCloseTo(0.16);
-    expect(target?.y).toBeCloseTo(1.86);
-  });
-
-  it("locks ledge transition camera to a 1.75m eye height", () => {
-    expect(resolveLedgeClimbTargetCameraY(1.86)).toBeCloseTo(2.75);
-    expect(LEDGE_CLIMB_EYE_HEIGHT_METERS).toBe(1.75);
-  });
-
-  it("captures at least sprint momentum at vault start", () => {
-    const moveSpeed = PLAYER_MOVE_SPEED_METERS_PER_SECOND;
-    const momentum = resolveLedgeClimbMomentum(0.2, 0, 0, 0, true, moveSpeed);
-    expect(
-      Math.hypot(momentum.preservedForwardVelocity, momentum.preservedStrafeVelocity),
-    ).toBeCloseTo(PLAYER_SPRINT_SPEED_METERS_PER_SECOND, 2);
-  });
-
-  it("falls back to stored velocity when input is still resolving", () => {
-    const momentum = resolveLedgeClimbMomentum(0, 0, 0.6, 0.8, false, 3.4);
-    expect(momentum.preservedForwardVelocity).toBeCloseTo(0.6);
-    expect(momentum.preservedStrafeVelocity).toBeCloseTo(0.8);
-    expect(momentum.preserveSprinting).toBe(false);
-  });
-});
-
-describe("wall hanging helper", () => {
-  const playerY = 0.86;
-  const airbornePlayerY = 2.7;
-  const forwardZWall: PhysicsBox = {
-    center: { x: 0, y: 2, z: -4 },
-    halfExtents: { x: 0.5, y: 2, z: 0.5 },
-  };
-
-  it("detects the approached near face when a jump reaches the wall top", () => {
-    const target = resolveWallHangTarget(
-      { x: 0, y: airbornePlayerY, z: -3 },
-      { x: 0, y: 0, z: -4 },
-      [forwardZWall],
-    );
-
-    expect(target).not.toBeNull();
-    expect(target?.y).toBe(airbornePlayerY);
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-    expect(Math.abs((target?.z ?? 0) - -3.5)).toBeGreaterThan(0.26);
-    expect(WALL_HANG_REACH).toBeGreaterThan(0);
-    expect(WALL_HANG_MAX_TOP_GAP).toBeGreaterThan(0);
-    expect(WALL_HANG_SIDE_BUFFER).toBeGreaterThan(0);
-    expect(WALL_CLIMB_SPEED).toBeGreaterThan(0);
-  });
-
-  it("does not turn a ground-level collision with a tall wall into a climb", () => {
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [forwardZWall]),
-    ).toBeNull();
-  });
-
-  it("rejects a five-metre wall even at the top of a normal jump", () => {
-    const fiveMetreWall: PhysicsBox = {
-      center: { x: 0, y: 2.5, z: -4 },
-      halfExtents: { x: 0.5, y: 2.5, z: 0.5 },
-    };
-
-    expect(
-      resolveWallHangTarget({ x: 0, y: airbornePlayerY, z: -3 }, { x: 0, y: 0, z: -1 }, [
-        fiveMetreWall,
-      ]),
-    ).toBeNull();
-  });
-
-  it("uses a relative height threshold and rejects a short wall", () => {
-    const shortWall: PhysicsBox = {
-      center: { x: 0, y: 0.4, z: -4 },
-      halfExtents: { x: 0.5, y: 0.4, z: 0.5 },
-    };
-
-    expect(WALL_HANG_MIN_TOP).toBeCloseTo(1.6 + 0.05);
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [shortWall]),
-    ).toBeNull();
-
-    const vaultHeightPlatform: PhysicsBox = {
-      center: { x: 0, y: 0.5, z: -4 },
-      halfExtents: { x: 1, y: 0.5, z: 1 },
-    };
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [
-        vaultHeightPlatform,
-      ]),
-    ).toBeNull();
-
-    const floatingWall: PhysicsBox = {
-      ...forwardZWall,
-      center: { x: 0, y: 3.2, z: -4 },
-      halfExtents: { x: 0.5, y: 0.4, z: 0.5 },
-    };
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [floatingWall]),
-    ).toBeNull();
-  });
-
-  it("catches a higher platform during an airborne approach before the apex", () => {
-    const platformFace: PhysicsBox = {
-      center: { x: 0, y: 2.24, z: -4 },
-      halfExtents: { x: 0.5, y: 0.08, z: 0.5 },
-    };
-
-    const target = resolveWallHangTarget({ x: 0, y: 1.5, z: -3 }, { x: 0, y: 0, z: -1 }, [
-      platformFace,
-    ]);
-
-    expect(target).not.toBeNull();
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-    expect(target?.y).toBeCloseTo(1.5, 6);
-  });
-
-  it("catches a thin platform when its underside is just above the capsule head", () => {
-    const thinPlatform: PhysicsBox = {
-      center: { x: 0, y: 3.12, z: -4 },
-      halfExtents: { x: 0.75, y: 0.08, z: 0.5 },
-    };
-
-    const target = resolveWallHangTarget({ x: 0, y: 2.17, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
-      thinPlatform,
-    ]);
-
-    expect(target).not.toBeNull();
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-    expect(target?.y).toBeCloseTo(2.17, 6);
-  });
-
-  it("rejects walls outside lateral overlap or beyond reach", () => {
-    const lateralWall: PhysicsBox = {
-      ...forwardZWall,
-      center: { x: 2, y: 2, z: -4 },
-    };
-    const distantWall: PhysicsBox = {
-      ...forwardZWall,
-      center: { x: 0, y: 2, z: -5 },
-    };
-
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [lateralWall]),
-    ).toBeNull();
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -3 }, { x: 0, y: 0, z: -1 }, [distantWall]),
-    ).toBeNull();
-  });
-
-  it("allows the capsule radius to overlap a wall's lateral edge", () => {
-    const edgeWall: PhysicsBox = {
-      ...forwardZWall,
-      center: { x: 0.72, y: 2, z: -4 },
-    };
-
-    const target = resolveWallHangTarget(
-      { x: 0, y: airbornePlayerY, z: -3 },
-      { x: 0, y: 0, z: -1 },
-      [edgeWall],
-    );
-
-    expect(target).not.toBeNull();
-    expect(target?.x).toBeGreaterThanOrEqual(
-      edgeWall.center.x - edgeWall.halfExtents.x + 0.26 + 0.01,
-    );
-  });
-
-  it("does not grab a wall behind the player", () => {
-    const behindWall: PhysicsBox = {
-      center: { x: 0, y: 2, z: -1.9 },
-      halfExtents: { x: 0.5, y: 2, z: 0.2 },
-    };
-
-    expect(
-      resolveWallHangTarget({ x: 0, y: playerY, z: -2.2 }, { x: 0, y: 0, z: -1 }, [behindWall]),
-    ).toBeNull();
-  });
-
-  it("recovers a swept contact while the capsule is still within the wall slab", () => {
-    const wall: PhysicsBox = {
-      center: { x: 0, y: 1.6, z: -4 },
-      halfExtents: { x: 0.5, y: 1.6, z: 0.5 },
-    };
-    const target = resolveWallHangTarget({ x: 0, y: 2.17, z: -4.29 }, { x: 0, y: 0, z: -1 }, [
-      wall,
-    ]);
-
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-  });
-
-  it("rejects a swept point that has passed beyond the far side", () => {
-    const wall: PhysicsBox = {
-      center: { x: 0, y: 1.6, z: -4 },
-      halfExtents: { x: 0.5, y: 1.6, z: 0.5 },
-    };
-
-    expect(
-      resolveWallHangTarget({ x: 0, y: 2.17, z: -4.7 }, { x: 0, y: 0, z: -1 }, [wall]),
-    ).toBeNull();
-  });
-
-  it("selects the closest qualifying wall", () => {
-    const nearer: PhysicsBox = {
-      center: { x: 0, y: 2, z: -4 },
-      halfExtents: { x: 0.5, y: 2, z: 0.5 },
-    };
-    const farther: PhysicsBox = {
-      center: { x: 0, y: 2, z: -4.2 },
-      halfExtents: { x: 0.5, y: 2, z: 0.5 },
-    };
-    const target = resolveWallHangTarget(
-      { x: 0, y: airbornePlayerY, z: -3 },
-      { x: 0, y: 0, z: -1 },
-      [farther, nearer],
-    );
-
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-  });
-
-  it.each([
-    [
-      { x: 1, y: 0, z: 0 },
-      { x: 3, y: airbornePlayerY, z: 0 },
-      { x: 3.5 - 0.26 - 0.01, y: airbornePlayerY, z: 0 },
-    ],
-    [
-      { x: -1, y: 0, z: 0 },
-      { x: -3, y: airbornePlayerY, z: 0 },
-      { x: -3.5 + 0.26 + 0.01, y: airbornePlayerY, z: 0 },
-    ],
-    [
-      { x: 0, y: 0, z: 1 },
-      { x: 0, y: airbornePlayerY, z: 3 },
-      { x: 0, y: airbornePlayerY, z: 3.5 - 0.26 - 0.01 },
-    ],
-  ])("handles an approach on each cardinal axis", (forward, fromPosition, expected) => {
-    const target = resolveWallHangTarget(fromPosition, forward, [
-      {
-        center: {
-          x: expected.x === 0 ? 0 : expected.x > 0 ? 4 : -4,
-          y: 2,
-          z: expected.z === 0 ? 0 : expected.z > 0 ? 4 : -4,
-        },
-        halfExtents: { x: expected.x === 0 ? 0.5 : 0.5, y: 2, z: expected.z === 0 ? 0.5 : 0.5 },
-      },
-    ]);
-
-    expect(target?.x).toBeCloseTo(expected.x, 6);
-    expect(target?.z).toBeCloseTo(expected.z, 6);
-  });
-
-  it("supports a diagonal approach using the dominant axis", () => {
-    const target = resolveWallHangTarget(
-      { x: 0, y: airbornePlayerY, z: -3 },
-      { x: 0.45, y: 0, z: -0.9 },
-      [forwardZWall],
-    );
-
-    expect(target).not.toBeNull();
-    expect(target?.z).toBeCloseTo(-3.5 + 0.26 + 0.01, 6);
-    expect(target?.x).toBeGreaterThanOrEqual(-0.5 + 0.26);
-    expect(target?.x).toBeLessThanOrEqual(0.5 - 0.26);
-  });
-
-  it("resolves a valid hang from the safe position just before a contact response", () => {
-    const wall: PhysicsBox = {
-      center: { x: -70, y: 1.9, z: -12 },
-      halfExtents: { x: 0.25, y: 1.9, z: 3 },
-    };
-    const resolution = resolveWallHangTargetDetails(
-      { x: -70.64, y: 2.7, z: -12 },
-      { x: 1, y: 0, z: 0 },
-      [wall],
-    );
-
-    expect(resolution?.target.x).toBeCloseTo(-70.52, 6);
-    expect(resolution?.target.y).toBeCloseTo(2.7, 6);
-    expect(resolution?.target.z).toBeCloseTo(-12, 6);
-    expect(resolution?.wallFacePoint.x).toBeCloseTo(-70.25, 6);
-  });
-
-  it("keeps the caught point when climbing a long skinny wall", () => {
-    const wall: PhysicsBox = {
-      center: { x: 0, y: 2, z: -4 },
-      halfExtents: { x: 3, y: 2, z: 0.1 },
-    };
-    const resolution = resolveWallHangTargetDetails(
-      { x: 0.8, y: 2.7, z: -3.5 },
-      { x: 0, y: 0, z: -1 },
-      [wall],
-    );
-
-    expect(resolution).not.toBeNull();
-    const target = resolution === null ? null : resolveWallClimbTarget(resolution);
-    expect(target?.x).toBeCloseTo(0.8, 6);
-    // The wall is thinner than the capsule diameter, so there is no safe
-    // inset on its normal axis. The landing falls back to the wall centre;
-    // the caught tangent coordinate above is the behaviour under test.
-    expect(target?.z).toBeCloseTo(-4, 6);
-  });
-
-  it("resolves rotated generated walls in the same frame as their collider", () => {
-    const wall: PhysicsBox = {
-      center: { x: 0, y: 2, z: -4 },
-      halfExtents: { x: 0.2, y: 2, z: 2 },
-      rotationY: Math.PI / 2,
-    };
-    const resolution = resolveWallHangTargetDetails(
-      { x: 0.8, y: 2.7, z: -3.5 },
-      { x: 0, y: 0, z: -1 },
-      [wall],
-    );
-
-    expect(resolution).not.toBeNull();
-    expect(resolution?.target.z).toBeCloseTo(-3.53, 6);
-    const target = resolution === null ? null : resolveWallClimbTarget(resolution);
-    expect(target?.x).toBeCloseTo(0.8, 6);
-    // The rotated wall is thinner than the capsule diameter, so its normal
-    // coordinate correctly falls back to the only supported top point; the
-    // lateral catch coordinate must still remain at x=0.8.
-    expect(target?.z).toBeCloseTo(-4, 6);
   });
 });
 

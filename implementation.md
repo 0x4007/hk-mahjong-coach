@@ -17,6 +17,84 @@
 
 Milestone 5 — Persistence and replay repairs and acceptance.
 
+## Feature lane — Continuous six-axis first-person head motion (2026-08-08)
+
+- Worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/continuous-head-motion`.
+- Branch: `continuous-head-motion`, based on `parametric-guns-g513f524b51` at `9e52fd01e76ead42dae3ddea102a307a2e4b121e`.
+  The worktree was created from the parametric-guns checkout with its dirty and untracked files copied as-is.
+- The camera now consumes the complete physics-resolved world velocity delta, projects it into yaw-local right,
+  forward, and world-up axes, and feeds all six signed components through smooth saturated targets and exact critically
+  damped springs. Lateral/depth translation, roll, pitch, vertical weight, and the support-plane contact penalty stay
+  presentation-only; capsule movement, collision, O₂, and damage remain authoritative in the scene physics path.
+- Added focused regressions for signed axes, diagonal composition, zero load, monotonic saturation, hard-stop continuity,
+  frame-rate independence, head clearance, and stronger fall response. Existing gait, recoil, cover, reticule, and
+  weapon viewmodel composition remain covered; obstacle fixtures now exercise physics-only collision and contact-assisted
+  climbing behavior.
+- Tuned the continuous vertical load reference to 700 m/s² so the resolved 13.2 m/s full-jump stop produces about a
+  0.9–1.0 m eye-point compression, while higher falls continue toward the configured head-clearance constraint.
+- Removed shared airborne gravity and the upward take-off delta from the relative presentation load; the capsule still
+  receives full gravity and jump motion, while grounded landing support acceleration remains intact. This prevents a
+  spring rebound from making the head appear to launch during a jump, without weakening the landing compression.
+- No browser or computer interaction was used, per the feature request. The existing server-owned test-bus receipt in
+  `.data/test-bus/manifest.json` captured before the final vertical tuning recorded 491/492 assertions passed. Its sole
+  assertion failure is the pre-existing `packages/test-fixtures/src/core-engine.test.ts` legal-sequence property; the
+  copied untracked melee suite also reports its existing missing `describe` import. After the final tuning, the focused
+  camera suite passed 55/55 and the four landing-related scene suites passed 149/149. Production web build, typecheck, targeted
+  camera Prettier/ESLint, and `git diff --check` pass. Full format/lint remain blocked by unrelated pre-existing
+  dirty-lane issues in the copied snapshot.
+
+## 2026-08-08 — Physics-based slow-fast-slow wall climbing
+
+- Replaced the fixed wall-climb launch speed and repeat-impulse cooldown with a shared bounded climb motor. Its pure
+  profile starts and ends at zero, peaks at 4 m/s at the midpoint, and approaches the target with a finite 72 m/s²
+  acceleration cap. Inherited upward jump velocity is therefore absorbed smoothly instead of receiving another launch.
+- Added yaw-local wall-top resolution. The resolver reads the actual collider top, preserves capsule centre clearance,
+  and handles ordinary and yaw-rotated boxes through the same geometry path used by the live scene and simulator.
+- Space now starts one climb edge while airborne contact is present, and a key held from the ground jump starts that
+  same one climb when valid airborne contact is first reached. A one-per-hold latch prevents top support or contact loss
+  from retriggering it before release. The pull remains active only while Space and wall contact remain valid, and ends
+  at lost contact, real top support, or release. The physics capsule remains authoritative; the camera consumes only its
+  resolved velocity delta. A full normal jump O₂ charge is required, so the reduced ground backup jump cannot become a
+  free wall-climb launch.
+- Added profile, force-bound, continuity, inherited-momentum, ordinary-top, and rotated-top regressions. Updated the
+  contact scenario to hold Space through the climb and report wall contact and profile progress.
+- Added a held-Space contact scenario covering the ground-jump-to-wall path. Manual feel validation remains intentionally
+  unperformed; no browser was opened or controlled and no port 5173 session was used.
+
+## 2026-08-08 — Physics-derived unified camera acceleration
+
+- Replaced controller-intent and one-shot wall-impact presentation inputs with a resolved world-velocity delta. Each
+  frame compares the velocity that physics actually resolved with the previous resolved velocity, so locomotion, wall
+  stops, jumps, landings, and any ordinary collider contact enter the same acceleration signal.
+- Projected that world acceleration through the same yaw-only body basis used by movement plus world-up. The signed vector therefore covers
+  all six linear directions without separate left/back/down fields. Looking up or down cannot turn horizontal braking
+  into a false vertical load, and the camera, viewmodel, reticule, and aim ray still consume one damper output. Support
+  stops retain the measured downward delta-v sign for the intended landing load.
+- Kept the accepted 60 m/s² locomotion response, with smooth `tanh` saturation based only on delta-v magnitude. A
+  resolved 10 m/s to 0 m/s stop therefore produces a visibly stronger pitch/roll response without a threshold or a
+  second wall-impact event path.
+- Removed the legacy contact-onset roll path and all traversal-specific presentation inputs. There is no authored
+  traversal arc whose velocity can be overwritten before presentation sampling.
+- Added pure regressions for signed local projection and a 10 m/s to 0 m/s resolved stop producing the expected large
+  delta-v.
+
+## 2026-08-08 — Remove authored traversal motion
+
+- Deleted the live `ClimbingTransition`/wall-hang state, vault target resolvers, obstacle-height duration and arc
+  helpers, scripted capsule placement, landing boost, and forced momentum injection from `mahjong-table.ts`.
+- Rewrote `scripts/movement-simulate.ts` to drive only the shared physics runtime. The files named `vault` and
+  `wall-hang` are now obstacle stress fixtures; they do not create traversal states or prescribe a path.
+- Removed `traversalActive`, traversal duration, chained easing, and traversal weapon lowering from
+  `camera-motion.ts`. The damper receives only physics-resolved acceleration plus ordinary presentation inputs; the
+  remaining lower/raise transition is weapon discard/equip only.
+- Updated the current documentation to state the hard cutover. Historical log entries below record the superseded
+  experiment and are not the current runtime contract.
+
+## 2026-08-08 — Restore contact-assisted physics climbing (superseded)
+
+- This earlier checkpoint used one 18 m/s upward impulse and a 0.2 second cooldown. It is retained as history only; the
+  current contract is the bounded slow-fast-slow pull documented above.
+
 ## 2026-08-08 — O₂ sprint failure returns to recoverable trot
 
 - An O₂-unaffordable sprint now clears the persistent sprint request instead of retrying on every frame as soon as one
@@ -39,9 +117,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   effort), and other falls scale by the square of downward speed so a 2 m fall costs slightly more than a full jump
   landing in the current world-gravity scale.
 - Physics and fallback landings now spend the resolved O₂ charge before applying the existing shield-then-health damage
-  path. A full reserve therefore absorbs the landing without health or shield loss; when O₂ is insufficient, the unpaid
-  remainder becomes ordinary impact damage. The camera landing impulse remains separate and continues to use its own
-  deceleration input.
+  path. A reserve sufficient for the charge absorbs the landing without health or shield loss; the normal full-jump landing speed
+  is now a vertical deceleration grace window, so an empty reserve cannot damage a normal jump. Faster falls use the
+  speed-derived impact curve for any unpaid charge, capped by that unpaid amount. The camera landing impulse remains
+  separate and continues to use its own deceleration input.
 - Added pure regressions for the speed-to-energy mapping and reserve-overflow behavior. The live browser acceptance still
   requires a manual traversal check in the existing session.
 
@@ -80,7 +159,29 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   accepted response scale without additive double-rolling on strafe reversals.
 - Wall delta-v now contributes both local components at contact onset. A side-on stop can therefore roll the view while
   a head-on stop pitches it down, and camera, viewmodel, reticule, and aim ray continue to consume the composed output.
-  Vertical jump and landing impulses remain explicit for the next traversal integration pass.
+
+## 2026-08-08 — Unified vertical traversal acceleration
+
+- Extended the local acceleration vector with an `up` component and removed the separate jump/landing damper methods.
+  The scene now derives vertical presentation acceleration from the actual vertical velocity change, including gravity,
+  support stops, ledge catches, vault arcs, and wall climbs.
+- The shared weight spring converts that measured delta-v into the same camera/viewmodel/reticule output. Landing and
+  traversal catches use the support-stop sign so harder falls produce a deeper downward response without a second
+  presentation path.
+- Added focused camera regressions for vertical acceleration sign, bounded response, and stronger hard-stop behavior.
+
+## 2026-08-08 — Landing response tuning from rendered feedback
+
+- Kept the landing path on the same continuous `tanh` load, critically damped spring, and support-plane penalty, but
+  widened the vertical response envelope to a 24 m spring target, a 700 m/s² reference, and a smooth 2.0 response
+  exponent. This keeps low free-fall gravity soft while a normal 13.2 m/s fall-stop lowers the eye point by roughly
+  0.9–1.0 m after the airborne spring state settles; harder delta-v continues to produce a larger finite response. The proxy clearance
+  now uses its radius, rather than the eye-height remainder, so the support constraint permits the configured
+  compression range while still preventing penetration.
+- Removed the vertical-weight-to-pitch coupling. Up/down acceleration now changes only the vertical head position;
+  forward/back acceleration remains the pitch source. This keeps a hard landing from being represented as only aiming
+  the camera down.
+- Added a pulse regression that compares low-ledge and full-jump compression and pitch over the full spring response.
 
 ## 2026-08-08 — Airborne reticule gait suppression
 
@@ -89,6 +190,13 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   impulses from the reticule while preserving jump lift, landing response, breathing, aim sway, and acceleration.
 - Added a camera-motion regression that keeps gait on supported ground, removes it in the air, and confirms the jump
   weight response remains active.
+
+## 2026-08-08 — Edge-triggered ground jump input
+
+- Space keydown repeat events no longer replay a ground jump. This prevents a held key from relaunching the capsule on
+  the same frame that physics resolves a landing and overwriting the landing delta-v seen by the camera damper.
+- Held Space remains a wall-hang climb request when that traversal path is enabled; ordinary ground jumps still use the
+  existing one-shot mount and touch controls.
 
 ## 2026-08-07 — Two-times-base trot and slow O₂ recovery
 
@@ -251,26 +359,17 @@ Milestone 5 — Persistence and replay repairs and acceptance.
   reticule position. The outer ring follows at 5x and the center dot is tuned to a 5x total displacement.
   The current experiment multiplies the underlying camera weight-shift targets by 2x; the reticule still reads
   the raw shared camera output.
-- The first-person controller now uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule.
-  The floor and table remain explicit colliders, while meaningful meshes under the environment, generated room,
-  and gateway roots are converted to coarse world-space AABBs. Streamed city buildings, props, and skybridges use
-  explicit rotated boxes; the streamed collider set is rebuilt only when a new append-only chunk enters the 3×3
-  lookahead window. Upright props are static blockers and become dynamic bodies after a knock, so walking no longer
-  passes through the development boxes. Rendering geometry stays separate from collision geometry; decorative
-  strips, floor inlays, tiles, and skyline detail stay out of the blocking set. A coarse AABB runtime is active while
-  Rapier WASM loads and remains the fallback on failure, so it feeds the same ledge/vault/wall traversal state machine
-  instead of falling back to unconstrained movement.
-- Parkour-feel movement now uses one shared airborne vault resolver for authored and generated boxes. The legacy
-  ledge-grab transition is disabled; vaulting owns tops from 0.15 m through 2.0 m above the approach feet. It uses a
-  capsule-centre target on a supported surface and a continuous duration/arc mapping from 0.04 s at 0.45 m to 1.0 s
-  at 2.0 m, preserving the short Mirror's Edge-inspired climb rather than snapping instantly.
-- Tall-wall traversal is separate from the ledge path. A real side collision with a wall whose top clears the capsule
-  head can attach the capsule just outside the approached face; streamed rotated boxes are resolved in their local
-  horizontal frame. Gravity and ordinary movement are suppressed while hanging, and forward or Space starts the same
-  short smooth arc used by vaulting. The climb preserves the caught tangent coordinate and momentum instead of
-  recentering on a skinny wall. Wall detection runs only after ledge and low-vault rejection. The resolver also
-  considers streamed static obstacle boxes, while knocked dynamic props remain ineligible. The climbing-gym preset
-  starts close enough to the dedicated wall for a normal walk to reach it without a sprint double-tap.
+- The first-person controller uses Apache-2.0 Rapier (`@dimforge/rapier3d-compat`) with a kinematic capsule. The floor,
+  table, environment, generated room, gateway, streamed city buildings, props, and skybridges contribute coarse
+  colliders; the streamed set is rebuilt only when a new append-only chunk enters the 3×3 lookahead window. Upright
+  props become dynamic bodies after a knock, while decorative strips, floor inlays, tiles, and skyline detail stay out
+  of the blocking set. A coarse fallback runtime is active while Rapier WASM loads and remains the fallback on failure,
+  so the same collision rules apply from the first frame.
+- Obstacle movement has no parkour state machine. Desired input velocity, gravity, jump launch, the contact-assisted wall
+  impulse, damping, autostep, collider contact, and support resolution determine the capsule path. The only climbing
+  affordance is an upward impulse from an airborne wall contact plus a new jump press; there is no vault target, wall-hang
+  attachment, scripted capsule placement, smoothstep/sine arc, landing boost, or forced momentum injection. The
+  climbing-gym blocks are collision fixtures and stress measurements only.
 - The Bokeh/focus pass now follows the gaze ray and classifies tile, surface, and far-fallback targets. A tight
   five-ray neighborhood assists tile focus when the reticule falls into a narrow gap, without selecting an
   occluded tile. Accommodation uses separate near/far damping (about 0.4/0.65 seconds), and the blur envelope
@@ -455,17 +554,28 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - Kept one shared block definition for rendering and collision, so each visible height label corresponds to the exact
   collider used by the vault resolver.
 
-## 2026-08-08 — Height-matched traversal weapon lowering
+## 2026-08-08 — Shared partial traversal weapon lowering
 
-- The centralized camera-motion damper now receives the resolved vault or wall-climb duration and advances the gun
-  faster-starting 2x curve over the full interval instead of using the fixed 0.18 s weapon-switch timing; it reaches
-  the target only at the end of the climb, so there is no mid-traversal bottom clamp.
-- Vaults use a shallow 20% of the normal lower pose. Wall climbs scale from a shallow minimum to the full pose at
-  a four-metre block, using the block's full collider height rather than only the remaining vertical arc.
+- The centralized camera-motion damper now receives the resolved vault or wall-climb duration and uses the same
+  partial lower pose for weapon switching and traversal. Two chained faster-starting 2x easing passes can continue
+  below that pose while traversal remains active, with no bottom clamp or height-selected full-drop variant.
 - Wall hanging alone leaves the gun raised; the lower phase starts when the climb arc starts and raises from the
-  exact pose reached at release. Firing, reload, pickup, and drop remain locked until the shared raise phase is idle;
-  weapon switching keeps its existing full lower/raise behavior.
-- Added camera-motion regressions for duration matching, shallow vault lowering, and full four-metre wall-climb lowering.
+  exact pose reached at release. Firing, reload, pickup, and drop remain locked until the shared raise phase is idle.
+- Added camera-motion regressions for duration matching, one shared partial lower pose, and unclamped continuation.
+
+## 2026-08-08 — Temporarily disable live wall hanging
+
+- Disabled the live browser wall-hang detection, hold state, and hold-to-climb entry while its feel is being revisited.
+- Kept the wall-hang geometry resolvers, movement simulator, fixtures, and wall-climb transition implementation for a
+  later re-enable. The normal airborne vault path remains active.
+
+## 2026-08-08 — O₂-scaled traversal duration
+
+- Added a smooth O₂ duration curve with empty O₂ as the slowest case: a maximum 1.0-second traversal is 0.5 seconds at
+  full O₂ and remains 1.0 second at zero O₂.
+- Applied the resolved duration at vault and retained wall-climb transition creation so the centralized gun lowering
+  animation follows the same O₂-dependent timing.
+- Added helper coverage for the full, intermediate, and empty-reserve cases.
 
 ## Next action
 
@@ -1336,3 +1446,21 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   latest server-owned bus snapshot (`1786149860791-25084-75af1ee4`) passed 471/472 assertions, including all three
   damage-vignette tests; the one failure is the unrelated `packages/test-fixtures` core-engine property test.
   Browser interaction is not opened in this lane.
+
+## 2026-08-08 — Edge-triggered wall cover lean
+
+- Added a separate cover state that arms only on a zoom-on transition while the completed wall-contact probe is true.
+  Walking into a wall while already zoomed leaves cover disarmed; toggling zoom off and on again after contact arms it.
+- Routed cover lean through the centralized camera damper. The camera, viewmodel, reticule, and aim ray now share a
+  damped lateral offset and roll. Z/C provide explicit left/right lean input, while A/D strafe input also contributes
+  when cover is active. Leaving zoom or wall contact clears cover.
+- Added pure cover activation/lean regressions and camera-damper coverage. Browser interaction remains unopened in this
+  lane.
+
+## 2026-08-08 — Variable vault and climb O₂ cost
+
+- Added one shared traversal cost resolver: 0 O₂ at or below the 0.15 m minimum vault height, a linear charge through
+  the supported height range, and the existing 10 O₂ landing reference charge at 2.0 m and above.
+- Vaults and the retained wall-climb transition now pay that charge at transition start and remain atomic when the
+  reserve cannot afford it. The pre-charge O₂ reserve still determines the existing traversal-duration multiplier.
+- Added focused height-curve coverage, including lower/upper clamping and non-finite input.

@@ -189,6 +189,21 @@ describe("player vitals model", () => {
     expect(healthOverflow.healthDamage).toBe(25);
   });
 
+  it("allows a resolved landing grace curve to suppress shortfall damage", () => {
+    const emptyReserve = applyPlayerO2Cost(createPlayerVitals(), PLAYER_MAX_O2);
+    const normalJumpLanding = applyPlayerO2ImpactCost(
+      emptyReserve,
+      O2_LANDING_BASE_COST,
+      O2_LANDING_RECOVERY_DELAY_SECONDS,
+      0,
+    );
+
+    expect(normalJumpLanding.oxygenSpent).toBe(0);
+    expect(normalJumpLanding.damage).toBe(0);
+    expect(normalJumpLanding.state.health).toBe(PLAYER_MAX_HEALTH);
+    expect(normalJumpLanding.state.shield).toBe(PLAYER_MAX_SHIELD);
+  });
+
   it("derives the free mini-hop blend from standing recovery and the full jump charge", () => {
     expect(O2_MINI_HOP_SPEED_BLEND).toBeCloseTo(
       O2_IDLE_RECOVERY_PER_SECOND / (O2_IDLE_RECOVERY_PER_SECOND + O2_JUMP_COST),

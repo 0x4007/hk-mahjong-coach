@@ -1,0 +1,53 @@
+{
+  "name": "contact-climb-release-test",
+  "description": "A second airborne Space press starts the pull, then release cancels it without another impulse.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 1,
+  "start": {
+    "position": [0, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 1.5, -4],
+      "halfExtents": [1.5, 1.5, 0.12]
+    }
+  ],
+  "frames": [
+    {
+      "duration": 0.14,
+      "forward": 1,
+      "sprint": true,
+      "jump": true,
+      "label": "jump-into-wall"
+    },
+    {
+      "duration": 0.0166666666667,
+      "forward": 1,
+      "label": "release-jump"
+    },
+    {
+      "duration": 0.0166666666667,
+      "forward": 1,
+      "jump": true,
+      "label": "start-bounded-climb"
+    },
+    {
+      "duration": 0.0166666666667,
+      "forward": 1,
+      "label": "release-climb"
+    },
+    {
+      "duration": 0.6,
+      "forward": 0,
+      "label": "fall-after-release"
+    }
+  ]
+}

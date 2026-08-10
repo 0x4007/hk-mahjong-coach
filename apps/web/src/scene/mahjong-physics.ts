@@ -65,8 +65,8 @@ export interface MahjongPhysicsRuntime {
 
 // The browser should normally use Rapier. Keep a small AABB controller for
 // browsers where the optional WASM module cannot initialise (for example a
-// restricted WebView). The scene traversal code consumes the same runtime
-// interface in both cases, so ledge/vault/wall ordering does not silently
+// restricted WebView). The scene consumes the same authoritative movement
+// interface in both cases, so collision and support resolution do not silently
 // disappear when the fallback is selected.
 const FALLBACK_CAPSULE_RADIUS = PLAYER_CAPSULE_RADIUS;
 const FALLBACK_CAPSULE_CENTER_HEIGHT = PLAYER_CAPSULE_CENTER_HEIGHT;
@@ -168,7 +168,6 @@ export const createFallbackMahjongPhysics = (
         if (startHead <= boxBottom + FALLBACK_EPSILON && nextHead >= boxBottom - FALLBACK_EPSILON) {
           next = { ...next, y: boxBottom - FALLBACK_CAPSULE_CENTER_HEIGHT };
           collisionBoxes.add(box);
-          verticalResolved = true;
           break;
         }
       }

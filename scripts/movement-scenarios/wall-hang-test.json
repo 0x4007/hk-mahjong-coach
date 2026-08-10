@@ -1,6 +1,6 @@
 {
   "name": "wall-hang-test",
-  "description": "Jump into the upper face of a tall wall, hang briefly, then climb over it.",
+  "description": "Jump into a tall wall and record ordinary physics collision and fall behavior.",
   "frameDurationSec": 0.0166666666667,
   "reportEveryFrames": 10,
   "start": {
@@ -26,8 +26,8 @@
       "forward": 1,
       "sprint": true,
       "jump": true,
-      "label": "jump-to-wall-top"
+      "label": "jump-toward-wall"
     },
-    { "duration": 1.2, "forward": 1, "label": "climb-while-hanging" }
+    { "duration": 1.2, "forward": 1, "label": "continue-after-contact" }
   ]
 }

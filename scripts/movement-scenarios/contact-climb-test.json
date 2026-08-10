@@ -1,0 +1,49 @@
+{
+  "name": "contact-climb-test",
+  "description": "Press jump again while airborne at a wall and hold it; the bounded pull clears the real collider top.",
+  "frameDurationSec": 0.0166666666667,
+  "reportEveryFrames": 10,
+  "start": {
+    "position": [0, 0.86, -2],
+    "yaw": 0,
+    "grounded": true
+  },
+  "physics": {
+    "moveSpeed": 5.0,
+    "sprintMultiplier": 2.5,
+    "jumpSpeed": 13.2,
+    "gravity": 48
+  },
+  "staticBoxes": [
+    {
+      "center": [0, 1.5, -4],
+      "halfExtents": [1.5, 1.5, 0.12]
+    }
+  ],
+  "frames": [
+    {
+      "duration": 0.14,
+      "forward": 1,
+      "sprint": true,
+      "jump": true,
+      "label": "jump-into-wall"
+    },
+    {
+      "duration": 0.0166666666667,
+      "forward": 1,
+      "label": "release-jump"
+    },
+    {
+      "duration": 0.0166666666667,
+      "forward": 1,
+      "jump": true,
+      "label": "contact-climb-impulse"
+    },
+    {
+      "duration": 1.0,
+      "forward": 1,
+      "jump": true,
+      "label": "clear-wall-under-physics"
+    }
+  ]
+}
