@@ -308,4 +308,23 @@ describe("JSONL protocol", () => {
       }),
     ).toMatchObject({ payload: { event: canonicalTileDrawnEvent } });
   });
+
+  it("restricts the multiplayer hello seat to a concrete wind", () => {
+    const hello = {
+      protocolVersion: 1,
+      type: "hello",
+      seq: 0,
+      timestamp: "2026-08-03T00:00:00.000Z",
+      gameId: "game-demo",
+      branchId: "main",
+      payload: { seat: "east", actionTimeoutMs: 30_000, malformedResponseLimit: 3 },
+    };
+    expect(hostProtocolEnvelopeSchema.parse(hello)).toMatchObject({ payload: { seat: "east" } });
+    expect(() =>
+      hostProtocolEnvelopeSchema.parse({
+        ...hello,
+        payload: { ...hello.payload, seat: "player-0" },
+      }),
+    ).toThrow();
+  });
 });

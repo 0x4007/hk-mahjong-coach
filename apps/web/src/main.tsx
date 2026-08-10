@@ -1,5 +1,13 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import {
+  createProtocolEnvelope,
+  hostProtocolEnvelopeSchema,
+  roomCreateResponseSchema,
+  roomJoinResponseSchema,
+  roomStartResponseSchema,
+  type PlayerObservationDto,
+} from "@hk-mahjong/protocol";
 
 import "./styles.css";
 import { MahjongTableScene } from "./scene/MahjongTableScene.js";
@@ -24,6 +32,7 @@ import {
   createPlayerVitals,
 } from "./scene/player-vitals.js";
 import { createEmptyWeaponStateSnapshot, WEAPON_DEFINITIONS } from "./scene/weapons.js";
+import { FpsSlayerApp } from "./fps/FpsSlayerApp.js";
 import type {
   MahjongTableMount,
   MotionLookStatus,
@@ -380,6 +389,400 @@ interface VisualDebugPanelProps {
 }
 
 const formatMetric = (value: number, digits = 0): string => value.toFixed(digits);
+
+interface MultiplayerSession {
+  readonly roomId: string;
+  readonly playerId: string;
+  readonly ticket: string;
+  readonly seat: string;
+  readonly gameId: string | null;
+  readonly branchId: string;
+  readonly displayName: string;
+}
+
+const MULTIPLAYER_SESSION_KEY = "hk-mahjong-coach:multiplayer-session:v1";
+
+const safeStoredSession = (): MultiplayerSession | null => {
+  try {
+    const value: unknown = JSON.parse(sessionStorage.getItem(MULTIPLAYER_SESSION_KEY) ?? "null");
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.roomId !== "string" ||
+      typeof record.playerId !== "string" ||
+      typeof record.ticket !== "string" ||
+      typeof record.seat !== "string" ||
+      typeof record.branchId !== "string" ||
+      (record.gameId !== null && typeof record.gameId !== "string") ||
+      typeof record.displayName !== "string"
+    ) {
+      return null;
+    }
+    return value as MultiplayerSession;
+  } catch {
+    return null;
+  }
+};
+
+const storeMultiplayerSession = (session: MultiplayerSession | null): void => {
+  if (session === null) {
+    sessionStorage.removeItem(MULTIPLAYER_SESSION_KEY);
+  } else {
+    sessionStorage.setItem(MULTIPLAYER_SESSION_KEY, JSON.stringify(session));
+  }
+};
+
+const actionLabel = (action: PlayerObservationDto["legalActions"][number]): string => {
+  if (action.type === "discard") {
+    return `Discard ${action.tileId}`;
+  }
+  if (action.type === "declare_win" || action.type === "claim_win") {
+    return "Declare win";
+  }
+  if (action.type === "pass") {
+    return "Pass";
+  }
+  return action.type.replaceAll("_", " ");
+};
+
+interface MultiplayerPanelProps {
+  readonly mount: MahjongTableMount | null;
+}
+
+const MultiplayerPanel = ({ mount }: MultiplayerPanelProps): React.JSX.Element => {
+  const [session, setSession] = React.useState<MultiplayerSession | null>(safeStoredSession);
+  const [observation, setObservation] = React.useState<PlayerObservationDto | null>(null);
+  const [roomId, setRoomId] = React.useState("");
+  const [displayName, setDisplayName] = React.useState("Alice");
+  const [seed, setSeed] = React.useState("table-2026-08-06");
+  const [fillPolicy, setFillPolicy] = React.useState<"wait_for_four" | "fill_with_bots">(
+    "fill_with_bots",
+  );
+  const [joinName, setJoinName] = React.useState("Player");
+  const [joinTicket, setJoinTicket] = React.useState("");
+  const [status, setStatus] = React.useState("Offline");
+  const [socket, setSocket] = React.useState<WebSocket | null>(null);
+  const sequenceRef = React.useRef(0);
+  const lastRevisionRef = React.useRef(0);
+  const pendingRequestIdRef = React.useRef<string | null>(null);
+
+  const saveSession = (next: MultiplayerSession): void => {
+    setSession(next);
+    storeMultiplayerSession(next);
+  };
+  const applyObservation = (next: PlayerObservationDto | null): void => {
+    setObservation(next);
+    mount?.setMultiplayerObservation(next);
+  };
+
+  React.useEffect(() => {
+    mount?.setMultiplayerObservation(observation);
+  }, [mount, observation]);
+
+  const createRoom = async (): Promise<void> => {
+    setStatus("Creating room…");
+    try {
+      const response = await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          displayName,
+          rulesetId: "hk_nyc_social_v1",
+          matchLength: "one_wind",
+          seed,
+          fillPolicy,
+        }),
+      });
+      const data: unknown = await response.json();
+      const created = roomCreateResponseSchema.parse(data);
+      setRoomId(created.roomId);
+      saveSession({
+        roomId: created.roomId,
+        playerId: created.playerId,
+        ticket: created.ticket,
+        seat: created.seat,
+        gameId: null,
+        branchId: "main",
+        displayName,
+      });
+      setStatus(`Room ${created.roomId} is waiting`);
+    } catch (caught) {
+      setStatus(caught instanceof Error ? caught.message : "Room creation failed");
+    }
+  };
+
+  const joinRoom = async (): Promise<void> => {
+    if (roomId.trim().length === 0) {
+      setStatus("Enter a room ID first");
+      return;
+    }
+    setStatus("Joining room…");
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/join`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(joinTicket.trim().length === 0 ? {} : { authorization: `Bearer ${joinTicket}` }),
+        },
+        body: JSON.stringify({ displayName: joinName }),
+      });
+      const data: unknown = await response.json();
+      const joined = roomJoinResponseSchema.parse(data);
+      saveSession({
+        roomId: joined.roomId,
+        playerId: joined.playerId,
+        ticket: joined.ticket,
+        seat: joined.seat,
+        gameId: null,
+        branchId: "main",
+        displayName: joinName,
+      });
+      setStatus(`Joined ${joined.roomId} as ${joined.seat}`);
+    } catch (caught) {
+      setStatus(caught instanceof Error ? caught.message : "Room join failed");
+    }
+  };
+
+  const startRoom = async (): Promise<void> => {
+    if (session === null) {
+      return;
+    }
+    setStatus("Starting room…");
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(session.roomId)}/start`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${session.ticket}`, "content-type": "application/json" },
+        body: JSON.stringify({ requestId: `web-start:${session.roomId}` }),
+      });
+      const data: unknown = await response.json();
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data));
+      }
+      const started = roomStartResponseSchema.parse(data);
+      const next = {
+        ...session,
+        gameId: started.game.gameId,
+        branchId: started.game.branchId,
+      };
+      saveSession(next);
+      applyObservation(started.observation);
+      lastRevisionRef.current = started.observation.revision;
+      setStatus("Room active");
+    } catch (caught) {
+      setStatus(caught instanceof Error ? caught.message : "Room start failed");
+    }
+  };
+
+  const connect = React.useCallback((): void => {
+    if (session === null) {
+      setStatus("Start the room before connecting");
+      return;
+    }
+    const activeGameId = session.gameId;
+    if (activeGameId === null) {
+      setStatus("Start the room before connecting");
+      return;
+    }
+    const activeSession = { ...session, gameId: activeGameId };
+    socket?.close();
+    pendingRequestIdRef.current = null;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const query = new URLSearchParams({
+      playerId: activeSession.playerId,
+      branchId: activeSession.branchId,
+      ticket: activeSession.ticket,
+      fromRevision: String(lastRevisionRef.current),
+    });
+    const nextSocket = new WebSocket(
+      `${protocol}//${window.location.host}/ws/games/${encodeURIComponent(activeSession.gameId)}?${query.toString()}`,
+    );
+    sequenceRef.current = 0;
+    nextSocket.onopen = () => setStatus("Connected");
+    nextSocket.onclose = () => setStatus("Disconnected — reconnect to catch up");
+    nextSocket.onerror = () => setStatus("WebSocket connection failed");
+    nextSocket.onmessage = (event) => {
+      try {
+        const envelope = hostProtocolEnvelopeSchema.parse(
+          JSON.parse(String(event.data)) as unknown,
+        );
+        switch (envelope.type) {
+          case "action_request": {
+            const payload = envelope.payload as { readonly requestId?: unknown };
+            if (typeof payload.requestId === "string") {
+              pendingRequestIdRef.current = payload.requestId;
+            }
+            break;
+          }
+          case "observation":
+            applyObservation(envelope.payload as PlayerObservationDto);
+            lastRevisionRef.current = (envelope.payload as PlayerObservationDto).revision;
+            break;
+          case "game_started":
+            applyObservation(
+              (envelope.payload as { readonly observation: PlayerObservationDto }).observation,
+            );
+            lastRevisionRef.current = (
+              envelope.payload as { readonly observation: PlayerObservationDto }
+            ).observation.revision;
+            break;
+          case "action_accepted":
+            pendingRequestIdRef.current = null;
+            applyObservation(
+              (envelope.payload as { readonly observation: PlayerObservationDto }).observation,
+            );
+            lastRevisionRef.current = (
+              envelope.payload as { readonly observation: PlayerObservationDto }
+            ).observation.revision;
+            break;
+          case "error":
+            setStatus((envelope.payload as { readonly message: string }).message);
+            break;
+          default:
+            break;
+        }
+      } catch (caught) {
+        setStatus(caught instanceof Error ? caught.message : "Malformed server message");
+      }
+    };
+    setSocket(nextSocket);
+  }, [mount, session, socket]);
+
+  React.useEffect(() => {
+    return () => socket?.close();
+  }, [socket]);
+
+  const submitAction = (action: PlayerObservationDto["legalActions"][number]): void => {
+    if (socket === null || session === null || observation === null) {
+      return;
+    }
+    const gameId = session.gameId;
+    if (gameId === null) {
+      return;
+    }
+    const requestId = pendingRequestIdRef.current;
+    if (requestId === null) {
+      setStatus("Waiting for the server action request");
+      return;
+    }
+    const envelope = createProtocolEnvelope({
+      type: "submit_action",
+      seq: sequenceRef.current++,
+      gameId,
+      branchId: session.branchId,
+      requestId,
+      payload: {
+        playerId: session.playerId,
+        branchId: session.branchId,
+        expectedRevision: observation.revision,
+        requestId,
+        actionId: action.id,
+      },
+    });
+    socket.send(JSON.stringify(envelope));
+    setStatus("Action sent");
+  };
+
+  return (
+    <aside className="multiplayer-panel" aria-label="Live multiplayer room">
+      <div className="multiplayer-heading">
+        <span className="eyebrow">Live room</span>
+        <strong>{status}</strong>
+      </div>
+      {session === null ? (
+        <>
+          <label>
+            Your name
+            <input
+              value={displayName}
+              onChange={(event) => setDisplayName(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Seed
+            <input value={seed} onChange={(event) => setSeed(event.currentTarget.value)} />
+          </label>
+          <label>
+            Empty seats
+            <select
+              value={fillPolicy}
+              onChange={(event) => setFillPolicy(event.currentTarget.value as typeof fillPolicy)}
+            >
+              <option value="fill_with_bots">Fill with deterministic bots</option>
+              <option value="wait_for_four">Wait for four people</option>
+            </select>
+          </label>
+          <button onClick={() => void createRoom()} type="button">
+            Create room
+          </button>
+          <div className="multiplayer-divider">or join a room</div>
+          <label>
+            Room ID
+            <input value={roomId} onChange={(event) => setRoomId(event.currentTarget.value)} />
+          </label>
+          <label>
+            Display name
+            <input value={joinName} onChange={(event) => setJoinName(event.currentTarget.value)} />
+          </label>
+          <label>
+            Reconnect ticket (optional)
+            <input
+              value={joinTicket}
+              onChange={(event) => setJoinTicket(event.currentTarget.value)}
+            />
+          </label>
+          <button onClick={() => void joinRoom()} type="button">
+            Join room
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="multiplayer-room-summary">
+            <strong>{session.roomId}</strong> · {session.displayName} · {session.seat}
+          </p>
+          {session.gameId === null ? (
+            <button onClick={() => void startRoom()} type="button">
+              Start room
+            </button>
+          ) : (
+            <button onClick={connect} type="button">
+              {socket?.readyState === WebSocket.OPEN ? "Reconnect" : "Connect to table"}
+            </button>
+          )}
+          {observation !== null ? (
+            <>
+              <div className="multiplayer-observation">
+                Revision {observation.revision} · {observation.phase} ·{" "}
+                {observation.round.liveWallCount} tiles left
+              </div>
+              <div className="multiplayer-actions" role="group" aria-label="Legal actions">
+                {observation.legalActions.map((action) => (
+                  <button key={action.id} onClick={() => submitAction(action)} type="button">
+                    {actionLabel(action)}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+          <button
+            className="multiplayer-reset"
+            onClick={() => {
+              socket?.close();
+              setSocket(null);
+              applyObservation(null);
+              setSession(null);
+              storeMultiplayerSession(null);
+            }}
+            type="button"
+          >
+            Leave room
+          </button>
+        </>
+      )}
+    </aside>
+  );
+};
 
 const VisualDebugPanel = ({
   mount,
@@ -1587,6 +1990,7 @@ const App = (): React.JSX.Element => {
               onRoomSeedSubmit={loadRoomSeed}
             />
           ) : null}
+          <MultiplayerPanel mount={debugMount} />
           <div
             ref={reticleRef}
             className={`scene-reticule${isCapsLockOn ? "" : " is-caps-lock-off"}${
@@ -1930,6 +2334,6 @@ if (root === null) {
 
 createRoot(root).render(
   <React.StrictMode>
-    <App />
+    {new URLSearchParams(window.location.search).get("fps") === "1" ? <FpsSlayerApp /> : <App />}
   </React.StrictMode>,
 );

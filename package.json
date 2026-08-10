@@ -25,6 +25,13 @@
     "test:movement:sim": "tsx scripts/movement-simulate.ts",
     "hmr": "tsx scripts/hmr.ts",
     "test:e2e": "playwright test",
+    "test:fps:gate": "pnpm build:packages && tsx scripts/fps-gate.ts",
+    "test:fps:load": "pnpm build:packages && tsx scripts/fps-load.ts",
+    "test:fps:abuse": "pnpm build:packages && tsx scripts/fps-abuse.ts",
+    "test:fps:network": "pnpm build:packages && tsx scripts/fps-network.ts",
+    "test:fps:rollback": "pnpm build:packages && tsx scripts/fps-rollback-drill.ts",
+    "test:fps:retained-rollback": "pnpm build:packages && tsx scripts/fps-retained-rollback-drill.ts",
+    "test:fps:browser-soak": "pnpm build && tsx scripts/fps-browser-soak.ts",
     "smoke": "tsx scripts/smoke.ts",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:coverage && pnpm test:sim:fast && pnpm build && pnpm smoke"
   },

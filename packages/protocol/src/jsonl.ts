@@ -11,6 +11,7 @@ import {
   protocolVersionSchema,
   requestIdSchema,
   revisionSchema,
+  windSchema,
 } from "./common.js";
 import {
   actionSubmissionSchema,
@@ -20,6 +21,7 @@ import {
   publicGameEventSchema,
   publicHandResultSchema,
 } from "./schemas.js";
+import { actionSourceSchema, fallbackActionMetadataSchema } from "./multiplayer.js";
 
 export interface ProtocolClock {
   now(): Date;
@@ -95,7 +97,7 @@ const validateEnvelopeIdentity = (envelope: EnvelopeIdentity, context: z.Refinem
 
 const helloPayloadSchema = z
   .object({
-    seat: playerIdSchema,
+    seat: windSchema,
     actionTimeoutMs: nonNegativeIntegerSchema,
     malformedResponseLimit: nonNegativeIntegerSchema.min(1),
   })
@@ -117,6 +119,8 @@ const actionAcceptedPayloadSchema = z
     playerId: playerIdSchema,
     actionId: actionIdSchema,
     revision: revisionSchema,
+    source: actionSourceSchema.default("human"),
+    fallback: fallbackActionMetadataSchema.optional(),
     observation: playerObservationSchema,
   })
   .strict();

@@ -1,0 +1,17 @@
+{
+  "tasks": {
+    "serve": "deno run --allow-net --allow-read --allow-write --unstable-kv --unstable-sloppy-imports apps/server/deno.ts"
+  },
+  "imports": {
+    "@hk-mahjong/analysis": "./packages/analysis/src/index.ts",
+    "@hk-mahjong/bots": "./packages/bots/src/index.ts",
+    "@hk-mahjong/coach": "./packages/coach/src/index.ts",
+    "@hk-mahjong/core": "./packages/core/src/index.ts",
+    "@hk-mahjong/core/public": "./packages/core/src/public.ts",
+    "@hk-mahjong/hk-rules": "./packages/hk-rules/src/index.ts",
+    "@hk-mahjong/persistence": "./packages/persistence/src/index.ts",
+    "@hk-mahjong/protocol": "./packages/protocol/src/index.ts",
+    "better-sqlite3": "npm:better-sqlite3@13.0.2",
+    "zod": "npm:zod@4.4.3"
+  }
+}

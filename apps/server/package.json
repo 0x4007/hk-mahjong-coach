@@ -14,9 +14,13 @@
     "@hk-mahjong/bots": "workspace:*",
     "@hk-mahjong/coach": "workspace:*",
     "@hk-mahjong/core": "workspace:*",
+    "@hk-mahjong/fps": "workspace:*",
     "@hk-mahjong/hk-rules": "workspace:*",
     "@hk-mahjong/persistence": "workspace:*",
     "@hk-mahjong/protocol": "workspace:*",
-    "fastify": "5.11.0"
+    "@types/better-sqlite3": "9.6.0",
+    "better-sqlite3": "13.0.2",
+    "fastify": "5.11.0",
+    "zod": "4.4.3"
   }
 }

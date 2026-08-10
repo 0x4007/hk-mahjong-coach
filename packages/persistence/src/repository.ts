@@ -864,6 +864,12 @@ export class SqlitePersistenceRepository implements PersistenceRepository {
     })();
   }
 
+  getCommandReceipt(key: GameKey, requestId: string): CommandReceipt | null {
+    assertGameKey(key);
+    requireNonEmptyString(requestId, "Command receipt request ID");
+    return this.database.transaction(() => this.getReceiptInternal(key, requestId))();
+  }
+
   loadGame(key: GameKey): LoadedGame {
     return this.database.transaction(() => {
       const branch = this.requireBranchInternal(key);

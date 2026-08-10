@@ -2,16 +2,12 @@
 
 ## Canonical state
 
-- Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
-- Worktree:
-  `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/implementation-takeover-019fc5b7-g06506cba54`
-- Branch: `implementation-takeover-019fc5b7-g06506cba54`
-- Reconciliation base: `b3d5946ce9d69efebd361433f00b988ea658a600`.
-- Implementation lane: this canonical worktree, with one writer.
-- The pre-existing dirty `main` and `natural-simulation-ci-g6bdbe4486d` worktrees remain preserved.
-  Four coherent natural-simulation workflow files were integrated into canonical. The natural
-  lane's two unrelated, inert `matchIndexOffset` runner variants were rejected from canonical
-  because the workflow does not use them and they have no focused regression coverage.
+- Repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
+- Canonical worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/multiplayer-spec`
+- Branch: `multiplayer-spec-g1aba1b1f8d`
+- Original reconciliation base: `2f9e37d4930571e8a0cb061ae302379cc5fe15c1`.
+- Current rebased HEAD: `12f358d3e67a72944af4701c0c2c52508d28f76d`.
+- Implementation lane: this canonical worktree, intentionally dirty with no task commit created.
 
 ## Current milestone
 
@@ -324,6 +320,102 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The airborne-platform scenario covers a jump that contacts a high, thin platform through its underside and then
   climbs onto the top. The five-metre rejection scenario confirms that a normal jump cannot start a vertical wall
   climb from the base.
+
+## Multiplayer rooms extension — 2026-08-06
+
+- Added versioned room, seat, ticket, lifecycle, and start-response schemas to the protocol package.
+- Added a durable SQLite room store for room metadata, seat claims, hashed bearer tickets, and
+  multiplayer action receipts. The store uses the same local database path as game persistence;
+  the default path is `.data/coach.sqlite` and tests can inject `:memory:`.
+- Added the server-authoritative room service in `apps/server/src/multiplayer.ts`. Room creation,
+  joining/reconnect, inspection, bot filling, start idempotency, observation, replay, and action
+  submission all resolve the historical ruleset and call the existing core engine and persistence
+  repository. No server-side game rules or score calculations were added.
+- Added `/api/rooms`, room start/inspection, multiplayer game observation/action/replay routes, and
+  `/ws/games/:gameId`. WebSocket delivery validates protocol v1 envelopes, keeps independent
+  sequence streams, replays public events, sends redacted observations, rejects binary/oversized/
+  malformed/cross-player frames, applies origin and rate limits, and supports reconnect catch-up.
+- Added deterministic bot-seat advancement using observation-only bot policies for bot-filled rooms.
+- Added durable pending-action records, automated timeout fallback with explicit server provenance,
+  and a `pause_on_disconnect` policy that preserves the remaining deadline across reconnects.
+- Added a Deno `Deno.serve` HTTP/WebSocket handler seam, an async Deno KV game-journal adapter, and
+  at-least-once commit-notification records. The adapter validates event, state, command, ruleset,
+  and event-chain hashes, survives a fresh repository handle, and exposes core-marker-only practice
+  branch creation.
+- Added a browser room panel plus an isolated Playwright two-client test covering redacted
+  observations, public action fan-out, and reconnect catch-up. Regression coverage includes altered
+  duplicate commands after restart, malformed action frames, independent client/host sequence
+  streams, practice-marker restart/replay, bounded Deno origins, and terminal replay envelopes. The
+  full suite passes 367 tests, and the browser test
+  passes on port 4183 without touching the user-owned port 4173 process.
+- Wired authenticated observations into the Three.js mount. The live scene replaces staged hands,
+  discards, and melds with the viewer's face-up hand and face-down opponent counts, adds a legal-turn
+  ring and revision/wall label, and restores the staged presentation when the room is left. A rendered
+  browser check on the isolated 4183 server showed a live room and a legal discard advancing the
+  visible revision.
+
+This extension remains experimental. Node/Fastify with SQLite is the complete local room runtime;
+the Deno entry point now constructs the async `DenoMultiplayerService` over Deno KV, serves the same
+room/game/WebSocket routes, and polls durable commit notifications for at-least-once socket fan-out.
+Each commit notification also carries the accepted action identity, so a socket on another Deno
+instance can deliver one `action_accepted` envelope to the submitting player without exposing
+internal state; local delivery records the same request ID to suppress a duplicate notification.
+The Deno hub validates origin and ticket before upgrading a socket, installs its message listener
+before the first client frame can arrive, and defers only the join sequence until the native Deno
+upgrade is open. It catches up each socket from its own durable revision and clears consumed timeout
+state for every socket using the same player ticket. The journal's latest-state cache is gated by the
+durable branch revision, state hash, and event-chain hash; it is only a performance hint, and a fresh
+process reconstructs from KV before accepting a command. Deno KV snapshots are written while they
+fit the 64 KiB value limit; an oversized snapshot is skipped because the event journal remains the
+authoritative replay source.
+The Deno adapter implements authoritative event/replay persistence and core-marker-only practice
+branch creation with a minimal persisted decision-identity check; analysis facts, learner/coach
+records, snapshot recovery policy, and full import/export remain outside its async subset. Deployment
+hardening and multi-instance abuse controls remain separate from this local experimental slice. The
+runtime is started with `deno task serve`, which enables Deno KV and the bounded local origin
+allowlist configured by the Deno service.
+
+### Lifecycle and boundary audit follow-up
+
+- Waiting rooms can be closed by their authenticated owner before start. Durable room access applies
+  the retention period using the injected service clock; expired rooms become `closed` and reject
+  new joins or reconnects. `match_ended` rooms are read-only but an existing seat ticket may still
+  reconnect for replay or observation until expiry; neither terminal state accepts starts or actions.
+- Owner close uses an atomic waiting-room compare-and-set in both SQLite and Deno KV. A close cannot
+  overwrite a concurrently claimed `startRequestId`, so a durable game cannot be created behind a
+  `closed` room; the losing operation receives the structured lifecycle conflict.
+- Retention expiry uses the same atomic transition for stale `waiting` and `ready` rooms, preserving
+  a concurrent start reservation rather than overwriting it with `closed`.
+- Room starts reserve the caller's `startRequestId` with a durable compare-and-set before bot filling
+  and game creation. Concurrent identical starts therefore converge on one game, while a different
+  request receives a structured conflict. Bot-seat creation tolerates the same reservation race.
+- The public `ready` state is entered only after that owner reservation and complete four-seat
+  assignment. Joining the fourth human seat leaves the room `waiting`, aligned with the multiplayer
+  specification. The transition is an atomic compare-and-set in both stores and is a no-op if a
+  concurrent identical start has already made the room `active`.
+- Action deadlines, reconnect pause/resume, and retention checks use the same authoritative service
+  clock in both the SQLite and Deno/KV services; ticket expiry is rejected at the exact expiry
+  instant, and room joins update durable activity timestamps through that clock. Node, Deno, and
+  Deno/KV HTTP adapters parse every successful room, observation, action, replay, ruleset, health,
+  and error response through shared protocol schemas before serializing it.
+- The authenticated `/api/games/:gameId/branches` and `/api/games/:gameId/hints` routes are explicit
+  competitive-room surfaces. They validate the caller and return a structured `409` with
+  `unsupported_room_action` rather than falling through to the browser shell. The equivalent
+  WebSocket requests are rejected before any engine call, and a payload naming another player is
+  rejected as `cross_player_message` in Node and both Deno socket handlers.
+- Focused post-audit validation: 43 tests across the multiplayer, Deno/KV handler, Deno service, and
+  JSONL protocol files, plus `pnpm typecheck`. The final combined checks now pass: `pnpm format:check`,
+  `pnpm lint`, `pnpm typecheck`, `pnpm test` (367 tests), `pnpm test:coverage` (364 tests; 93.09%
+  statements, 86.93% branches),
+  `pnpm test:sim:fast` (500 hands with zero failures), `pnpm build`, `pnpm test:e2e`,
+  `deno check --unstable-sloppy-imports apps/server/deno.ts`, and `git diff --check`. The repository
+  `pnpm smoke` wrapper was not run because it hard-codes the occupied user port 4173; the same built
+  production artifact passed an isolated health and HTML smoke check on port 4184. A live Deno/KV
+  two-socket flow on port 8000 covered bot-filled start, independent redacted hands, public-event
+  action fan-out, reconnect catch-up from an earlier revision, duplicate idempotency, stale revision,
+  cross-player rejection, malformed close 1008, and oversized close 1009. The same room then survived
+  a Deno process restart: observation and replay reconstructed revision 5 with a redacted hand, and a
+  reconnect from that revision received `hello` and a fresh observation.
 
 ## Next action
 
@@ -1047,3 +1139,721 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
   the six-profile, burst, and reusable optic regressions. Strict typecheck, focused weapon/scope ESLint, the web
   production build, `git diff --check`, and the explicit Vite HMR request passed. Broader lint still reports existing
   dirty-lane diagnostics in `main.tsx` and `mahjong-table.ts`; no additional browser session was opened.
+  Keep the canonical worktree frozen while reviewing the final diff and validation evidence; any code
+  correction requires rerunning the full format, lint, typecheck, unit, build, and browser gates.
+
+## 2026-08-07 — FPS Slayer readiness slice
+
+The competitive FPS handoff is now implemented as an additive authority boundary in this worktree;
+the dirty `visual-table` worktree was not edited.
+
+- Added `@hk-mahjong/fps`, a pure fixed-step 60 Hz server simulation for one bounded authored arena.
+  It owns movement/collision, spawn validation, input sequence checks, fire cadence, hitscan hitbox
+  selection, shield/health damage, assists, death, respawn protection, score, match end, and a
+  canonical event-chain replay. The rules, map, and weapon hashes are explicit.
+- Added strict `packages/protocol/src/fps.ts` schemas for input, public avatar snapshots, private
+  self state, scoreboard, combat events, replay, room HTTP payloads, and the FPS WebSocket envelope.
+  Client input has no position, health, ammo, hit, kill, or score fields; opponent ammo is not in a
+  public avatar snapshot.
+- Added `AvatarDefinition`, a deterministic opaque fallback mannequin with named sockets and
+  diagnostics, separate camera-relative hands/weapon viewmodel, local world avatar, and a bounded
+  remote-snapshot interpolation registry. The local browser also performs bounded prediction and
+  correction against authoritative snapshots.
+- Added `/api/fps/rooms`, `/api/fps/rooms/:matchId/join`, ready/start/snapshot/input/replay routes,
+  and `/ws/fps/:matchId`. Room tickets are hashed and bound to one player ID. The FPS SQLite journal
+  stores match checkpoints, event chains, and ticket bindings; a fresh service reconstructs the
+  match and accepts the same ticket.
+- Added `/?fps=1` browser mode with a deterministic arena, first-person controls, third-person
+  verification camera, fallback-avatar HUD, and explicit authority/replay status.
+- The real Fastify `ws` seam now decodes non-binary text frames delivered as `Buffer` values while
+  still closing true binary frames with code 1003; the focused socket regression covers that boundary.
+- Added focused unit, protocol, persistence, server, and browser tests. The isolated Playwright
+  run on port 4183 passed the two-client FPS flow and wrote `test-results/fps-slayer-first-person.png`
+  and `test-results/fps-slayer-third-person.png`.
+
+This is an experimental competitive prototype, not competitive-production readiness. Cloudflare
+Tunnel validation, packet-loss/load/abuse budgets, named-tunnel operations, anti-cheat telemetry,
+full delta-snapshot recovery, and the final public-edge gate remain open. Do not describe this
+build as “multiplayer ready” until the handoff checklist is closed on one frozen build.
+
+### FPS follow-up evidence — 2026-08-07
+
+- Corrected the FPS RNG output to standard xoshiro128** and locked its `rng-vector` sequence in
+  `packages/fps/src/rng.test.ts`.
+- Expanded `slayer-arena-v1` to eight validated, separated spawn points so the declared eight-player
+  cap can activate without an invalid-spawn failure.
+- Added deterministic prediction reconciliation and snapshot ordering tests, including delayed,
+  dropped, duplicated, and out-of-order delta recovery through a full snapshot.
+- Added avatar registry/mesh/bounds/fallback diagnostics tests and browser data attributes for local
+  entity state, snapshot tick, quality, correction distance, and visible mesh counts.
+- Added service abuse/lifecycle tests for ticket expiry, origin allowlists, frame-size and binary-frame
+  rejection, input rate limits, stale clocks, durable request idempotency, reconnect reservation expiry,
+  full resync, duplicate fire nonces, and replacement of a stale duplicate socket.
+- Added `pnpm test:fps:gate`: a no-argument local gate for eight simulated clients over 600 ticks. The
+  accepted receipt has 4,800 inputs, 200 snapshots, 511 authoritative events, replay verification, a
+  0.405 ms observed maximum simulation tick, and deterministic digest
+  `sha256:639ba5744cb70e5e82d7358f0c6ae35e45311677ceedc19a3be312ce1e0fe4ec`.
+- Extended the rendered Playwright FPS check to verify fallback mesh diagnostics and low/medium/high
+  quality mode transitions. This remains local browser evidence; it does not prove a Cloudflare edge,
+  planned-duration load budget, or the complete fire-to-kill/death/respawn lifecycle.
+- Added `pnpm test:fps:load`, a no-argument ten-minute simulated eight-client authority/load gate. It
+  accepted 288,000 inputs, validated 96,000 snapshots, serialized 604,152,961 snapshot bytes, and
+  replay-verified 56,635 events with a 0.626 ms observed maximum simulation tick. Receipt digest:
+  `sha256:a499d481688f6413687e76e52554d028f0ac6b9c95599c298510e96aa2b18424`.
+
+- Prior local validation on the pre-deterministic-spawn dirty state passed `pnpm format:check`, `pnpm lint`,
+  `pnpm typecheck`, `pnpm test` (393 tests), `pnpm build`, `pnpm test:e2e` (both browser scenarios),
+  the isolated production health/browser smoke on port 4184, and both FPS gates. Built-output
+  manifests and the non-destructive rollback procedure are recorded in
+  `docs/multiplayer-fps-slayer-readiness-handoff.md`.
+
+### Current local validation after deterministic spawn and diagnostics patch — 2026-08-07
+
+- Fixed FPS spawn reproducibility: spawn selection is now derived from the match seed and spawn
+  ordinal, not random room-local player IDs. A regression test proves two different credential IDs
+  produce the same seeded geometry. This made the `lifecycle-1` browser combat scenario stable when
+  center cover would otherwise block a valid aim ray.
+- Added privacy-safe `FpsMatchService` counters for simulation ticks and timing, simulation overruns,
+  resync requests, and snapshot failures. The two-client browser test reads `/diagnostics`, confirms
+  two connected players and one active match, requires simulation ticks, and checks zero persistence
+  and snapshot failures without exposing the ticket, sessions, or input receipts.
+- Re-ran the full local gates after the source change: 395 unit tests in 34 files, Playwright FPS
+  `2 passed`, the complete `pnpm test:e2e` suite (`3 passed`), `pnpm build`, and isolated production
+  smoke on port 4184. Browser metrics were 79
+  frames in about 2 seconds (average 25.53 ms, p95 35.2 ms, max 35.3 ms), 24 draw calls, 3,950
+  triangles, and a sampled 33.3 ms frame.
+- Re-ran `pnpm test:fps:gate`: 4,800 accepted inputs, 200 snapshots, 523 events, max tick 2.169 ms,
+  receipt digest `sha256:5e6a6d5eb457e9565d9e51953a753382672ddcd93cfef613af93d8cf6854d482`.
+- Re-ran `pnpm test:fps:load`: 288,000 accepted inputs, 96,000 snapshots, 56,591 events,
+  604,659,058 serialized snapshot bytes, max tick 0.677 ms, receipt digest
+  `sha256:73d4e94e860e3467bc02896a97448a361267457efb9fa51560bee4b20307cd8e`.
+- Current artifact aggregate is
+  `sha256:8bd64d0e781ddf68508f003aec73d3df6106283a921ef45519a2b99cf12397ca`; component manifests
+  and the unchanged rules/map/weapon hashes are recorded in the readiness handoff §22.
+
+The FPS lane remains an experimental local prototype. Named-edge acceptance, real browser/network
+soak and load budgets, public-edge review, and production anti-cheat/privacy operations remain open;
+do not call this build multiplayer-ready.
+
+### Final local browser/network soak — 2026-08-07
+
+- Removed the per-input FPS snapshot broadcast. `FpsMatchService` now coalesces publication requests
+  and serializes snapshots asynchronously at the configured snapshot cadence or on authoritative
+  events, keeping socket writes outside the fixed-step simulation budget.
+- `pnpm test:fps:browser-soak` held eight real local browser clients for `602.128 s` against the
+  planned 600-second duration. The server recorded 36,265 ticks, `0` overruns, average/max tick
+  times of `0.181/10.575 ms`, 96,029 accepted inputs, 96,013 snapshots, 548,047,275 snapshot
+  bytes, eight WebSocket upgrades, and zero rejected inputs, resyncs, snapshot failures,
+  persistence failures, or replay failures.
+- Browser samples were 121 frames per client with p95 `16.8–16.9 ms`, maximum `18.3–18.4 ms`,
+  96–98 draw calls, 22,286–22,310 triangles, and a maximum sampled heap of 20.5 MB. Receipt
+  `test-results/fps-browser-soak.json` has digest
+  `sha256:3be1aaebeebbdc7f13db9217e3eeb84da43f4100ae523c13160419150a44281a`.
+- The post-change deterministic receipts remain stable: `pnpm test:fps:gate` reports 4,800 accepted
+  inputs, 200 snapshots, 523 events, and maximum tick `1.787 ms` with digest
+  `sha256:5e6a6d5eb457e9565d9e51953a753382672ddcd93cfef613af93d8cf6854d482`; `pnpm test:fps:load`
+  reports 288,000 accepted inputs, 96,000 snapshots, 56,591 events, 604,659,058 snapshot bytes,
+  maximum tick `0.588 ms`, and digest
+  `sha256:73d4e94e860e3467bc02896a97448a361267457efb9fa51560bee4b20307cd8e`.
+- The final artifact manifest covers all 29 files under `apps/*/dist` and `packages/*/dist`; its
+  newline-terminated aggregate is
+  `sha256:f68fe797daeba852cda0e29f1ef34cbc5c42af91656c783c5aaa17876a16e3e6`.
+
+This closes only the local planned-duration browser/network load budget. Named-edge acceptance,
+packet-loss/clock-skew recovery, public-edge review, production anti-cheat/privacy operations, and
+the external rollback drill remain open; the prototype is not competitive-play ready.
+
+### Local abuse and network-boundary gate — 2026-08-07
+
+- Added a future-acknowledgement bound to the authoritative input path. A client acknowledgement
+  more than two server ticks ahead is rejected as invalid instead of being treated as authority.
+- Corrected service metrics so only malformed or schema-invalid frames increment `malformedFrames`;
+  rate-limit, stale-clock, cross-player, and other structured FPS errors remain separately visible.
+- Added `pnpm test:fps:abuse`, a no-argument real Fastify/WebSocket boundary gate. It proves room and
+  join flood limits, invalid and cross-player tickets, stale and future clocks, malformed JSON,
+  1009 oversized-frame and 1003 binary-frame closes, 4001 duplicate-socket replacement, full
+  resync, and diagnostics privacy. Receipt digest:
+  `sha256:49361f2876cf47822e1b3a920ae5377ca1e30a2cdd83817179acbec8cc84d34d`.
+
+- Re-ran `pnpm test:fps:browser-soak` on the hardened source with eight real local browser clients
+  for `602.169 s` against the planned 600 seconds. The server recorded `36,286` ticks, average/max
+  tick times of `0.029/4.499 ms`, zero simulation overruns, `96,029` accepted inputs, `0` rejected
+  inputs, `96,072` snapshots, `548,384,766` snapshot bytes, `8` WebSocket upgrades, and zero
+  resync, snapshot, persistence, or replay failures. Browser samples were `121` frames per client,
+  p95 `17.3–17.4 ms`, maximum `17.6–17.7 ms`, `96–98` draw calls, `22,286–22,310` triangles, and
+  a maximum sampled heap of `26.0 MB`. Receipt file SHA-256:
+  `sha256:155fd93abab3fe73a951597c537e08328e18de644b8c2c4fa3a2f535de5b9813`.
+
+- Added `pnpm test:fps:network`, a deterministic local transport-fault gate. It drops one delta,
+  delays and reorders later deltas, verifies two full-resync requests, accepts a missing frame once
+  order is restored, and treats a duplicate snapshot as idempotent. It also accepts an exact
+  `10,000 ms` clock-skew boundary, rejects a stale timestamp, and rejects a future acknowledgement.
+  Canonical receipt digest:
+  `sha256:d6d711644678a498d0ea5815e0ae835564f9a3717e76c915c35992841d40bcdd`.
+- Expanded `FpsService` diagnostics with room count, phase duration, dropped frames, persistence
+  latency and commit failures, fire requests, accepted/rejected shots, hit events, deaths,
+  respawns, terminal matches, and score events. The response remains privacy-safe and omits raw
+  tickets, sessions, input receipts, seeds, and private diagnostics.
+
+This closes the local input-boundary, abuse, deterministic network-fault, and planned-duration
+browser/network load gates only. Named-edge packet-loss/clock-skew tests, production anti-cheat/
+privacy operations, external rollback, and competitive readiness remain open.
+
+The pre-AI post-hardening build artifact manifest covered all 29 files under `apps/*/dist` and
+`packages/*/dist`; its newline-terminated aggregate was
+`sha256:5388b34437f62cb99ad9a4c2656a405bc06c38e56ca48bcd6d5543c315eb4d2c`. The current post-AI
+manifest is recorded in the readiness handoff §24.
+
+### Server-owned AI competitor — 2026-08-07
+
+- Added an optional bounded `botCount` to FPS room creation. The service creates deterministic
+  `Rival Echo`-style seats, auto-readies them, and persists them inside the existing FPS checkpoint;
+  human-only room behavior remains unchanged when `botCount` is omitted.
+- Added a `controller` marker to the authoritative player/checkpoint boundary. Bot inputs are
+  generated inside `FpsMatch` from the match seed and bot ID, then pass through the same validated
+  input, movement, collision, weapon switching, reload, hitscan, health/shield, death, respawn,
+  score, and replay paths as human inputs. No bot ticket or hidden client state is exposed.
+- Added a browser control and visible note at `/?fps=1`; `Play against AI rival` creates a solo room
+  with one normal-vitals rival. Added deterministic core, protocol, service, and browser regression
+  coverage.
+- Validation on this source: 25 focused FPS tests passed, strict typecheck/lint/format passed,
+  production `pnpm build` passed, and the focused solo-AI Playwright test observed a rival shot on
+  the live browser path. The full `pnpm test:e2e` suite now passes all four tests, including the
+  two-client switch/reload/kill/death/respawn lifecycle.
+- The current post-AI build manifest covers all 29 artifacts and has aggregate
+  `sha256:b1897b9d2e1055feb9f4d0d719fb345fa6c17f29a97f5b36750221894411c701`. A fresh ten-minute
+  browser soak on this exact source also passed; its receipt is recorded below.
+
+### Current post-AI validation and browser soak — 2026-08-07
+
+- `pnpm test` reports `399` tests in `34` files. `pnpm format:check`, `pnpm lint`,
+  `pnpm typecheck`, and `pnpm build` pass.
+- `pnpm test:coverage` passes with `396` tests and aggregate coverage of `93.10%` statements,
+  `86.89%` branches, `97.72%` functions, and `92.95%` lines. `pnpm test:sim:fast` completes
+  500 seeded hands with zero illegal actions, invariant violations, crashes, command-bound
+  failures, or replay mismatches; run digest
+  `sha256:24861c46da16e78c754d507a11c866dd6b14c2e37147488734e387ab6b7c570f`.
+- An isolated production smoke equivalent against the fresh build on port `4184` returned HTTP
+  `200`, `{"status":"ready","schemaVersion":1}`, and the browser shell marker. The existing
+  listener on port `4173` was not touched; the root `pnpm smoke` wrapper remains unsuitable while
+  that user-owned listener is active because it is hard-coded to port `4173`.
+- `pnpm test:e2e` passes all four tests in `1.2m`: the mahjong reconnect flow, FPS rendered
+  avatar flow, authoritative switch/reload/hit/kill/death/respawn lifecycle, and server-owned
+  AI-rival flow. The FPS rendered sample recorded 66 frames (average `30.69 ms`, p95 `50 ms`,
+  max `50 ms`), 24 draw calls, and 3,950 triangles. Fresh lifecycle and AI screenshots are in
+  `test-results/`.
+- `pnpm test:fps:abuse` and `pnpm test:fps:network` pass with canonical receipt digests
+  `sha256:49361f2876cf47822e1b3a920ae5377ca1e30a2cdd83817179acbec8cc84d34d` and
+  `sha256:d6d711644678a498d0ea5815e0ae835564f9a3717e76c915c35992841d40bcdd`.
+- `pnpm test:fps:gate` passes with 4,800 accepted inputs, 200 snapshots, 523 authoritative
+  events, maximum tick `0.484 ms`, and digest
+  `sha256:5e6a6d5eb457e9565d9e51953a753382672ddcd93cfef613af93d8cf6854d482`.
+- `pnpm test:fps:load` passes with 288,000 accepted inputs, 96,000 snapshots, 56,591 events,
+  604,659,058 serialized snapshot bytes, maximum tick `3.866 ms`, and digest
+  `sha256:73d4e94e860e3467bc02896a97448a361267457efb9fa51560bee4b20307cd8e`.
+- `pnpm test:fps:browser-soak` passes against the current post-AI build with eight real local
+  browser clients for `602.415 s`. Diagnostics recorded 36,046 ticks, average/max tick times
+  `0.0458/14.191 ms`, zero overruns, 96,024 accepted inputs, zero rejected inputs, 95,412
+  snapshots, 544,616,866 snapshot bytes, eight WebSocket upgrades, and zero resync, snapshot,
+  persistence, or replay failures. Browser samples were 121 frames per client with p95
+  `17.2–17.3 ms`, max `17.6–17.7 ms`, 96–98 draw calls, 22,286–22,310 triangles, and a maximum
+  sampled heap of 24.5 MB. Receipt file SHA-256:
+  `sha256:f29026ded4b80498dbf879d7125516186df513e1df332f0a8345c443a2c8534b`.
+
+These are current local receipts for the exact dirty source. Named-edge acceptance, public-edge
+packet-loss/clock-skew testing, production anti-cheat/privacy operations, and the external rollback
+drill remain open; the FPS prototype is not competitive-play ready.
+
+### Seed-redaction and rebased-gate follow-up — 2026-08-07
+
+- Public `FpsSnapshot` and `FpsReplay` no longer expose the authoritative seed. The protocol schemas
+  reject it, the service strips it before public replay parsing, and the focused HTTP/WebSocket/
+  restart tests assert that serialized snapshots and replays do not contain it.
+- The branch was concurrently rebased to `12f358d3e67a72944af4701c0c2c52508d28f76d`; the prior
+  `2f9e37d4930571e8a0cb061ae302379cc5fe15c1` evidence is therefore stale. On the rebased source,
+  the focused FPS suite (26 tests), typecheck, build, the complete four-test Playwright suite, abuse/network
+  gates, authority gate, and load gate pass. The full lint/test gates and planned-duration soak do
+  not: 86 unrelated lint errors, two non-FPS unit failures, and one max-tick overrun in each of two
+  browser soak attempts. See the readiness handoff §25 for receipt digests and the remaining gates.
+
+### FPS fixed-step hot-path repair and current soak — 2026-08-07
+
+- The authoritative service no longer allocates a public roster projection inside every fixed-step
+  callback. `FpsMatch` exposes scalar phase/tick reads for the scheduler, while public snapshots
+  remain unchanged.
+- Persistence now checks event/tick thresholds before exporting a checkpoint. A scheduled no-op
+  does not clone players, inputs, and event records or serialize an unnecessary SQLite write.
+- `pnpm format:check`, `pnpm typecheck`, the focused FPS set (32 tests in 8 files), and all four
+  `pnpm test:e2e` browser scenarios pass.
+- `pnpm test:fps:gate` passes with maximum tick `1.315 ms` and digest
+  `sha256:5e6a6d5eb457e9565d9e51953a753382672ddcd93cfef613af93d8cf6854d482`.
+- `pnpm test:fps:load` passes with maximum tick `0.676 ms` and digest
+  `sha256:3a21f7fc2903871acac74b0408e9971fb309007a6f8192f76204981fa06c9445`.
+- The planned eight-client browser soak passes for `602.116 s`: 36,259 ticks, average/max tick
+  `0.0201/9.367 ms`, zero overruns, 96,021 accepted inputs, 96,008 snapshots, 545,235,329
+  snapshot bytes, zero resync/snapshot/persistence/replay failures, and browser p95/max frames
+  `17.7–17.8/18.6–18.7 ms`. Receipt SHA-256:
+  `sha256:2793c3e5ae811bf3ef4f3e9f24bb2c9afe82caec6bd4bcc820552a587af7468a`.
+
+The post-repair build has 29 output files and newline-terminated manifest aggregate
+`sha256:db87ff98cf9c89d7f8c5b2b0e426400bb57ac09a7c7fb5d37d7d212061d8a038`. Rules/map/weapon
+hashes are unchanged at `sha256:af61d3c8254e65a350872b956dfc7e80394bff7adebd2c530447077e83b81068`,
+`sha256:cee4798d193d1ed82ec7b0e0d48f891de54b09dc7c1c82c68524d675cc5f96f1`, and
+`sha256:aae225cf0c9fdac72848817488cbf60b7d8c62a0925fc88bf91f22efd841466b`.
+
+The local FPS load-budget blocker is closed on this exact source. The full unit suite passes 559
+tests across 46 files. The full repository lint gate still has 86 unrelated rebased visual-table /
+movement diagnostics; these reproduce against the current base and were intentionally not rewritten
+in this FPS lane. Named-edge, production anti-cheat/privacy, and rollback evidence remain open; the
+prototype is not competitive-play ready.
+
+## 2026-08-07 — Local FPS avatar presentation and final validation
+
+The FPS browser now has an explicit avatar presentation boundary. A deterministic seven-mesh
+fallback mannequin supplies named sockets and a visible `missing_avatar_asset_fallback` diagnostic.
+The local player keeps a world-space body for shadows, reflections, and third-person/spectator
+views while using a separate camera-relative hands/viewmodel in first person. Upper-body and weapon
+occluders use a dedicated camera layer only in first person; third person restores the full body.
+The authoritative world weapon follows weapon selection, fire emissive state, crouch scale, death
+pose, lifecycle visibility, and snapshot tick. Remote bodies are interpolated from public snapshots.
+
+- `pnpm exec vitest run apps/web/src/fps/avatar.test.ts`: 4/4 passed.
+- `pnpm test`: 561 tests passed across 46 files.
+- `pnpm typecheck` and `pnpm format:check`: passed.
+- Focused avatar lint: passed. Full `pnpm lint`: 86 unrelated visual-table/movement diagnostics
+  remain; no avatar lint error remains.
+- `pnpm test:e2e`: all 4 browser scenarios passed. The FPS sample was 77 frames, average `26.24 ms`,
+  p95 `34.6 ms`, maximum `35.1 ms`, 30 draw calls, and 4,806 triangles.
+- Screenshots: `test-results/fps-slayer-first-person.png`, `fps-slayer-third-person.png`,
+  `fps-slayer-reload.png`, `fps-slayer-death.png`, `fps-slayer-respawn.png`, and
+  `fps-slayer-solo-ai.png`.
+- Current 29-file build manifest aggregate:
+  `sha256:1e1096a4ed418c0ad7c94b0292f580aa9934ebcae6f9344f91d7bc1170eb2340`.
+
+This is rendered local prototype evidence only. Named-edge acceptance, public-edge packet-loss and
+clock-skew testing, production anti-cheat/privacy operations, and external rollback remain open;
+the FPS prototype remains not ready for competitive play.
+
+### FPS map diagnostic and current validation — 2026-08-07
+
+- Added `buildFpsMapDiagnostic`, a deterministic public-state-only diagnostic for the versioned map
+  and collision geometry. It reports obstacle IDs, player capsules and overlap checks, spawn-facing
+  rays, and spawn-to-player visibility without exposing vitals, ammunition, seeds, tickets, or
+  sessions.
+- The web canvas publishes map ID/hash, collision, capsule, spawn-ray, and visibility-test
+  attributes. The two-client browser flow asserts three obstacles, two capsules, eight spawn rays,
+  and 16 visibility tests; focused map/avatar coverage passes 6 tests.
+- `pnpm test` passes 563 tests across 47 files. `pnpm typecheck` and `pnpm format:check` pass.
+  Focused FPS/map lint passes; full lint still has the same 86 unrelated visual-table/movement
+  diagnostics in the rebased lane.
+- `pnpm test:e2e` passes all four real browser scenarios. The current FPS sample recorded 76 frames,
+  30 draw calls, and 4,806 triangles.
+- The current 29-output build manifest aggregate is
+  `sha256:8ab4ed57fa3f04021f71a1f17ee43affb565f32934d716a3bd8cf26fd75aa6ea`.
+
+This remains local rendered prototype evidence. Named-edge/public-edge testing, production
+anti-cheat/privacy operations, and external rollback remain open; the prototype is not
+competitive-play ready.
+
+### FPS competitive HUD and viewmodel lifecycle — 2026-08-07
+
+- Added public `durationTicks` and `scoreTarget` snapshot fields so the browser HUD reads match
+  timing and target values from the authoritative rules instead of a duplicated UI constant.
+- Added the rendered reticle with preview/ready/fire/reload/down states plus visible timer, target,
+  RTT, and prediction/resync status in the FPS HUD.
+- Added authoritative viewmodel application for weapon identity/scale, reload pose, fire emissive
+  state, crouch offset, death pose, and disconnect/spectator visibility. Canvas diagnostics expose
+  viewmodel weapon, action, and visibility while the world avatar remains separate.
+- The focused map/avatar set passes 7 tests; the full suite passes 564 tests across 47 files.
+  Typecheck and focused FPS lint pass. The FPS Playwright spec passes all three scenarios; the
+  current rendered sample recorded 76 frames, 30 draw calls, and 4,806 triangles.
+- The current 29-output build manifest aggregate is
+  `sha256:ff890c87711017f7bc89abebae8ce0e62ad3ecb05650c3489fe099c588f52ce3`.
+
+This is local rendered prototype evidence. Named-edge/public-edge testing, production anti-cheat/
+privacy operations, and external rollback remain open; the prototype is not competitive-play ready.
+
+## 2026-08-07 — FPS spawn safety and final local validation
+
+The authoritative `FpsMatch` spawn path now validates enemy separation against the six-metre rules
+threshold and, for respawns, prefers spawn points with obstacle-occluded eye-level line of sight.
+`isFpsLineOfSightClear` uses the authored arena geometry. Selection is deterministic from the match
+seed and spawn ordinal, independent of random room-local player IDs, and retains a collision-valid
+fallback with spawn protection when the arena has no fully safe point.
+
+- `pnpm exec vitest run packages/fps/src/arena.test.ts packages/fps/src/match.test.ts`: 15 tests
+  passed, including deterministic terminal winner tie-breaking.
+- `pnpm test`: 567 tests passed across 47 files.
+- `pnpm test:e2e`: all four browser scenarios passed. The latest FPS sample recorded 77 frames,
+  30 draw calls, and 4,806 triangles.
+- `pnpm typecheck`, `pnpm format:check`, both staged/unstaged diff checks, and focused FPS lint
+  passed. Full `pnpm lint` still exits with exactly 86 unrelated visual-table/movement errors.
+- `pnpm build` passed. The final 29-output manifest aggregate is
+  `sha256:4f46bb22076630263d20fa6f52248f92861585eb222b840705b26ec141ea5da6`.
+
+No public server, Cloudflare Tunnel, deployment, public-edge fault test, production anti-cheat /
+privacy operation, or rollback drill was started. The FPS prototype remains not competitive-play
+ready.
+
+## 2026-08-07 — FPS snapshot baseline and identity recovery gate
+
+`FpsSnapshotTracker` now requires a full snapshot before accepting deltas and records the match,
+room, rules, map, weapon-set, and RNG identity established by that baseline. A later frame with a
+different identity is rejected with `identity_mismatch` and requests a full resync. Ordered same-tick
+deltas and exact duplicates remain accepted without an extra state transition.
+
+- `pnpm exec vitest run tests/network/fps-simulation.test.ts packages/fps/src/match.test.ts packages/fps/src/arena.test.ts`: 17 tests passed.
+- `pnpm test`: 567 tests passed across 47 files.
+- `pnpm test:e2e`: all four browser scenarios passed; the latest FPS sample recorded 74 frames,
+  30 draw calls, and 4,806 triangles.
+- `pnpm typecheck`, `pnpm format:check`, both diff checks, and focused FPS lint passed. Full lint
+  still reports exactly 86 unrelated visual-table/movement errors.
+- `pnpm build` passed; the final 29-output manifest aggregate is
+  `sha256:4f46bb22076630263d20fa6f52248f92861585eb222b840705b26ec141ea5da6`.
+
+No public edge, production anti-cheat/privacy operation, deployment, or rollback drill was run;
+the FPS prototype remains not competitive-play ready.
+
+## 2026-08-07 — FPS terminal result browser acceptance
+
+The FPS room form now lets the browser choose a score target from 1 to 100, defaulting to 25. The
+request uses the existing validated `fpsRoomCreateRequest` contract. When the public event stream
+contains the authoritative `match_ended` event, the arena renders a result panel with the terminal
+reason and winner names resolved from the public scoreboard. The render loop stops submitting input
+outside the active phase, and late `match_not_active` errors cannot replace the terminal HUD state.
+
+- The two-client terminal Playwright flow creates a target-1 match, reaches one kill, and asserts
+  the ended phase, score-target reason, winner ID, both rendered result panels, and
+  `test-results/fps-slayer-terminal.png`.
+- `pnpm test`: 567 tests passed across 47 files. `pnpm test:e2e`: all five browser scenarios passed;
+  the latest FPS sample recorded 75 frames, 30 draw calls, and 4,806 triangles.
+- `pnpm typecheck`, `pnpm format:check`, both diff checks, and focused FPS ESLint passed. Full lint
+  remains exactly 86 unrelated visual-table/movement errors.
+- `pnpm build` passed with 29 artifacts. The current manifest aggregate is
+  `sha256:17276d7d5d27110c65bb252289b0cfaa637824bac652659fd1be8d4fa2f58ef6`.
+
+This is local browser evidence only. Named-edge/public-edge acceptance, packet-loss and clock-skew
+testing, production anti-cheat/privacy operations, and rollback remain open; the prototype is not
+competitive-play ready.
+
+## 2026-08-07 — FPS checkpoint integrity and local rollback drill
+
+Checkpoint restore now fails closed when persisted event-chain hashes, event counters, event tick
+ordering, or restore counters do not match the checkpoint. The regression test tampers with a saved
+event hash and confirms `FpsMatch.fromCheckpoint` rejects it with
+`fps_checkpoint_event_chain_mismatch`.
+
+- `pnpm exec vitest run packages/fps/src/match.test.ts apps/server/src/fps-match.test.ts`: 24 tests
+  passed.
+- `pnpm test:fps:rollback`: passed. A temporary SQLite journal was reopened through a fresh service
+  handle; public replay and persisted snapshot state matched; a post-restore input was accepted;
+  the temporary directory was removed. Receipt digest:
+  `sha256:2b8559b29e959dd69536534165fa4720aceddd3849d0247eb02a91ae4fab4b3`.
+- The receipt contains no seed or ticket. This is local integrity evidence only; named-edge,
+  production anti-cheat/privacy operations, and an external retained-artifact rollback remain open.
+
+The post-integrity source validation also passes `pnpm test` (569 tests in 47 files), all five
+`pnpm test:e2e` scenarios, strict typecheck, formatting, and focused FPS ESLint. `pnpm build`
+emits 29 artifacts with sorted manifest aggregate
+`sha256:7f2147a8d4d48c724b297f3f88d62e0cafbaa27d0f3b80c8a3d9fe0220bdc24f`. Full repository lint
+still reports the same 86 unrelated visual-table/movement diagnostics. Public-edge, production
+anti-cheat/privacy, and retained-artifact rollback remain open.
+
+The HTTP FPS input route now shares the WebSocket `maxInputsPerSecond` limit, keyed by request IP,
+match, and player. The Fastify regression passes 13 tests, and `pnpm test:fps:abuse` passes with HTTP
+input statuses `[200, 200, 429]` and receipt digest
+`sha256:3111a7991cbeee28c53189696db57df6c2770e3639c5c15a0c091117ca06c500`. This is local
+input-boundary evidence; production anti-cheat operations remain open.
+
+## 2026-08-07 — FPS final post-rate-limit validation refresh
+
+The exact dirty source at `12f358d3e67a72944af4701c0c2c52508d28f76d` was rebuilt and revalidated
+after the HTTP input rate-limit change. The current production build contains 29 output files; its
+sorted, newline-terminated relative-path manifest aggregate is
+`sha256:587b4b62208127f9e4ee9de275c9c7ecd3f2ece06783e988098a3041050791a2`.
+
+- `pnpm test` passes 569 tests across 47 files.
+- `pnpm test:e2e` passes all five real browser scenarios. The latest FPS sample recorded 77 frames,
+  30 draw calls, and 4,806 triangles.
+- `pnpm typecheck`, `pnpm format:check`, and focused FPS ESLint pass.
+- `pnpm test:fps:abuse` passes with HTTP input statuses `[200, 200, 429]` and receipt digest
+  `sha256:3111a7991cbeee28c53189696db57df6c2770e3639c5c15a0c091117ca06c500`.
+- `pnpm test:fps:rollback` passes with receipt digest
+  `sha256:2b8559b29e959dd69536534165fa4720aceddd3849d0247eb02a91ae4fab4b3a`.
+- Full `pnpm lint` remains non-green with exactly 86 unrelated visual-table/movement diagnostics.
+
+This is local source, build, abuse, replay, and rendered evidence only. Named Cloudflare
+Tunnel/public-edge acceptance, public-edge packet-loss and clock-skew testing, production
+anti-cheat/privacy operations, and an external retained-artifact rollback remain open. The FPS
+prototype remains not competitive-play ready.
+
+## 2026-08-07 — FPS lifecycle, replay verification, and deterministic gate refresh
+
+The FPS authority now treats disconnect and reconnect state as explicit lifecycle transitions.
+Disconnected and spectator players cannot be spawned during countdown, submit input, or be revived
+implicitly; countdown cancellation is recorded when fewer than two eligible players remain. Ticket
+authentication precedes reconnect-storm limiting, HTTP routes enforce the configured origin and
+Bearer boundary, query-string tickets are rejected, and shutdown flushes checkpoints before closing
+SQLite. Replay records carry a public roster and terminal scoreboard; verification derives the
+scoreboard and deterministic winner from chained events and rejects a tampered scoreboard.
+
+- Focused authority/protocol/service/network tests: 42 passed across 8 files.
+- Full unit suite: 574 tests passed across 47 files.
+- `pnpm test:e2e`: all five real browser scenarios passed; the latest sample recorded 71 frames,
+  p95 34.6 ms, maximum 50 ms, 30 draw calls, and 4,806 triangles.
+- `pnpm typecheck`, `pnpm format:check`, both diff checks, and focused FPS ESLint passed. Full
+  repository ESLint still reports exactly 86 unrelated visual-table/movement diagnostics.
+- Abuse receipt: `sha256:3111a7991cbeee28c53189696db57df6c2770e3639c5c15a0c091117ca06c500`.
+- Deterministic network receipt: `sha256:d6d711644678a498d0ea5815e0ae835564f9a3717e76c915c35992841d40bcdd`.
+- Rollback receipt: `sha256:3e209c08e2cc0851a694808b548f320a11060c91ca9bce2e38c2946b23814b7e`.
+- Eight-client gate: 4,800 inputs, 200 snapshots, 523 events, maximum tick 1.841 ms, receipt
+  `sha256:5e6a6d5eb457e9565d9e51953a753382672ddcd93cfef613af93d8cf6854d482`.
+- Ten-minute simulated load: 288,000 inputs, 96,000 snapshots, 56,591 events, 605,907,058
+  snapshot bytes, maximum tick 4.55 ms, receipt
+  `sha256:cf8634b84192bec6889f4c14716f99c48c742cb07796ea30cc68687673681653`.
+- The rebuilt 29-file output manifest aggregate is
+  `sha256:2109966de0997a1d495c392ca52de56e03622951a1fd14b31c309c44b022e447`.
+
+This is local source/build/replay/load and rendered-prototype evidence only. Named Cloudflare
+Tunnel/public-edge acceptance, public-edge fault testing, production anti-cheat/privacy operations,
+deployment evidence, and an external retained-artifact rollback remain open. The FPS prototype is
+not competitive-play ready.
+
+## 2026-08-07 — FPS retained-artifact rollback verifier
+
+Added `scripts/fps-retained-rollback-drill.ts` and the `test:fps:retained-rollback` package command.
+The drill copies a closed SQLite journal into a separate temporary retained-artifact directory,
+records a manifest with file size and SHA-256 checksums, rejects a deliberate byte tamper, restores
+the original artifact, verifies the checkpoint's public event chain and replay, compares the
+restored public snapshot, and accepts a post-restore input. The receipt is checked not to contain the
+seed or ticket.
+
+- `pnpm test:fps:retained-rollback`: passed; receipt digest
+  `sha256:70903cf237d7d7edd8d174b982cb5592cd00cf9a3d36222e96b4fc3691f7e811`.
+- Isolated test-bus run `1786117592983-95318-312b0bb3`: 574 tests passed across 47 files.
+- `pnpm typecheck`, Prettier, and focused ESLint for the new script passed.
+
+This is local retained-artifact integrity evidence only. External immutable retention, release
+provenance, operator rollback, named-edge/public-edge acceptance, and production anti-cheat/privacy
+operations remain open; the FPS prototype is not competitive-play ready.
+
+## 2026-08-07 — FPS kicked-player abuse handling
+
+Added owner-authorized kick handling across the authoritative match, service, protocol, HTTP route,
+browser event summary, replay verification, and diagnostics. A kick is a permanent spectator
+transition with cleared input/respawn state and a chained `player_kicked` public event. The service
+requires the owner ticket, revokes the target session in SQLite, closes an attached target socket with
+`4003`, publishes the public snapshot, and counts the operation without exposing private data.
+Repeated kicks are idempotent and self-kicks are rejected.
+
+- The isolated bus run `1786118311405-98858-f4759354` passes 577 tests across 47 files.
+- `pnpm test:fps:abuse` covers the kick path and passes with receipt digest
+  `sha256:b729f425e76533951c6493aa9b71f1740bee65642b2e811d0d12571b4222c607`.
+- Typecheck, formatting, focused lint, and package builds pass.
+
+This is local abuse-control evidence only. Named-edge/public-edge acceptance, production
+anti-cheat/privacy operations, deployment evidence, and external retained-artifact rollback remain
+open; the FPS prototype is not competitive-play ready.
+
+## 2026-08-07 — FPS accessibility controls
+
+Added the local FPS accessibility surface in `apps/web/src/fps/accessibility.ts` and the Slayer
+panel. Preferences are validated before use and saved automatically in device-local storage. The
+panel now supports reduced motion, high-contrast HUD, color-safe reticle cues, interface scale,
+event captions, and W/A/S/D or arrow-key movement remapping. Reduced motion reaches the renderer
+through refs so it disables remote interpolation and camera smoothing without changing authoritative
+movement or network input semantics.
+
+- Focused accessibility and reduced-motion renderer coverage adds 4 tests.
+- Isolated test-bus run `1786119700610-6414-3f22579b` passes 581 tests across 47 files.
+- `pnpm typecheck`, `pnpm format:check`, focused FPS ESLint, and `pnpm build` pass.
+- The fresh 29-artifact build manifest aggregate is
+  `sha256:64fb78ced69fdbe1c13e5a8a02b26a1dc242cd73ef09f154b452889aa7be6da7`.
+
+This closes a local accessibility requirement only. Named-edge/public-edge acceptance, public-edge
+fault testing, production anti-cheat/privacy operations, deployment evidence, and external retained-
+artifact rollback remain open; the FPS prototype is not competitive-play ready.
+
+## 2026-08-07 — FPS local observability diagnostics
+
+The FPS service now records privacy-safe server-boundary input telemetry: mean client-timestamp age,
+mean absolute transit-age change, and monotonic input-sequence gaps per WebSocket connection. The
+field names deliberately avoid claiming RTT or true packet loss. Existing phase, tick, snapshot,
+persistence, combat, rejection, and resync counters remain unchanged.
+
+The browser now owns a render-only `FpsTransportTelemetry` collector. It records measured ping RTT and
+jitter, observed server envelope sequence gaps, resync requests, and authoritative prediction
+correction distance. The HUD and canvas data attributes expose these diagnostics for local acceptance;
+they never affect movement, combat, scoring, persistence, or replay. Reduced motion is now passed to
+the remote-avatar renderer, so its presentation interpolation is disabled in the actual scene path.
+
+- Focused service, telemetry, accessibility, and remote-renderer tests: 21 passed.
+- Full `pnpm test`: 584 tests passed across 50 files.
+- `pnpm typecheck`, focused FPS ESLint, `pnpm format:check`, and `pnpm build` pass.
+- Full repository lint still reports exactly 86 unrelated visual-table/movement diagnostics.
+- Browser re-acceptance was not rerun in this continuation because opening another browser is not
+  authorized for this worktree.
+
+This is local observability and presentation evidence only. Named Cloudflare Tunnel/public-edge
+acceptance, public-edge packet-loss and clock-skew testing, production anti-cheat/privacy operations,
+deployment evidence, and external retained-artifact rollback remain open; the FPS prototype is not
+competitive-play ready.
+
+## 2026-08-07 — FPS diagnostics protocol boundary and browser-gate preparation
+
+The redacted FPS diagnostics route now parses a strict `fpsDiagnosticsSchema` before returning its
+match identity, public roster, hashes, and privacy-safe metrics. The schema rejects unknown fields
+such as tickets and rejects non-finite timestamp-age values while permitting a finite negative age
+when a client clock is ahead of the server. This keeps operational telemetry outside authoritative
+state and prevents an accidental debug-field leak at the HTTP boundary.
+
+The local Playwright spec now checks the rendered transport data attributes and exercises the
+reduced-motion, high-contrast, color-safe, interface-scale, and caption preferences. Those browser
+assertions were added for the next authorized rendered run; they were not executed in this
+continuation. The final rebuilt 29-file artifact manifest aggregate is
+`sha256:65760e9a97af6f8d4c71bd9d216bc487419b287d4586d2ca3b4c40da02620868`. The prototype remains
+local-only and not competitive-play ready.
+
+## 2026-08-07 — FPS authority-level rules validation
+
+The FPS authority now validates `scoreTarget`, `durationTicks`, and `snapshotRate` when a
+`FpsMatch` is constructed, not only at the HTTP room-creation boundary. This keeps restored,
+server-internal, and test-created matches inside the same versioned rules contract. Snapshot rates
+must be safe integer divisors of the 60 Hz simulation; score targets remain bounded to 1–100 and
+durations must be positive safe integers.
+
+- Added regression coverage for invalid score target, duration, and snapshot-rate overrides.
+- The centralized test bus run `1786122728149-20120-1d38962b` passes 586 tests across 50 files.
+- `pnpm typecheck`, `pnpm format:check`, focused FPS ESLint, `git diff --check`, and staged diff
+  checks pass.
+- `pnpm build` passes; the rebuilt 29-file artifact manifest aggregate is
+  `sha256:3452938f102b217702684fa69e0c06d8e49bc3f9cef79b25154a6d49494ab9a6`.
+
+This strengthens local authority validation only. Browser re-acceptance, named-edge/public-edge
+testing, production anti-cheat/privacy operations, deployment evidence, and external rollback
+remain open; the FPS prototype remains not competitive-play ready.
+
+## 2026-08-07 — FPS WebSocket ticket transport
+
+Moved FPS browser ticket authentication out of the URL query. `FpsSlayerApp` now keeps only the
+player ID in `/ws/fps/:matchId` and offers `["fps.v1", ticket]` as WebSocket subprotocols. The
+Fastify route requires the stable protocol plus exactly one credential token, rejects a `ticket`
+query parameter, and uses the WebSocket server protocol selector to echo only `fps.v1`, never the
+credential. The pre-existing mahjong `/ws/games/:gameId` ticket flow was not changed.
+
+- Centralized test-bus run `1786124498081-17627-cb90e422`: 587 tests passed across 50 files.
+- `pnpm typecheck` and targeted Prettier pass.
+- `pnpm build` passes with 29 output files; the sorted, newline-terminated artifact manifest
+  aggregate is `sha256:9bbf0f92c1241102e0df46b531ced28213012b768eaf8287981f45c8d1efe093`.
+- The regression opens a real ephemeral TCP WebSocket with Node's native client. It covers negotiated
+  subprotocol credentials, query-ticket rejection, strict token extraction, protocol selection, and
+  the real service upgrade counter.
+- The existing Playwright two-client flow now records the FPS WebSocket URL and asserts that it has
+  only `playerId` in the query and does not contain the ticket. Browser execution remains unauthorized
+  in this continuation.
+
+The subprotocol header remains sensitive and must be redacted by edge/proxy logging. Named-edge,
+public-edge, production privacy review, deployment, and external rollback gates remain open; the
+FPS prototype is not competitive-play ready.
+
+## 2026-08-07 — FPS cancellation idempotency
+
+Made the authoritative `cancelMatch()` transition idempotent so repeated failure handling cannot
+append duplicate cancellation terminal events. Added a regression that compares the event stream
+before and after a second cancellation. The centralized test bus passes 588 tests across 50 files;
+browser, named-edge/public-edge, production anti-cheat/privacy, deployment, and external rollback
+evidence remain open.
+
+## 2026-08-07 — FPS authoritative input audit receipts
+
+Extended internal `FpsInputReceipt` records with controller provenance and authoritative application
+results: fixed-step tick, position, and velocity. Unapplied and rejected commands retain explicit
+null application values. The focused regression and package build pass; the centralized test bus
+passes 589 tests across 50 files. These fields remain checkpoint-only and are not exposed through
+public snapshots or diagnostics.
+
+### FPS stale-input lifecycle boundary — 2026-08-07
+
+- `FpsMatch` clears pending input, previous button edges, and transient action state on disconnect,
+  death, spectator expiry, and respawn. A command from an earlier connection or life cannot replay a
+  held fire/movement edge before a fresh authenticated input arrives.
+- Added a deterministic regression covering a held victim fire command through death and respawn.
+- Centralized test-bus run `1786126248058-25991-fb42ab87` passes 590 tests across 50 files.
+- Targeted Prettier and `git diff --check` pass; `pnpm typecheck` and the full `pnpm build` pass.
+- Repository-wide formatting remains blocked by 19 unrelated procedural-world files, and full
+  lint reports 88 unrelated visual-table/movement/procedural-world diagnostics. Browser/public-edge
+  acceptance remains separate and unauthorized in this worktree.
+
+### FPS checkpoint rules and identity validation — 2026-08-07
+
+- `FpsMatch.fromCheckpoint` now compares the complete canonical rules object reconstructed from the
+  stored arena and bounded overrides. Tampered rules, map, weapon-set, or other rules identity
+  fields fail closed with `fps_checkpoint_rules_hash_mismatch` before persisted state is admitted.
+- Added parameterized regression coverage for `rulesHash`, `mapHash`, and `weaponSetHash` tampering.
+- Centralized test-bus run `1786126608702-29029-a7cae5b3` passes 593 tests across 50 files.
+- FPS package build, full `pnpm build`, `pnpm typecheck`, focused FPS ESLint, Prettier, and diff
+  checks pass. Browser/public-edge acceptance remains separate and unauthorized.
+
+### FPS authoritative input contract revalidation — 2026-08-07
+
+- `FpsMatch.submitInput()` now independently validates protocol version, exact button-object shape,
+  selected weapon ID, and action-nonce type. Malformed direct/internal calls fail with
+  `invalid_input` before changing authoritative state.
+- Added regression coverage for unsupported protocol, unknown weapon, and malformed buttons.
+- Centralized test-bus run `1786127017184-33177-8957a103` passes 594 tests across 50 files.
+- FPS package build, `pnpm typecheck`, focused FPS ESLint, Prettier, and diff checks pass.
+
+### FPS checkpoint state-integrity digest — 2026-08-07
+
+- Added a canonical `checkpointHash` over every exported FPS checkpoint field except the digest.
+  `FpsMatch.fromCheckpoint` verifies the event chain, rules identity, and persisted-state digest
+  before admitting player state, receipts, or lifecycle fields.
+- Replaced the non-serializable initial `-Infinity` fire tick with a finite sentinel so checkpoint
+  JSON preserves cooldown state and remains canonical.
+- A regression that changes a persisted player score while leaving the event chain untouched now
+  fails closed with `fps_checkpoint_state_hash_mismatch`.
+- The FPS and persistence checkpoint tests pass after rebuilding `@hk-mahjong/fps`; shared test-bus
+  run `1786128077361-43130-79af07f3` passes 595 tests across 50 files.
+- The local rollback drill restores the hashed checkpoint and accepts continued input. Receipt digest:
+  `sha256:3e209c08e2cc0851a694808b548f320a11060c91ca9bce2e38c2946b23814b7e`; receipt file SHA-256:
+  `sha256:d9055eaa778eb98a5f80d80598183d33698e2f3c157699e7e863cdcf3ebe73c9`. Browser/public-edge
+  acceptance and production operations remain separate gates.
+
+### FPS total authoritative input-boundary validation — 2026-08-07
+
+- `FpsMatch.submitInput()` now rejects non-object, array, incomplete, and extra-field direct commands
+  before malformed data can be dereferenced or stored. Only the exact validated contract is copied
+  into pending state; rejected receipts normalize missing sequence and acknowledgement fields to
+  private `-1` sentinels, preserving canonical checkpoint export.
+- Added regression coverage for `null`, arrays, incomplete commands, and an extra-field command,
+  including checkpoint export after rejection. Focused FPS/persistence tests, typecheck, focused
+  lint, formatting, and diff checks pass. Browser/public-edge and production operations remain
+  separate gates.
+
+### FPS final local validation after total authoritative input-boundary hardening — 2026-08-07
+
+- The server-owned test bus passes 596 tests across 50 files and 146 suites, including the malformed
+  command and checkpoint state-hash regressions.
+- `pnpm typecheck`, focused FPS ESLint, targeted Prettier, `git diff --check`, and `pnpm build` pass.
+  The 29-file artifact manifest aggregate is
+  `sha256:a2a4c59af15c7d27ad15876e90861e264ffe39dfcd449721f11770d7cf8c1895`.
+- Refreshed local receipts pass: abuse `sha256:b729f425e76533951c6493aa9b71f1740bee65642b2e811d0d12571b4222c607`,
+  network `sha256:d6d711644678a498d0ea5815e0ae835564f9a3717e76c915c35992841d40bcdd`, rollback
+  `sha256:3e209c08e2cc0851a694808b548f320a11060c91ca9bce2e38c2946b23814b7e`, and retained rollback
+  `sha256:522d62aff381b1daaf07a8cf23e321fd54da821c523237b882b393be8d5d17cb`.
+- Full repository lint remains blocked by 86 unrelated diagnostics and full formatting by 19
+  unrelated procedural-world files. Browser, public-edge, deployment, production anti-cheat/
+  privacy, and external rollback gates remain open.
+
+### FPS monotonic fixed-step scheduler — 2026-08-07
+
+- Replaced one-timer-callback/one-tick scheduling in `FpsMatchService` with a server-owned
+  monotonic elapsed-time accumulator. Delayed callbacks catch up only to the configured fixed
+  tick and are bounded to eight ticks; negative or non-finite samples reset the accumulator.
+- Added a focused fake-clock regression for three-tick catch-up and impossible-delta clamping.
+- The refreshed server-owned test bus passes 597 tests across 50 files and 146 suites. Typecheck,
+  focused FPS ESLint, targeted Prettier, `git diff --check`, and `pnpm build` pass. The 29-file
+  artifact manifest aggregate is `sha256:6e411bd79c59856f945918e646f2c1925a1d0b23b74e3b077b351311412ed1c9`.
+- Full repository lint/format, browser re-acceptance, named-edge/public-edge, production
+  anti-cheat/privacy, deployment, and external rollback gates remain open; readiness stays
+  **not ready for competitive play**.

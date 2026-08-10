@@ -9,6 +9,7 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { createSeededRandom, getTileDefinition, type TileTypeId } from "@hk-mahjong/core/public";
+import type { PlayerObservationDto } from "@hk-mahjong/protocol";
 
 import authoredVisualMapInput from "./maps/penthouse.json" with { type: "json" };
 import {
@@ -791,7 +792,7 @@ export const resolveReticleAimNdc = (
 export interface PenthouseSceneAnchors {
   readonly tableRoot: THREE.Object3D;
   readonly playerHand: THREE.Object3D;
-  readonly opponentHands: Record<"north" | "east" | "west", THREE.Object3D>;
+  readonly opponentHands: Record<"south" | "north" | "east" | "west", THREE.Object3D>;
   readonly discardZones: Record<"south" | "north" | "east" | "west", THREE.Object3D>;
   readonly meldZones: Record<"south" | "north" | "east" | "west", THREE.Object3D>;
   readonly wallRoot: THREE.Object3D;
@@ -822,6 +823,7 @@ export interface MahjongTableMount {
   readonly applyDamage: (damage: number) => PlayerVitalsDamageResult;
   readonly getVitals: () => PlayerVitalsState;
   readonly resetVitals: () => PlayerVitalsState;
+  readonly setMultiplayerObservation: (observation: PlayerObservationDto | null) => void;
   readonly debug: MahjongTableDebugControls;
   readonly dispose: () => void;
   readonly anchors: PenthouseSceneAnchors;
@@ -8722,6 +8724,7 @@ const createPresentationAnchors = (
   };
   const playerHand = make("AnchorPlayerHand", new THREE.Vector3(0, TABLE_TOP_Y + 0.22, 1.5));
   const opponentHands = {
+    south: make("AnchorOpponentHandSouth", new THREE.Vector3(0, TABLE_TOP_Y + 0.22, 1.5)),
     north: make("AnchorOpponentHandNorth", new THREE.Vector3(0, TABLE_TOP_Y + 0.22, -1.5)),
     east: make("AnchorOpponentHandEast", new THREE.Vector3(1.5, TABLE_TOP_Y + 0.22, 0)),
     west: make("AnchorOpponentHandWest", new THREE.Vector3(-1.5, TABLE_TOP_Y + 0.22, 0)),
@@ -10741,6 +10744,182 @@ export const createMahjongTableScene = (
     addLabel(scene, "EAST · FAST", new THREE.Vector3(1.78, 1.38, 0), "#e94136"),
     addLabel(scene, "WEST · BALANCED", new THREE.Vector3(-1.78, 1.38, 0), "#73dce8"),
   ];
+  const liveHandAnchors = [anchors.playerHand, ...Object.values(anchors.opponentHands)] as const;
+  const liveDiscardAnchors = Object.values(anchors.discardZones);
+  const liveMeldAnchors = Object.values(anchors.meldZones);
+  const livePresentationObjects: THREE.Object3D[] = [];
+  scene.traverse((object) => {
+    if (
+      object.name === "PlayerHand" ||
+      object.name === "ExposedMeld" ||
+      object.name.startsWith("DiscardZone")
+    ) {
+      livePresentationObjects.push(object);
+    }
+  });
+  let liveObservationActive = false;
+  let liveStatusSprite: THREE.Sprite | null = null;
+
+  const seatPosition = (seat: PlayerObservationDto["viewer"]["seat"]): THREE.Vector3 => {
+    switch (seat) {
+      case "south":
+        return new THREE.Vector3(0, TABLE_TOP_Y + 0.22, 1.5);
+      case "north":
+        return new THREE.Vector3(0, TABLE_TOP_Y + 0.22, -1.5);
+      case "east":
+        return new THREE.Vector3(1.5, TABLE_TOP_Y + 0.22, 0);
+      case "west":
+        return new THREE.Vector3(-1.5, TABLE_TOP_Y + 0.22, 0);
+    }
+  };
+  const seatRotation = (seat: PlayerObservationDto["viewer"]["seat"]): number => {
+    switch (seat) {
+      case "south":
+        return 0;
+      case "north":
+        return Math.PI;
+      case "east":
+        return -Math.PI / 2;
+      case "west":
+        return Math.PI / 2;
+    }
+  };
+  const clearLiveAnchor = (anchor: THREE.Object3D): void => {
+    while (anchor.children.length > 0) {
+      const child = anchor.children[0];
+      if (child === undefined) {
+        break;
+      }
+      anchor.remove(child);
+      disposeObject(child);
+    }
+  };
+  const tileTypeFromInstance = (instanceId: string): TileTypeId => {
+    const separator = instanceId.lastIndexOf("#");
+    return (separator < 1 ? instanceId : instanceId.slice(0, separator)) as TileTypeId;
+  };
+  const renderTileRow = (
+    anchor: THREE.Object3D,
+    tiles: readonly TileTypeId[],
+    faceUp: boolean,
+    width = 0.1,
+    height = 0.16,
+    depth = 0.065,
+  ): void => {
+    const start = -((tiles.length - 1) * 0.115) / 2;
+    tiles.forEach((tile, index) => {
+      const tileMesh = faceUp
+        ? createTile(textureCache, { tile, faceUp: true, width, height, depth })
+        : createTile(textureCache, { faceUp: false, width, height, depth });
+      tileMesh.position.set(start + index * 0.115, 0, 0);
+      anchor.add(tileMesh);
+    });
+  };
+  const renderDiscards = (
+    anchor: THREE.Object3D,
+    discards: readonly PlayerObservationDto["players"][number]["discards"][number][],
+  ): void => {
+    discards.forEach((discard, index) => {
+      const tile = createTile(textureCache, {
+        tile: discard.tileType as TileTypeId,
+        faceUp: true,
+        bothSides: true,
+        width: 0.08,
+        height: 0.115,
+        depth: 0.05,
+      });
+      tile.position.set(((index % 6) - 2.5) * 0.09, 0, Math.floor(index / 6) * 0.105);
+      anchor.add(tile);
+    });
+  };
+  const renderMelds = (
+    anchor: THREE.Object3D,
+    melds: readonly PlayerObservationDto["players"][number]["melds"][number][],
+  ): void => {
+    melds.forEach((meld, index) => {
+      const row = new THREE.Group();
+      row.position.z = index * 0.19;
+      renderTileRow(row, meld.tileTypes as readonly TileTypeId[], true, 0.085, 0.13, 0.055);
+      anchor.add(row);
+    });
+  };
+  const setMultiplayerObservation = (observation: PlayerObservationDto | null): void => {
+    livePresentationObjects.forEach((object) => {
+      object.visible = observation === null;
+    });
+    liveObservationActive = observation !== null;
+    for (const anchor of [
+      ...liveHandAnchors,
+      ...liveDiscardAnchors,
+      ...liveMeldAnchors,
+      anchors.actionSurface,
+    ]) {
+      clearLiveAnchor(anchor);
+    }
+    if (liveStatusSprite !== null) {
+      anchors.roundStatusSurface.remove(liveStatusSprite);
+      liveStatusSprite.material.map?.dispose();
+      liveStatusSprite.material.dispose();
+      liveStatusSprite = null;
+    }
+    if (observation === null) {
+      return;
+    }
+    const viewerSeat = observation.viewer.seat;
+    anchors.playerHand.position.copy(seatPosition(viewerSeat));
+    anchors.playerHand.rotation.y = seatRotation(viewerSeat);
+    for (const seat of ["south", "north", "east", "west"] as const) {
+      anchors.opponentHands[seat].position.copy(seatPosition(seat));
+      anchors.opponentHands[seat].rotation.y = seatRotation(seat);
+      anchors.discardZones[seat].rotation.y = seatRotation(seat);
+      anchors.meldZones[seat].rotation.y = seatRotation(seat);
+    }
+    const viewerTiles: TileTypeId[] = observation.private.concealedTiles.map(tileTypeFromInstance);
+    if (observation.private.drawnTileId !== null) {
+      viewerTiles.push(tileTypeFromInstance(observation.private.drawnTileId));
+    }
+    renderTileRow(anchors.playerHand, viewerTiles, true);
+    for (const player of observation.players) {
+      const handAnchor =
+        player.seat === viewerSeat ? anchors.playerHand : anchors.opponentHands[player.seat];
+      if (player.seat !== viewerSeat) {
+        clearLiveAnchor(handAnchor);
+        renderTileRow(
+          handAnchor,
+          Array.from({ length: player.concealedTileCount }, () => "characters.1"),
+          false,
+        );
+      }
+      clearLiveAnchor(anchors.discardZones[player.seat]);
+      clearLiveAnchor(anchors.meldZones[player.seat]);
+      renderDiscards(anchors.discardZones[player.seat], player.discards);
+      renderMelds(anchors.meldZones[player.seat], player.melds);
+    }
+    const actionIndicator = new THREE.Mesh(
+      new THREE.RingGeometry(0.14, 0.18, 32),
+      new THREE.MeshBasicMaterial({
+        color: observation.legalActions.length > 0 ? COLORS.red : COLORS.cyan,
+        transparent: true,
+        opacity: 0.78,
+      }),
+    );
+    actionIndicator.rotation.x = -Math.PI / 2;
+    anchors.actionSurface.add(actionIndicator);
+    const statusText = `${viewerSeat.toUpperCase()} · REV ${String(observation.revision)} · WALL ${String(observation.round.liveWallCount)} · ${observation.round.activePlayerId === observation.viewer.playerId ? "YOUR TURN" : "WAITING"}`;
+    liveStatusSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: makeLabelTexture(
+          statusText,
+          observation.legalActions.length > 0 ? "#e94136" : "#73dce8",
+        ),
+        transparent: true,
+        depthTest: false,
+      }),
+    );
+    liveStatusSprite.userData.dofIgnore = true;
+    liveStatusSprite.scale.set(1.35, 0.22, 1);
+    anchors.roundStatusSurface.add(liveStatusSprite);
+  };
 
   const sunObject = scene.getObjectByName("SunKeyLight");
   if (sunObject instanceof THREE.DirectionalLight) {
@@ -11174,7 +11353,7 @@ export const createMahjongTableScene = (
     // making the zoom pivot around the screen center.
     syncReticleZoomProjection();
     for (const label of seatLabels) {
-      label.visible = !isCrouched || activeView !== "seat";
+      label.visible = !liveObservationActive && (!isCrouched || activeView !== "seat");
     }
     const firstPersonActive =
       firstPersonControls.enabled &&
@@ -12092,6 +12271,7 @@ export const createMahjongTableScene = (
     applyDamage: damagePlayer,
     getVitals: () => playerVitals,
     resetVitals: resetVitalsState,
+    setMultiplayerObservation,
     debug: {
       setCameraPreset: setDebugCameraPreset,
       setFov: setDebugFov,

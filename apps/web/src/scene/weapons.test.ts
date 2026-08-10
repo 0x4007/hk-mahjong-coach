@@ -427,7 +427,10 @@ describe("damage-driven barrel temperature", () => {
     );
 
     expect(afterMiss).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C);
-    expect(afterEightPelletHits).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C + 128);
+    expect(afterEightPelletHits).toBe(
+      WEAPON_BARREL_AMBIENT_TEMPERATURE_C +
+        8 * shotgunPelletDamage * WEAPON_BARREL_HEAT_CELSIUS_PER_DAMAGE,
+    );
   });
 
   it("keeps seven 100-damage sniper hits below the glow threshold", () => {

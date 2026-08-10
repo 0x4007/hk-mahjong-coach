@@ -172,6 +172,24 @@ export interface AcceptedDecisionEvidenceInput {
   analysisFacts: readonly Omit<AnalysisFactRecordInput, "decisionId">[];
 }
 
+export interface CommitNotificationActionInput {
+  requestId: string;
+  playerId: string;
+  actionId: string;
+  source: "human" | "bot" | "timeout_fallback";
+  fallback: {
+    source: "timeout_fallback";
+    reason: "action_timeout" | "disconnect_timeout";
+    deadline: string;
+    appliedAt: string;
+  } | null;
+}
+
+export interface CommitNotificationInput {
+  notificationId: string;
+  action: CommitNotificationActionInput | null;
+}
+
 export interface AppendAcceptedCommandInput {
   key: GameKey;
   requestId: string;
@@ -188,6 +206,8 @@ export interface AppendAcceptedCommandInput {
   sessionConfiguration?: unknown;
   /** Optional learner evidence committed atomically with this accepted command. */
   decisionEvidence?: AcceptedDecisionEvidenceInput;
+  /** Optional Deno KV outbox record committed atomically with this accepted command. */
+  commitNotification?: CommitNotificationInput;
 }
 
 export interface AppendAcceptedCommandResult {
@@ -453,6 +473,8 @@ export interface ImportResult {
 export interface PersistenceRepository {
   close(): void;
   appendAcceptedCommand(input: AppendAcceptedCommandInput): AppendAcceptedCommandResult;
+  /** Returns a durable idempotency receipt without exposing command payloads. */
+  getCommandReceipt(key: GameKey, requestId: string): CommandReceipt | null;
   loadGame(key: GameKey): LoadedGame;
   loadLatestResumableGame(learnerId: string | null): LoadedResumableGame | null;
   loadGameAtRevision(key: GameKey, revision: number): LoadedGame;

@@ -98,6 +98,9 @@ importers:
       '@hk-mahjong/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@hk-mahjong/fps':
+        specifier: workspace:*
+        version: link:../../packages/fps
       '@hk-mahjong/hk-rules':
         specifier: workspace:*
         version: link:../../packages/hk-rules
@@ -107,9 +110,18 @@ importers:
       '@hk-mahjong/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
+      better-sqlite3:
+        specifier: 13.0.2
+        version: 13.0.2
       fastify:
         specifier: 5.11.0
         version: 5.11.0
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   apps/web:
     dependencies:
@@ -119,6 +131,9 @@ importers:
       '@hk-mahjong/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@hk-mahjong/fps':
+        specifier: workspace:*
+        version: link:../../packages/fps
       '@hk-mahjong/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -186,6 +201,12 @@ importers:
 
   packages/core: {}
 
+  packages/fps:
+    dependencies:
+      '@hk-mahjong/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/hk-rules:
     dependencies:
       '@hk-mahjong/core':
@@ -200,6 +221,9 @@ importers:
       '@hk-mahjong/core':
         specifier: workspace:*
         version: link:../core
+      '@hk-mahjong/fps':
+        specifier: workspace:*
+        version: link:../fps
       better-sqlite3:
         specifier: 13.0.2
         version: 13.0.2
