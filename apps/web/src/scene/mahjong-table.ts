@@ -1612,6 +1612,8 @@ const PLAYER_COLLIDER_HALF_HEIGHT = PLAYER_CAPSULE_HALF_HEIGHT;
 const PLAYER_COLLIDER_CENTER_HEIGHT = PLAYER_CAPSULE_CENTER_HEIGHT;
 const SWIPE_LOOK_SENSITIVITY = 0.00594;
 const TOUCH_SIDEWAYS_SPRINT_FRACTION = 0.5;
+/** A touch joystick past its dead zone is the mobile run request. */
+export const TOUCH_SPRINT_MIN_MAGNITUDE = 0.05;
 const WALK_SPEED_RATIO = PLAYER_WALK_SPEED_RATIO;
 const TROT_SPEED_MULTIPLIER = PLAYER_TROT_MULTIPLIER;
 const CROUCH_SPEED_MULTIPLIER = 0.5;
@@ -3517,6 +3519,14 @@ const getTouchSprintCap = (forwardDirection: number): number => {
   const curvedForwardBias = forwardBias * forwardBias;
   return TOUCH_SIDEWAYS_SPRINT_FRACTION + (1 - TOUCH_SIDEWAYS_SPRINT_FRACTION) * curvedForwardBias;
 };
+
+/**
+ * Mobile movement has no separate sprint key. Any meaningful joystick deflection
+ * requests the same full-speed run as a desktop double-tap; the analogue
+ * magnitude and direction cap still provide fine speed control.
+ */
+export const resolveTouchSprintRequest = (touchMagnitude: number, crouching: boolean): boolean =>
+  !crouching && Number.isFinite(touchMagnitude) && touchMagnitude > TOUCH_SPRINT_MIN_MAGNITUDE;
 
 const clampUnit = (value: number): number => THREE.MathUtils.clamp(value, 0, 1);
 
@@ -16639,7 +16649,12 @@ export const createMahjongTableScene = (
         right = touchRight * touchDirectionScale;
         movementMagnitude = touchMagnitude;
         const sprintCap = getTouchSprintCap(forward);
-        const fastMovementRequested = isSprinting && !crouching && touchMagnitude > 0.05;
+        const fastMovementRequested = resolveTouchSprintRequest(touchMagnitude, crouching);
+        if (fastMovementRequested) {
+          // A joystick run must not inherit the hidden desktop walking toggle
+          // left behind by a previous crouch/uncrouch action.
+          isWalkingMode = false;
+        }
         sprintingMovement =
           fastMovementRequested &&
           !reloadingMovement &&
@@ -16649,20 +16664,16 @@ export const createMahjongTableScene = (
         }
         const touchSpeedMultiplier = crouching
           ? CROUCH_SPEED_MULTIPLIER
-          : isWalkingMode
-            ? WALK_SPEED_MULTIPLIER
-            : sprintingMovement
-              ? SPRINT_MULTIPLIER * sprintCap
-              : TROT_SPEED_MULTIPLIER;
+          : sprintingMovement
+            ? SPRINT_MULTIPLIER * sprintCap
+            : TROT_SPEED_MULTIPLIER;
         const reloadTouchSpeedMultiplier = reloadingMovement
           ? Math.min(
               (crouching
                 ? CROUCH_SPEED_MULTIPLIER
-                : isWalkingMode
-                  ? WALK_SPEED_MULTIPLIER
-                  : fastMovementRequested
-                    ? SPRINT_MULTIPLIER * sprintCap
-                    : TROT_SPEED_MULTIPLIER) * touchMagnitude,
+                : fastMovementRequested
+                  ? SPRINT_MULTIPLIER * sprintCap
+                  : TROT_SPEED_MULTIPLIER) * touchMagnitude,
               TROT_SPEED_MULTIPLIER,
             )
           : touchSpeedMultiplier * touchMagnitude;

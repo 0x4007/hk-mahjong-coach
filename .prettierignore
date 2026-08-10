@@ -6,3 +6,11 @@ test-results
 .codex-worktrees
 pnpm-lock.yaml
 spec.md
+# The Deno Deploy surface is formatted and checked by `deno task check`.
+deno.json
+main.ts
+main_test.ts
+src/auth.ts
+deno/
+public/
+.github/workflows/deno-deploy.yml

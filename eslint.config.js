@@ -10,6 +10,11 @@ export default tseslint.config(
       "playwright-report/**",
       "test-results/**",
       ".codex-worktrees/**",
+      ".deploy-root/**",
+      "deno/**",
+      "main.ts",
+      "main_test.ts",
+      "src/auth.ts",
     ],
   },
   {

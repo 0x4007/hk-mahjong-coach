@@ -1,5 +1,59 @@
 # Implementation status
 
+## 2026-08-08 — Mobile-playability Deno deployment
+
+- Built `@hk-mahjong/web` after the mobile control changes and deployed the prepared static game
+  root through the existing Deno Deploy app `hk-mahjong-coach` in organization `0x4007`.
+- Production revision `ts9qfyfne3e0` reached `succeeded`. The live game root is
+  `https://hk-mahjong-coach.0x4007.deno.net/`; `/api/health` returned `{"status":"ready"}`, the
+  root returned the Vite game HTML (HTTP 200), and its hashed JavaScript asset returned HTTP 200.
+  The account portal remains available at `/portal/`.
+- The live bundle contains the mobile `Melee attack`, `Switch weapon`, and `full deflection runs`
+  affordances. No production account or user data was created.
+
+## 2026-08-08 — Mobile run and combat actions
+
+- Restored the mobile joystick's analogue run path. A meaningful joystick deflection now requests
+  the full-speed sprint path automatically; O₂ affordability and the existing forward/diagonal/
+  sideways direction cap still govern the resolved speed, and crouch remains slow.
+- Added mobile Melee and Switch actions. Switching uses the existing gun/melee handoff path, so a
+  held melee prop is stashed before a gun cycle and is restored if the cycle cannot complete.
+- Reflowed the mobile action cluster into a two-column grid so the added actions remain reachable
+  in landscape without extending a seven-button vertical stack beyond the viewport.
+- Added a focused regression for the touch sprint request threshold.
+
+## 2026-08-08 — Live Deno Deploy verification
+
+- Ran the real `deno task deploy` with the mapped `DENO_DEPLOY_TOKEN_0X4007` credential. The first
+  attempt found two imported-template defects before publishing: KV configuration was referenced
+  before initialization, and the existing-database fallback did not parse the current CLI table
+  format. Both were fixed without exposing the credential.
+- The retry configured `hk-mahjong-coach`, assigned the existing namespaced-safe `nyc-financial-health-kv`
+  database because the plan has a one-database limit, published final revision `4je5g0bp8tg3`, and
+  waited for `succeeded`. KV setup also formats `deno.json` after the Deno CLI update so the deploy
+  task remains clean under the repository formatter.
+- Live verification passed at `https://hk-mahjong-coach.0x4007.deno.net`: `/api/health` returned
+  `{"status":"ready"}`, `/` returned HTML `200`, `/api/account/session` returned the setup-required
+  anonymous state, and `/api/admin/users` returned the expected unauthenticated `401`.
+
+## 2026-08-08 — Composite Deno Deploy runtime and KV authentication
+
+- Imported the Deno app-template deployment shape into the repository without replacing the local
+  Node/Fastify engine: `deno.json`, a Deno `main.ts` handler, deploy-root packaging, Deno Deploy API
+  upload, KV assignment, production health verification, and the main-branch workflow now live in
+  the canonical checkout. The deploy root now also carries the built Vite game at `/`; the account
+  portal remains available at `/portal`.
+- Added the template authentication baseline in `src/auth.ts`: PBKDF2 password records, first-user
+  `super_admin` bootstrap, explicit roles/scopes, 30-day HttpOnly sessions, referrals, and hashed
+  short-lived agent tokens. Public responses omit password and token hashes.
+- Added a small account/admin portal under `public/` and Deno tests covering bootstrap, protected
+  admin routes, invalid credentials, and agent-token sessions.
+- Validation: `deno task check` passes (4 tests). `deno task deploy:prepare` produces a dedicated
+  `.deploy-root` with the Deno runtime, static portal, built game assets when present, and metadata. The existing full-repository
+  `pnpm lint` and `pnpm typecheck` remain red on pre-existing dirty visual/session work (`90` lint
+  findings and type errors in `apps/server/src/index.test.ts`, `packages/session`, and e2e fixtures);
+  no unrelated files were changed to mask those failures.
+
 ## 2026-08-08 — Warehouse lens-flare sprites
 
 - Added 26 deterministic `THREE.Sprite` elements: halo and horizontal streak pairs for eight high-bay fixtures, the central

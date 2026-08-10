@@ -1,0 +1,58 @@
+name: Deno Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deno-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Build the mobile game
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @hk-mahjong/web build
+
+      - name: Validate Deno runtime and auth
+        run: deno task check
+
+      - name: Require Deno Deploy token
+        env:
+          DENO_DEPLOY_TOKEN_0X4007: ${{ secrets.DENO_DEPLOY_TOKEN_0X4007 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DENO_DEPLOY_TOKEN_0X4007:-}" ]; then
+            echo "::error::DENO_DEPLOY_TOKEN_0X4007 repo or org secret is required"
+            exit 1
+          fi
+
+      - name: Deploy production
+        env:
+          DENO_DEPLOY_TOKEN_0X4007: ${{ secrets.DENO_DEPLOY_TOKEN_0X4007 }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: deno task deploy

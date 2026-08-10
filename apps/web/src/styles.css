@@ -1365,8 +1365,8 @@ button[aria-pressed="true"] {
 }
 
 .mobile-action-controls {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(4.2rem, 1fr));
   align-items: end;
   gap: 0.45rem;
   margin-left: auto;
@@ -1383,6 +1383,7 @@ button[aria-pressed="true"] {
 }
 
 .mobile-action-fire {
+  grid-column: 1 / -1;
   color: #15191a;
   background: var(--accent-warm);
 }

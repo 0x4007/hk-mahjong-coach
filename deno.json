@@ -1,0 +1,26 @@
+{
+  "tasks": {
+    "dev": "deno run --watch --unstable-kv --allow-net --allow-read=public --allow-env=DENO_DEPLOYMENT_ID main.ts",
+    "start": "deno run --unstable-kv --allow-net --allow-read=public --allow-env=DENO_DEPLOYMENT_ID main.ts",
+    "check": "deno fmt --check deno.json main.ts main_test.ts src public deno .github/workflows/deno-deploy.yml && deno lint main.ts main_test.ts src deno && deno check --unstable-kv main.ts src/*.ts deno/*.ts && deno test --unstable-kv --allow-read --allow-write --allow-env=HOME,TMPDIR --allow-run=deno main_test.ts deno/prepare_deploy_root_test.ts",
+    "test": "deno test --unstable-kv --allow-read --allow-write --allow-env=HOME,TMPDIR --allow-run=deno main_test.ts deno/prepare_deploy_root_test.ts",
+    "deploy:prepare": "deno run --unstable-kv --allow-read=main.ts,src,public,apps/web/dist,deno.json,README.md,deno.lock --allow-write=.deploy-root --allow-env=HOME,TMPDIR,GITHUB_SHA,GITHUB_RUN_ID deno/prepare_deploy_root.ts .deploy-root",
+    "deploy:kv": "deno run --allow-read=deno.json --allow-env=DENO_DEPLOY_TOKEN_0X4007 --allow-net=api.deno.com --allow-run=deno deno/ensure_deno_kv.ts && deno fmt deno.json",
+    "deploy": "deno task deploy:prepare && deno task deploy:kv && deno run --allow-env=DENO_DEPLOY_TOKEN_0X4007,GITHUB_SHA,GITHUB_RUN_ID --allow-net=api.deno.com --allow-read=.deploy-root,deno.json deno/deploy_deno_api.ts .deploy-root && deno task deploy:verify",
+    "deploy:verify": "deno run --allow-read=deno.json --allow-net deno/verify_deployment.ts"
+  },
+  "deploy": {
+    "org": "0x4007",
+    "app": "hk-mahjong-coach"
+  },
+  "fmt": {
+    "lineWidth": 100,
+    "semiColons": true,
+    "singleQuote": false
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  }
+}

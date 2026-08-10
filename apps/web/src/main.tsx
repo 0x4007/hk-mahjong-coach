@@ -1653,6 +1653,12 @@ const App = (): React.JSX.Element => {
   const fire = (): void => {
     mountRef.current?.fire();
   };
+  const melee = (): void => {
+    mountRef.current?.melee();
+  };
+  const switchWeapon = (): void => {
+    mountRef.current?.cycleWeapon(1);
+  };
   const interact = (): void => {
     mountRef.current?.interact();
   };
@@ -2130,6 +2136,24 @@ const App = (): React.JSX.Element => {
                   Jump
                 </button>
                 <button
+                  aria-label="Melee attack"
+                  className="mobile-action-button"
+                  onClick={() => handleMobileActionClick(melee)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(melee, event)}
+                  type="button"
+                >
+                  Melee
+                </button>
+                <button
+                  aria-label="Switch weapon"
+                  className="mobile-action-button"
+                  onClick={() => handleMobileActionClick(switchWeapon)}
+                  onPointerDown={(event) => handleMobileActionPointerDown(switchWeapon, event)}
+                  type="button"
+                >
+                  Switch
+                </button>
+                <button
                   className="mobile-action-button mobile-action-fire"
                   onClick={() => handleMobileActionClick(fire)}
                   onPointerDown={(event) => handleMobileActionPointerDown(fire, event)}
@@ -2159,7 +2183,7 @@ const App = (): React.JSX.Element => {
           <footer className="scene-card-footer scene-overlay scene-overlay-footer">
             <p>
               {isMobile
-                ? "Joystick move · swipe look · Equip · Fire · Reload · Crouch · Jump"
+                ? "Joystick move · full deflection runs · swipe look · Melee · Switch · Equip · Fire · Reload · Crouch · Jump"
                 : "Mouse look · WASD move · double-tap sprint · Command/right-click zoom · E equip · click fire · R reload · Q throw · 0 holster · 1–6 switch · Shift crouch · Space jump · Esc release"}
             </p>
             <span className="scene-credit">Procedural geometry · no external assets</span>

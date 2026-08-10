@@ -44,6 +44,8 @@ import {
   resolveWalkingModeAfterJump,
   resolveCrouchedStateAfterSprint,
   resolveSprintRequestAfterO2Check,
+  resolveTouchSprintRequest,
+  TOUCH_SPRINT_MIN_MAGNITUDE,
   shouldInterruptReloadForSprint,
   shouldInterruptReloadForMelee,
   resolveJumpLaunchSpeed,
@@ -152,6 +154,13 @@ class MemoryStorage implements Storage {
 }
 
 describe("player movement speed", () => {
+  it("turns a meaningful mobile joystick deflection into a sprint request", () => {
+    expect(resolveTouchSprintRequest(TOUCH_SPRINT_MIN_MAGNITUDE, false)).toBe(false);
+    expect(resolveTouchSprintRequest(TOUCH_SPRINT_MIN_MAGNITUDE + 0.01, false)).toBe(true);
+    expect(resolveTouchSprintRequest(1, true)).toBe(false);
+    expect(resolveTouchSprintRequest(Number.NaN, false)).toBe(false);
+  });
+
   it("ends the sprint request when its O₂ slice is unaffordable", () => {
     expect(resolveSprintRequestAfterO2Check(true, false)).toBe(false);
     expect(resolveSprintRequestAfterO2Check(true, true)).toBe(true);

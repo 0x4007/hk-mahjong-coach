@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hong Kong Mahjong Coach</title>
+    <link rel="stylesheet" href="/portal/styles.css">
+  </head>
+  <body data-role="guest">
+    <main>
+      <header>
+        <p>Hong Kong Mahjong Coach</p>
+        <h1>Learn the table.</h1>
+        <p>Accounts are stored in the Deno Deploy KV database for this deployment.</p>
+      </header>
+
+      <section data-panel="auth">
+        <nav aria-label="Authentication">
+          <button data-mode="register" aria-current="true" type="button">Register</button>
+          <button data-mode="login" aria-current="false" type="button">Sign in</button>
+        </nav>
+        <form data-auth-form>
+          <label>Name <input name="name" autocomplete="name"></label>
+          <label>Email <input name="email" type="email" autocomplete="email" required></label>
+          <label>Password <input name="password" type="password" minlength="10" autocomplete="current-password" required></label>
+          <label
+            data-referral-row>Referral code <input name="referralCode" autocomplete="off"></label>
+          <button type="submit">Continue</button>
+        </form>
+      </section>
+
+      <section data-panel="account" hidden>
+        <p>Signed in</p>
+        <h2 data-account-name></h2>
+        <dl>
+          <div>
+            <dt>Email</dt>
+            <dd data-account-email></dd>
+          </div>
+          <div>
+            <dt>Role</dt>
+            <dd data-account-role></dd>
+          </div>
+          <div>
+            <dt>Referral</dt>
+            <dd data-account-referral></dd>
+          </div>
+        </dl>
+        <button data-logout type="button">Sign out</button>
+      </section>
+
+      <section data-panel="admin" hidden>
+        <p>Administration</p>
+        <h2>Users</h2>
+        <div data-users></div>
+        <form data-agent-token-form>
+          <label>User email <input name="email" type="email" required></label>
+          <label>Token label <input name="label" value="Coach CLI"></label>
+          <button type="submit">Mint agent token</button>
+        </form>
+        <pre data-agent-token-output hidden></pre>
+      </section>
+
+      <p data-status role="status"></p>
+    </main>
+    <script type="module" src="/portal/app.js"></script>
+  </body>
+</html>

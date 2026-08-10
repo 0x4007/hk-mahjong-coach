@@ -217,6 +217,30 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/session:
+    dependencies:
+      '@hk-mahjong/analysis':
+        specifier: workspace:*
+        version: link:../analysis
+      '@hk-mahjong/bots':
+        specifier: workspace:*
+        version: link:../bots
+      '@hk-mahjong/coach':
+        specifier: workspace:*
+        version: link:../coach
+      '@hk-mahjong/core':
+        specifier: workspace:*
+        version: link:../core
+      '@hk-mahjong/hk-rules':
+        specifier: workspace:*
+        version: link:../hk-rules
+      '@hk-mahjong/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      '@hk-mahjong/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/test-fixtures:
     dependencies:
       '@hk-mahjong/analysis':

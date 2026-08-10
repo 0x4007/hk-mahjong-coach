@@ -1,5 +1,63 @@
 # Architecture and implementation log
 
+## 2026-08-08 — Mobile run and combat action controls
+
+The mobile scene keeps one analogue movement surface. A joystick deflection beyond the dead zone
+requests the full-speed run path automatically; the joystick magnitude remains continuous, and the
+existing direction-aware cap keeps forward movement at 100%, forward diagonals below that, and
+sideways/backward movement at the deliberate lower cap. Sprint still consumes O₂ and falls back to
+trot when the reserve cannot afford the slice. Crouch bypasses the run request and keeps its slower
+posture speed.
+
+The mobile action cluster now exposes Melee and Switch in addition to Crouch, Jump, Fire, Equip,
+and Reload. Melee and weapon cycling call the same mount actions used by desktop input, including
+the existing melee/gun handoff and reload/zoom safety rules. The action buttons use a compact
+two-column layout so they stay reachable in landscape.
+
+## 2026-08-08 — Mobile-playability Deno deployment
+
+The built Vite game was published through the existing `hk-mahjong-coach` Deno Deploy app in
+organization `0x4007`. Revision `ts9qfyfne3e0` reached `succeeded`. The game is served at
+`https://hk-mahjong-coach.0x4007.deno.net/`; the live root and its hashed JavaScript asset both
+returned HTTP 200, and `/api/health` returned `{"status":"ready"}`. The Deno account portal is
+served separately at `/portal/`.
+
+This is static game delivery: the local Node/Fastify server remains the authoritative engine/API
+runtime, and the Deno surface does not claim to provide the local SQLite game session.
+
+## 2026-08-08 — Deno Deploy live acceptance
+
+The Deno Deploy path is live and verified for app `hk-mahjong-coach` in organization `0x4007`.
+The final production revision `4je5g0bp8tg3` reached `succeeded`, and the deployment verifier observed
+`https://hk-mahjong-coach.0x4007.deno.net/api/health` returning `{"status":"ready"}`. The static
+portal returned HTTP 200, anonymous session discovery returned `setupRequired: true`, and the
+admin users route rejected an anonymous request with HTTP 401.
+
+The account is at its one-Deno-KV-instance limit, so the deploy script now reuses the existing
+`nyc-financial-health-kv` database. Authentication keys remain isolated by the
+`hk_mahjong_coach/auth/v1` prefix; no production account was created during this read-only smoke.
+
+## 2026-08-08 — Deno Deploy and hosted authentication boundary
+
+The repository has two deliberate runtime boundaries. The local learning game remains the
+Node/Fastify application with the authoritative TypeScript engine and SQLite persistence. The
+optional Deno Deploy runtime is a separate `Deno.serve` entrypoint that serves the built Vite game
+at `/` and the hosted account portal at `/portal`; it does not import `better-sqlite3` or claim to
+run the local engine on Deno Deploy.
+
+The Deno entrypoint uses the composite template's Deno KV authentication model. Keys are namespaced
+under `hk_mahjong_coach/auth/v1`; passwords are PBKDF2-SHA-256 records, sessions are 30-day hashed
+tokens in HttpOnly SameSite cookies, and agent tokens are stored only as hashes with a maximum
+30-day lifetime. The first account becomes `super_admin`; later registrations are `user` accounts.
+Admin APIs can list/create users, change roles (with self-demotion protection), list/revoke tokens,
+and record referrals. The API returns status codes for success and never emits an `ok: true` body.
+
+`.github/workflows/deno-deploy.yml` runs only on `main` (or manual dispatch). It validates `deno
+task check`, builds the mobile Vite game, requires the repository's `DENO_DEPLOY_TOKEN_0X4007`
+secret, assigns a Deno KV database, uploads `.deploy-root`, waits for the revision, and verifies
+`/api/health`. This is a static game preview plus account-portal deployment, not a claim that the
+Node/SQLite server is Deno-compatible.
+
 ## 2026-08-08 — Warehouse lens-flare sprites
 
 The Warehouse now places deterministic additive lens-flare sprites at the eight high-bay fixtures, the central spotlight,

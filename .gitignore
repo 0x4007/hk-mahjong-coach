@@ -5,6 +5,7 @@ playwright-report/
 test-results/
 .data/
 .ci/
+.deploy-root/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
