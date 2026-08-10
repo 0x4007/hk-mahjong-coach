@@ -2,8 +2,9 @@
 
 ## Handoff status
 
-This document is the implementation handoff for the next agent. It is an authoritative plan and acceptance contract;
-the feature is not implemented in this worktree yet.
+This document is the implementation handoff and acceptance contract for the canonical lane. The deterministic
+implementation is complete; rendered one-window acceptance remains pending for the user because this worktree must not
+open another browser or claim browser/HMR/Playwright proof.
 
 - Worktree: `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/continuous-head-motion-3`
 - Branch: `continuous-head-motion-3-gfd0622572e`
@@ -161,23 +162,21 @@ rough edges. A local commit is required before handoff; do not leave accepted mo
 
 ## Current implementation checkpoint — 2026-08-10
 
-The contract is implemented on this canonical lane in commit `c60dff08f25c` (the follow-up recovery regression is
-currently being validated). `apps/web/src/scene/head-motion.ts` integrates bounded local translation and rotation from
-physics-resolved impulses, while the live and deterministic movement paths preserve capsule authority and omit repeated
-airborne gravity. The severe-fall fixture reaches a minimum shared head/camera offset of `-0.8793 m` from the standing
-`1.75 m` eye, which places the eye at about `0.87 m` above the support surface, and the capsule remains at the support
-height while the response returns toward zero.
+The contract is implemented on this canonical lane. `apps/web/src/scene/head-motion.ts` integrates bounded local
+translation and rotation from physics-resolved impulses, while the live and deterministic movement paths preserve
+capsule authority and omit repeated airborne gravity. The severe-fall fixture reaches a minimum shared head/camera
+offset of about `-0.8793 m` from the standing `1.75 m` eye, which places the eye at about `0.87 m` above the support
+surface; the capsule remains at support height while the response recovers toward zero.
 
-The trace now records `camera.visibleEyeHeight` directly; the severe-fall fixture bounds its minimum to `0.85–1.15 m`
-to make the one-metre acceptance observable without converting an offset by hand.
+Weapon and melee recoil are part of the same angular state. Action callbacks publish an immediate bounded snapshot,
+delayed return impulses are accumulated with the next frame, and event-time presentation advances only axes touched by
+the action. Camera, viewmodel, reticule, aim ray, and focus ray therefore consume one response without a parallel
+camera recoil state or double-counted pitch.
 
-The server-owned bus run `1786340058047-43196-d49e1c72` recorded the new smooth-recovery assertion as passed. Its six
-other failures are pre-existing dirty-lane core-engine, simulation, Warehouse, and map-catalog failures; their exact
-result files are listed in that manifest. Browser, HMR, Playwright, and rendered one-window acceptance remain pending
-for the user by the contract above.
+The trace records `camera.visibleEyeHeight` directly. The severe-fall fixture bounds its minimum to `0.85–1.15 m`, and
+the 21 deterministic movement scenarios pass 160/160 assertions. Full lint, strict typecheck, targeted formatting,
+`git diff --check`, and the production build pass.
 
-Follow-up validation on 2026-08-10 also consolidated camera acceleration roll and pitch into the shared rotational
-head state. `HeadMotionStepInput` accumulates same-frame impulses before the analytic integration pass, and the
-high-energy stop path submits a bounded angular collision-stop impulse. Bus run `1786344257454-43196-336d40cf`
-passes 652/652 assertions on the dirty canonical worktree. The remaining acceptance boundary is still the user's
-single-window ledge-fall visual check; no browser or HMR proof is claimed here.
+The clean server-owned bus receipt is run `1786347857547-43196-4b669405`, with 652/652 assertions across 138 suites,
+on commit `b4985ce3ec6581d35883bc450c81d5c1b94e040d`. The worktree is clean. Browser, HMR, Playwright, and rendered
+one-window acceptance remain pending for the user by the contract above.
