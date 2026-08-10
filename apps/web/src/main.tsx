@@ -667,6 +667,13 @@ const VisualDebugPanel = ({
           <button onClick={() => mount.applyDamage(25)} type="button">
             Simulate 25 damage
           </button>
+          <button
+            onClick={() => mount.applyDamage(9999)}
+            type="button"
+            title="Drop health and shield to zero immediately"
+          >
+            Suicide
+          </button>
           <button onClick={() => mount.resetVitals()} type="button">
             Reset vitals
           </button>
@@ -1597,6 +1604,10 @@ const App = (): React.JSX.Element => {
           >
             <span />
           </div>
+          <div
+            className={`scene-death-fade${playerVitals.isDead ? " is-visible" : ""}`}
+            aria-hidden="true"
+          />
           <header className="scene-overlay scene-overlay-intro">
             <p className="eyebrow">Hong Kong Old Style · NYC Social Table</p>
             <h1 id="table-heading">Stay in the hand.</h1>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   generateWeaponPickups,
+  WEAPON_MINIMUM_SPAWN_DISTANCE_METERS,
   canInterruptWeaponReload,
   resolveWeaponEffectOpacity,
   resolveWeaponReloadDuration,
@@ -27,6 +28,7 @@ import {
   WEAPON_BARREL_COOLING_COEFFICIENT_PER_SECOND,
   WEAPON_BARREL_SMOKE_FULL_HEAT_RATIO,
   WEAPON_BARREL_SMOKE_START_HEAT_RATIO,
+  WEAPON_SMOKE_CLEAR_OPACITY_THRESHOLD,
   WEAPON_PICKUP_RANGE_METERS,
   WEAPON_RELOAD_SKY_PITCH_RADIANS,
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
@@ -36,11 +38,16 @@ import {
   resolveWeaponBarrelTemperatureC,
   resolveWeaponBarrelGlowRatio,
   resolveWeaponBarrelSmokeRatio,
+  shouldClearWeaponSmoke,
   resolveGunAudioProfile,
+  resolveWeaponAudioProximity,
   GUN_AUDIO_MIN_DAMAGE,
   GUN_AUDIO_MAX_DAMAGE,
   GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
   GUN_AUDIO_MAX_BARREL_LENGTH_METERS,
+  WEAPON_AUDIO_MAX_DISTANCE_METERS,
+  WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
+  WEAPON_AUDIO_ROLLOFF_FACTOR,
   type WeaponSpawnRect,
 } from "./weapons.js";
 
@@ -204,7 +211,7 @@ describe("procedural weapon pickups", () => {
     expect(first).not.toEqual(different);
   });
 
-  it("includes a table-side set and an even outdoor spread", () => {
+  it("places every pickup from the seeded full-world placement loop", () => {
     const reservedRect = reservedRects[0];
     if (reservedRect === undefined) {
       throw new Error("Expected one reserved play-area rectangle");
@@ -213,29 +220,15 @@ describe("procedural weapon pickups", () => {
       reservedRects,
       worldHalfSize: 80,
       pickupCountPerWeapon: 2,
+      minimumDistance: 7,
     });
-    expect(pickups).toHaveLength(13);
+    expect(pickups).toHaveLength(12);
     expect(pickups[0]?.starter).toBe(true);
     expect(pickups[0]?.weapon).toBe("pistol");
-    const tableSidePickups = pickups.filter((pickup) => pickup.nearTable === true);
-    expect(tableSidePickups).toHaveLength(6);
-    expect(tableSidePickups.map((pickup) => pickup.weapon)).toEqual([
-      "pistol",
-      "shotgun",
-      "machineGun",
-      "sniper",
-      "carbine",
-      "submachineGun",
-    ]);
-    for (const pickup of tableSidePickups) {
-      expect(Math.hypot(pickup.position[0], pickup.position[2])).toBeLessThan(5);
-    }
     for (const weapon of WEAPON_IDS) {
-      expect(pickups.filter((pickup) => pickup.weapon === weapon)).toHaveLength(
-        weapon === "pistol" ? 3 : 2,
-      );
+      expect(pickups.filter((pickup) => pickup.weapon === weapon)).toHaveLength(2);
     }
-    for (const pickup of pickups.filter((entry) => entry.nearTable !== true)) {
+    for (const pickup of pickups) {
       expect(pickup.position[0]).toBeGreaterThanOrEqual(-75);
       expect(pickup.position[0]).toBeLessThanOrEqual(75);
       expect(pickup.position[2]).toBeGreaterThanOrEqual(-75);
@@ -247,12 +240,66 @@ describe("procedural weapon pickups", () => {
           pickup.position[2] > reservedRect.maxZ,
       ).toBe(true);
     }
+    const occupiedRegions = new Set(
+      pickups.map(
+        (pickup) =>
+          `${pickup.position[0] < 0 ? "west" : "east"}-${pickup.position[2] < 0 ? "south" : "north"}`,
+      ),
+    );
+    expect(occupiedRegions.size).toBe(4);
+  });
+
+  it("uses a dense map-wide default population", () => {
+    const pickups = generateWeaponPickups("room-weapon-dense-default", {
+      reservedRects,
+      worldHalfSize: 120,
+      minimumDistance: 7,
+    });
+
+    expect(pickups).toHaveLength(144);
+    for (const weapon of WEAPON_IDS) {
+      expect(pickups.filter((pickup) => pickup.weapon === weapon)).toHaveLength(24);
+    }
+    expect(
+      new Set(
+        pickups.map(
+          (pickup) =>
+            `${pickup.position[0] < 0 ? "west" : "east"}-${pickup.position[2] < 0 ? "south" : "north"}`,
+        ),
+      ).size,
+    ).toBe(4);
+  });
+
+  it("caps the default compact-map spawn at one gun per 75 m radius", () => {
+    const pickups = generateWeaponPickups("room-weapon-sparse-default", {
+      reservedRects,
+      worldHalfSize: 125,
+    });
+
+    expect(pickups.length).toBeGreaterThan(0);
+    expect(pickups.length).toBeLessThan(144);
+    for (let firstIndex = 0; firstIndex < pickups.length; firstIndex += 1) {
+      const first = pickups[firstIndex];
+      if (first === undefined) {
+        continue;
+      }
+      for (let secondIndex = firstIndex + 1; secondIndex < pickups.length; secondIndex += 1) {
+        const second = pickups[secondIndex];
+        if (second === undefined) {
+          continue;
+        }
+        const dx = first.position[0] - second.position[0];
+        const dz = first.position[2] - second.position[2];
+        expect(Math.hypot(dx, dz)).toBeGreaterThanOrEqual(WEAPON_MINIMUM_SPAWN_DISTANCE_METERS);
+      }
+    }
   });
 
   it("keeps pickups clear of rotated coarse obstacles", () => {
     const pickups = generateWeaponPickups("room-weapon-obstacles", {
       worldHalfSize: 70,
       pickupCountPerWeapon: 2,
+      minimumDistance: 7,
       obstacles: [
         {
           center: { x: 0, y: 2, z: 40 },
@@ -261,7 +308,7 @@ describe("procedural weapon pickups", () => {
         },
       ],
     });
-    for (const pickup of pickups.slice(1)) {
+    for (const pickup of pickups) {
       const dx = pickup.position[0];
       const dz = pickup.position[2] - 40;
       const localX = dx * Math.cos(Math.PI / 4) + dz * Math.sin(Math.PI / 4);
@@ -375,6 +422,15 @@ describe("damage-driven shot audio", () => {
     expect(light.crackVolume).toBeGreaterThan(heavy.crackVolume);
     expect(light.tailDurationSeconds).toBeLessThan(heavy.tailDurationSeconds);
     expect(light.tailCutoffFrequencyHz).toBeGreaterThan(heavy.tailCutoffFrequencyHz);
+    expect(light.bulletSpeedMetersPerSecond).toBeLessThan(343);
+    expect(heavy.bulletSpeedMetersPerSecond).toBeGreaterThan(light.bulletSpeedMetersPerSecond);
+    expect(heavy.bulletSpeedMetersPerSecond).toBeGreaterThan(343);
+    expect(
+      resolveGunAudioProfile({
+        damage: GUN_AUDIO_MIN_DAMAGE,
+        barrelLength: GUN_AUDIO_MAX_BARREL_LENGTH_METERS,
+      }).bulletSpeedMetersPerSecond,
+    ).toBeGreaterThan(light.bulletSpeedMetersPerSecond);
     expect(resolveGunAudioProfile({ damage: Number.NaN, barrelLength: Number.NaN })).toEqual(
       resolveGunAudioProfile({
         damage: GUN_AUDIO_MIN_DAMAGE,
@@ -386,6 +442,20 @@ describe("damage-driven shot audio", () => {
   it("returns the exact same profile for identical parameters", () => {
     const parameters = { damage: 50, barrelLength: 0.8 } as const;
     expect(resolveGunAudioProfile(parameters)).toEqual(resolveGunAudioProfile(parameters));
+  });
+});
+
+describe("proximity weapon audio", () => {
+  it("fades every sound layer from the listener to the audible range", () => {
+    expect(WEAPON_AUDIO_REFERENCE_DISTANCE_METERS).toBeGreaterThan(0);
+    expect(WEAPON_AUDIO_MAX_DISTANCE_METERS).toBeGreaterThan(
+      WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
+    );
+    expect(WEAPON_AUDIO_ROLLOFF_FACTOR).toBeGreaterThan(0);
+    expect(resolveWeaponAudioProximity(0)).toBe(1);
+    expect(resolveWeaponAudioProximity(2)).toBeLessThan(resolveWeaponAudioProximity(1));
+    expect(resolveWeaponAudioProximity(WEAPON_AUDIO_MAX_DISTANCE_METERS)).toBe(0);
+    expect(resolveWeaponAudioProximity(Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 
@@ -427,7 +497,7 @@ describe("damage-driven barrel temperature", () => {
     );
 
     expect(afterMiss).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C);
-    expect(afterEightPelletHits).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C + 128);
+    expect(afterEightPelletHits).toBe(WEAPON_BARREL_AMBIENT_TEMPERATURE_C + 32);
   });
 
   it("keeps seven 100-damage sniper hits below the glow threshold", () => {
@@ -467,5 +537,13 @@ describe("damage-driven barrel temperature", () => {
     expect(resolveWeaponBarrelSmokeRatio(1)).toBe(1);
     expect(resolveWeaponBarrelSmokeRatio(0.575)).toBeCloseTo(0.5, 8);
     expect(resolveWeaponBarrelSmokeRatio(Number.NaN)).toBe(0);
+  });
+
+  it("returns smoke to the pool when it is visually clear", () => {
+    expect(shouldClearWeaponSmoke(1, 0, 5)).toBe(false);
+    expect(shouldClearWeaponSmoke(0, 0.1, 5, 0.24)).toBe(false);
+    expect(shouldClearWeaponSmoke(WEAPON_SMOKE_CLEAR_OPACITY_THRESHOLD, 0.24, 5, 0.24)).toBe(true);
+    expect(shouldClearWeaponSmoke(0.25, 5, 5)).toBe(true);
+    expect(shouldClearWeaponSmoke(Number.NaN, 0, 5)).toBe(true);
   });
 });

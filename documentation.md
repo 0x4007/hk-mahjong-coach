@@ -1,5 +1,67 @@
 # Architecture and implementation log
 
+## 2026-08-07 — Gunless simulant runner
+
+The scene-only simulant is temporarily a runner target: it has no weapon model, weapon state, hitscan firing, muzzle
+effects, or AI damage path. It runs toward the player and stops at a 2.4 m standoff. Player weapons and engine rules
+remain unchanged.
+
+## 2026-08-07 — Compact 250 m runner map
+
+The streamed exploration world now spans 250 m × 250 m (`±125 m` from the origin) and preloads 5 visible coarse chunks.
+The same seeded generation and authored play-area exclusions remain active inside the smaller bounds.
+
+## 2026-08-07 — Omitted corner chunks
+
+The 250 m runner map keeps its square movement and physics bounds, but the four diagonal chunks are not generated or
+rendered. The central chunk and four axis-aligned edge chunks remain rectangular, so the visible skyline has a rough
+five-block shape without adding an invisible circular gameplay wall. Respawns, restored camera positions, and the
+simulant runner continue to use the existing square bounds.
+
+## 2026-08-07 — Compact 500 m runner map
+
+The streamed exploration world now spans 500 m × 500 m (`±250 m` from the origin) and preloads 36 coarse chunks.
+The same seeded generation and authored play-area exclusions remain active inside the smaller bounds.
+
+## 2026-08-07 — Correct-base local competitor repair
+
+The local visual-table competitor remains scene-only and is implemented in the existing
+`visual-table-gb9d082b587` checkout. It is not the separate server-authoritative multiplayer/FPS
+lane. The opponent is now a normal-height visible character with a visible seeded weapon. It uses
+the same `PlayerVitalsState`, shield/health damage, O₂ projectile cost, movement-speed/trot, and
+camera-motion damper mechanisms as the local player. Its muzzle follows the character, and its
+line-of-sight shots call the existing weapon path's target callback so the player's ordinary vitals
+can actually be damaged. A shotgun applies its full pellet payload. Defeated opponents hide for the
+same three-second respawn interval as the player, then return with reset vitals and ammunition at a
+new seeded position. The scene still does not alter mahjong engine rules, hidden tile information,
+replays, or multiplayer state.
+
+## 2026-08-06 — Visual-table simulant combat prototype
+
+- In the visual table scene, added a seeded prototype opponent system:
+  - random opponent-spawn anchor from existing hand anchors (`north`, `east`, `west`)
+  - random weapon selected from `WEAPON_IDS` per room-seed stream
+  - optional visible marker at the spawn location for tracking combat state
+- Added player respawn behavior in the same scene: on kill, the shared camera death tumble remains
+  visible for a three-second transition while movement and fire input are cleared. The final 650 ms
+  fades to a full-screen black overlay, then `resetToSpawn` samples a seeded point in `WORLD_BOUNDS`,
+  settles to ground by physics, rotates the camera to face the map center, and fades back in.
+- Extended `WeaponRuntime` with a reusable `fireFrom` function used by player shots and the simulator.
+- Simulant fire now uses seeded per-shot spread and capped distance to the player camera, so each attempt
+  applies random aim from the same weapon parameters.
+- Prototype is intentionally scene-only and does not affect engine rules or game-state logic.
+
+## 2026-08-06 — Procedural weapon pickup distribution
+
+Weapon pickups are scene-only presentation objects and do not alter the authoritative mahjong engine. The scene calls
+`generateWeaponPickups(roomSeed, ...)` with the 250 m world bounds, authored play-area reservations, and known coarse
+physics obstacles. The generator requests up to 24 copies of every weapon, but the default spacing rule allows at most
+one gun inside any 75 m radius, so compact maps return a smaller deterministic set. A seeded sector/cell pass spreads
+the candidates across the world; reserved areas, obstacles, and the spacing contract are rejected. The same room seed
+therefore produces the same pickup positions, while a different seed produces a different layout. Pickup meshes are
+created once with the scene and remain discoverable by traversal; collecting one still uses the existing walk-over or
+`E` interaction.
+
 ## 2026-08-02 — Repository initialization
 
 - The repository was empty, so the existing `main` checkout is the canonical implementation lane.
@@ -182,8 +244,8 @@
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
   is presentation state only and never includes authoritative game state or concealed tile data. Snapshots
   below the fall threshold or outside the world bounds are rejected. If the live camera or Rapier character
-  drops into an unrecoverable position, the scene clears movement state, returns to the seat spawn, and
-  writes the safe snapshot before the next HMR reload.
+  drops into an unrecoverable position, the scene clears movement state, returns to a seeded randomised
+  seat-facing-map-center spawn, and writes that safe snapshot before the next HMR reload.
 - The debug panel's best-effort `/__codex/visual-debug-state` endpoint persists only an explicit debug-UI
   change. The panel keeps the latest dirty tuning payload in memory and sends it once with `keepalive` on
   `pagehide`; its 500 ms live telemetry refresh never writes the artifact. The Vite middleware also skips
@@ -192,11 +254,13 @@
   default-fog frame on a tunnel and keeps debug mode as the write path; the read is cache-busted, no-store,
   and bounded so a stalled tunnel still falls back to the normal scene.
 - The debug lens uses a 90° standing FOV and transitions to 68° when Shift toggles a seated 1.45 eye height.
-  Seated movement is half speed with slight momentum; Space keeps the same quick airtime while doubling the
-  jump apex. Double-tapping any WASD or arrow movement key engages a 3× sprint that remains active while any
-  movement key is held, so W→A/D/S direction transfers preserve sprint speed. If the player is crouched, that
-  same sprint request first performs the normal stand transition and then starts sprinting; the stand still costs
-  5 O₂, and an unaffordable transition leaves the player crouched.
+  Standing movement starts at a 1.5×-base trot (5.1 m/s, 18.36 km/h). Crouching remains half speed and enables a hidden
+  upright walk lock; after standing, movement stays at the 1×-base walk speed until a sprint request clears the
+  lock. Space keeps the same quick airtime while doubling the jump apex. Double-tapping any WASD or arrow movement
+  key engages a 3× sprint that remains active while any movement key is held, so W→A/D/S direction transfers
+  preserve sprint speed. If the player is crouched, that same sprint request first performs the normal stand
+  transition and then starts sprinting; the stand still costs 5 O₂, and an unaffordable transition leaves the player
+  crouched.
 - Pointer-lock state fades the instructional overlays while the scene is under direct control.
 - The scene resolves an explicit `high`/`medium`/`low` presentation preset or uses conservative device
   memory/core signals for `adaptive`. Adaptive selects medium unless the browser reports at least 8 GB and
@@ -257,10 +321,15 @@
   regenerates a prior coordinate. Base geometry/materials remain shared and repeated forms use `InstancedMesh`,
   keeping the append-only world bounded by the explicit play-space limits. The streamed areas are South courtyard,
   West tea garden, East practice court, and North skybridge; the debug HUD reports the active area and loaded count.
-- The FPS play space uses five 100 m chunks from the origin in each direction, for a 1,000 m × 1,000 m navigable
-  world. The procedural backdrop doubles the per-chunk feature density for buildings, props, signs, and utility
-  posts, and weapon pickups use the same full-world bounds. Existing authored-area, world-bound, and focus-ramp
-  exclusion checks still guard every generated placement.
+- The FPS play space uses three 100 m chunks per axis and omits the four diagonal boundary chunks, leaving the central
+  chunk plus four axis-aligned edge chunks in a rough circular/five-block footprint. The square movement envelope
+  remains `±125 m`; no invisible circular wall is added. The procedural backdrop now runs a higher per-chunk feature density and taller building bounds, while
+  props, signs, and utility posts remain governed by the same seeded stream. Weapon pickups use the same full-world
+  bounds. Existing authored-area, world-bound, and focus-ramp exclusion checks still guard every generated placement.
+- Skyline tuning uses one shared seeded profile: the current density multiplier is `2.85`, district elevation maps to
+  `0.65–3.15` metres, and building height receives `1.15 × elevation + 0.75 × featureNoise` as a derived lift. The
+  same continuous inputs drive both density and silhouette height, so dramatic districts remain reproducible per room
+  seed without special-case building tables.
 - For a repeatable local screenshot checkpoint, start the preview with `pnpm dev`, create the output
   directory, then run:
 
@@ -351,8 +420,11 @@ Focused coverage is in `apps/web/src/scene/camera-motion.test.ts`.
 
 The visual-table player vitals model exposes a 100-point Breath / O₂ Reserve in
 `apps/web/src/scene/player-vitals.ts`. This is a gameplay reserve, not literal blood-oxygen saturation.
-Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch walking keeps the reserve flat and does not recharge it while movement is active. A full jump and each transition from crouch to standing costs 5 points, so roughly 20
-consecutive full jumps empty the reserve.
+Standing idle restores 12 points per second, walking restores 8, and crouched stationary recovery restores 10. The
+1.5×-base standing trot is 5.1 m/s (18.36 km/h), maps one quarter of the way from walk to sprint, and recovers about
+5.17 O₂ points per second while moving. Sprinting drains 3.33 points per second (about 30 seconds from full); crouch
+walking keeps the reserve flat and does not recharge it while movement is active. A full jump and each transition from
+crouch to standing costs 5 points, so roughly 20 consecutive full jumps empty the reserve.
 
 Sprint recovery waits 1.5 seconds, recovery after crouch walking waits 0.5 seconds, and jump recovery waits 0.25
 seconds. These delays are stored in the pure state and recovery is integrated for the exact portion of a frame
@@ -362,11 +434,11 @@ HUD bar.
 O₂ is an action reserve. A full jump and a stand-up transition each require the full 5-point cost. If the reserve
 cannot pay a full jump, the controller performs a free mini hop instead: its launch speed uses the same neutral
 balance as the trot, `12 / (12 + 5) = 70.6%` of the full launch speed, which produces about half the full apex.
-The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. Sprinting is allowed only when the current
-frame's drain is affordable. When it is not (including at 0%), the controller falls back to a neutral jog rather
-than stopping movement. The neutral blend is derived from the configured walking recovery (+8/s) and sprint drain
-(-3.33/s): `8 / (8 + 3.33) = 70.6%` of the walk-to-sprint interval, or about `80.4%` of full sprint speed. At
-that speed, movement keeps O₂ at a 0-point-per-second delta (subject to the existing recovery delay after sprinting).
+The mini hop does not change O₂ or add the full-jump recovery delay. Crouching has no entry cost. Sprinting is allowed
+only when the current frame's drain is affordable. When it is not (including at 0%), the controller falls back to the
+same 1.5×-base trot rather than stopping movement. Trot occupies 25% of the walk-to-sprint interval, so it recovers
+about 5.17 O₂ points per second at the configured +8/s walking recovery and -3.33/s sprint drain (subject to the
+existing recovery delay after sprinting).
 Hold-breath activation similarly requires one affordable 1/60-second drain slice, then drains continuously and
 stops when the reserve reaches zero.
 
@@ -487,10 +559,10 @@ match combat or persistence state.
 ## Procedural weapons prototype
 
 The visual-table scene now includes a seeded pickup and shooting loop in `apps/web/src/scene/weapons.ts`.
-Each normalized room seed produces one starter pistol in the penthouse and a deterministic outdoor spread
-of pistol, shotgun, machine gun, sniper, scoped carbine, and submachine gun pickups. The penthouse also stages one visible pickup of each type
-around the mahjong table; the remaining outdoor placements accept reserved play-area rectangles and coarse
-physics obstacles, so seeded pickups do not appear inside authored rooms or city blockers.
+Each normalized room seed now places all pistol, shotgun, machine gun, sniper, scoped carbine, and submachine gun
+pickups from one shared full-world placement stream. No dedicated table-side set remains; every pickup still honours
+reserved play-area rectangles and coarse physics obstacles, so seeded pickups do not appear inside authored rooms or
+city blockers.
 
 The browser mount owns the presentation combat state: walking through 3.5 m of a pickup auto-equips the nearest
 gun, and E equips the nearest pickup while stopped; number keys or Q switch
@@ -643,10 +715,11 @@ authority; it only keeps the viewmodel out of the way during parkour movement. C
 
 ## Reload movement
 
-Reloading caps the speed the player was requesting at the existing oxygen-neutral “trot” rather than forcing every
-movement input to that speed. Walking therefore stays at walk speed; a sprint request is reduced to trot for the
-reload sequence and then resumes full sprint only when the next O₂ drain slice is affordable. If the reserve cannot
-pay that slice, movement falls back to the neutral jog. Crouch speed remains the higher-priority posture limit.
+Reloading caps the speed the player was requesting at the existing 1.5×-base “trot” rather than forcing every
+movement input to that speed. The crouch-enabled upright walk lock stays at walk speed; unlocked upright movement
+stays at trot, while a sprint request is reduced to trot for the reload sequence and then resumes full sprint only
+when the next O₂ drain slice is affordable. If the reserve cannot pay that slice, movement falls back to the neutral
+jog. Crouch speed remains the higher-priority posture limit.
 
 When development debug mode is enabled (`?debug=1`), the browser shows a small bottom-left `SPD` readout in metres
 per second. It consumes the scene's damped horizontal velocity and is throttled to about 10 updates per second; on
@@ -768,14 +841,15 @@ model and world pickup copies use the same weapon temperature state.
 Each held weapon now owns a fixed pool of 192 billboard smoke sprites and one shared 64×64 procedural alpha mask.
 Every trigger pull emits a dense gray muzzle puff even when the shot misses. Puff size and count use the round's
 total damage (`damage × pellets`), so the shotgun and sniper produce much larger clouds than the machine gun. Each
-puff starts at zero opacity, follows a normalized sigmoid fade-in, then rapidly expands with an ease-out logarithmic curve
-over the first 45% of its five-second life and lingers at maximum size for the remainder. Thermal steam uses the same
-five-second lifetime. Opacity follows that expansion:
-source-sized smoke is bright, while the max-size linger is transparent. The plume inherits the nozzle's current world
-velocity, diffuses outward, then slows while rising before it is returned to the pool. Thermal wisps use the pale white
-steam color, scale with a restrained longest-barrel ramp, and emit from one inverse-size equation: smaller parametric
-plumes emit more frequently. They use the same logarithmic expansion and inverse-opacity lifecycle as muzzle smoke,
-with a square-root damage response to avoid oversized shotgun/sniper steam.
+puff starts at zero opacity, follows a normalized sigmoid fade-in over `0.24 s`, then rapidly expands with an ease-out
+logarithmic curve over the first 45% of its five-second life and lingers at maximum size for the remainder. The plume
+inherits the nozzle's current world velocity, diffuses outward, then slows while rising. Once its rendered opacity falls
+to `0.01` or less, it is hidden and returned to the pool immediately; it no longer occupies a slot invisibly until the
+five-second hard lifetime. Thermal steam keeps the five-second lifetime and uses the same clear-out threshold. Opacity
+follows that expansion: source-sized smoke is bright, while the max-size linger is transparent. Thermal wisps use the
+pale white steam color, scale with a restrained longest-barrel ramp, and emit from one inverse-size equation: smaller
+parametric plumes emit more frequently. They use the same logarithmic expansion and inverse-opacity lifecycle as muzzle
+smoke, with a square-root damage response to avoid oversized shotgun/sniper steam.
 The glow ratio still eases in from 35%; wisps rise with a small deterministic curl, expand, and fade without collision or
 shadow work. The pool is attached to the scene world effects root, so smoke remains in place when the player turns,
 walks, holsters, or switches weapons.
@@ -828,8 +902,12 @@ The four layers are mixed at the same shot start time:
 
 The damage curve uses configured per-bullet damage, not a shotgun's total pellet payload. The barrel curve uses the
 longest generated model barrel as the long-barrel endpoint. A scene-local `AudioContext` is created or resumed from the
-firing gesture; stopped source and filter nodes disconnect after their envelopes finish. Browsers without Web Audio or
-with a blocked autoplay context silently keep the visual shot effects and do not block gameplay.
+firing gesture; stopped source and filter nodes disconnect after their envelopes finish. Every layer routes through the
+same camera-following Web Audio listener and a positional output. The spatializer uses HRTF placement with inverse
+distance rolloff, while a bounded 1–32 m proximity envelope also protects browsers that expose only the legacy gain
+path. Player muzzle audio uses the measured world muzzle position; simulated opponent shots use their world origin.
+Browsers without Web Audio or with a blocked autoplay context silently keep the visual shot effects and do not block
+gameplay.
 
 ## Parametric carbine and burst submachine gun
 
@@ -852,5 +930,18 @@ that profile's magnification for its narrow-FOV world feed. Explicit zoom is req
 the carbine or sniper optic. Number-row keys `5` and `6` select the carbine and submachine gun, and `Q` cycles all six
 owned weapons.
 
-The armory chart and table-side pickup set are generated from `WEAPON_DEFINITIONS`, so changing a primitive profile
+The armory chart and pickup set are generated from `WEAPON_DEFINITIONS`, so changing a primitive profile
 automatically changes its HUD/chart row, pickup model, reload timing, damage-scaled effects, and optic/burst metadata.
+
+## Bullet pass-by audio
+
+Weapon shots may produce a separate bullet-whizz voice when the pellet ray passes near the listener. Its tone is derived from the same resolved gun profile as the muzzle report and uses an 80/20 mix: band-pass white noise provides the air-turbulence "ssshhh" layer, while a sine oscillator provides the whistle layer. Damage selects a high-to-low pitch range from approximately 5 kHz to 2.2 kHz for light rounds and 2.5 kHz to 700 Hz for heavy rounds. Closest approach controls gain, band-pass width, and sweep depth; projectile speed controls the short 28-100 ms duration. The shot's left/right position controls stereo panning. The whizz uses the same positional output and 1–32 m proximity envelope as every muzzle layer, so no weapon sound bypasses distance attenuation. This keeps the pass-by effect coupled to weapon identity while preserving the existing muzzle sound.
+
+Incoming simulant fire uses both the pass-by voice and its muzzle report. The muzzle report is delayed by source distance at 343 m/s; the whizz uses the profile-derived 280-900 m/s projectile timeline plus the final sound path from the pass point, so a distant incoming round is heard as a whizz first and the shot later. Short low-damage weapons trend subsonic; heavy long-barrel weapons trend supersonic. A scope does not change velocity. Timing follows the intended projectile travel distance rather than stopping at the first render-surface impact.
+
+## Simulant movement
+
+The scene-only simulant starts at a seeded random ground azimuth on the 125 m world radius. Each
+frame it moves toward the player at the shared 1.5×-base trot speed (5.1 m/s), stops 2.4 m away,
+and keeps only its runner body and marker visible. A private instance of the shared perspective damper
+drives the body bob and roll during the approach; it has no weapon or AI damage path.

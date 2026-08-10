@@ -35,6 +35,7 @@ import {
   resolveDesktopAimInput,
   resolveReloadAimingDownSights,
   resolvePlayerMovementSpeedMultiplier,
+  resolveSimulantShotDamage,
   isMovementDoubleTap,
   MOVEMENT_DOUBLE_TAP_WINDOW_MS,
   isLeftCommandKeyEvent,
@@ -75,21 +76,17 @@ class MemoryStorage implements Storage {
 }
 
 describe("player movement speed", () => {
-  it("keeps walking speed during reload and caps sprint at the derived trot", () => {
-    const walk = resolvePlayerMovementSpeedMultiplier({
+  it("defaults upright movement to the 1.5-times-base trot and caps sprint during reload", () => {
+    const trot = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
+      walking: false,
       sprinting: false,
       jogging: false,
       reloading: false,
     });
-    const walkingReload = resolvePlayerMovementSpeedMultiplier({
+    const explicitTrot = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
-      sprinting: false,
-      jogging: false,
-      reloading: true,
-    });
-    const trot = resolvePlayerMovementSpeedMultiplier({
-      crouching: false,
+      walking: false,
       sprinting: false,
       jogging: true,
       reloading: false,
@@ -102,32 +99,75 @@ describe("player movement speed", () => {
     });
     const sprintingReload = resolvePlayerMovementSpeedMultiplier({
       crouching: false,
+      walking: false,
       sprinting: true,
       jogging: false,
       reloading: true,
     });
 
-    expect(walkingReload).toBe(walk);
+    expect(trot).toBe(1.5);
+    expect(trot).toBe(explicitTrot);
     expect(trot).toBeLessThan(sprint);
     expect(sprintingReload).toBe(trot);
   });
 
-  it("keeps crouch speed ahead of the standing reload trot", () => {
-    const crouch = resolvePlayerMovementSpeedMultiplier({
-      crouching: true,
+  it("uses the hidden walking lock only while upright", () => {
+    const trot = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: false,
       sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    const walk = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: true,
+      sprinting: false,
+      jogging: false,
+      reloading: false,
+    });
+    const walkingReload = resolvePlayerMovementSpeedMultiplier({
+      crouching: false,
+      walking: true,
+      sprinting: true,
       jogging: false,
       reloading: true,
     });
-    const standingReload = resolvePlayerMovementSpeedMultiplier({
-      crouching: false,
+    const crouch = resolvePlayerMovementSpeedMultiplier({
+      crouching: true,
+      walking: true,
+      sprinting: true,
+      jogging: false,
+      reloading: false,
+    });
+    const crouchReload = resolvePlayerMovementSpeedMultiplier({
+      crouching: true,
+      walking: true,
       sprinting: false,
       jogging: false,
       reloading: true,
     });
 
+    expect(walk).toBe(1);
+    expect(walk).toBeLessThan(trot);
+    expect(walkingReload).toBe(walk);
     expect(crouch).toBe(0.5);
-    expect(crouch).toBeLessThan(standingReload);
+    expect(crouchReload).toBe(crouch);
+    expect(crouch).not.toBe(walk);
+  });
+});
+
+describe("simulant shot payload", () => {
+  it("uses the same per-projectile damage payload as the ordinary weapon path", () => {
+    expect(resolveSimulantShotDamage(28)).toBe(28);
+    expect(resolveSimulantShotDamage(16, 8)).toBe(128);
+  });
+
+  it("rejects non-finite or negative payload inputs", () => {
+    expect(resolveSimulantShotDamage(Number.NaN, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, Number.NaN)).toBe(0);
+    expect(resolveSimulantShotDamage(-16, 8)).toBe(0);
+    expect(resolveSimulantShotDamage(16, -2)).toBe(0);
   });
 });
 
@@ -472,15 +512,22 @@ describe("exploration room exclusion", () => {
   });
 });
 
-describe("append-only exploration chunks", () => {
-  it("preloads all exploration chunks up front and retains them", () => {
+describe("exploration chunk footprint", () => {
+  it("preloads the central and edge chunks while omitting the four corners", () => {
     const scene = new THREE.Scene();
     const world = createExplorationWorld(scene, "append-only-test");
 
-    expect(world.getLoadedChunkCount()).toBe(121);
+    expect(world.getLoadedChunkCount()).toBe(5);
+    const root = scene.getObjectByName("ExplorationWorldRoot");
+    expect(root).not.toBeNull();
+    expect(root?.getObjectByName("ExplorationChunk:-1:-1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:-1:1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:1:-1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:1:1")).toBeUndefined();
+    expect(root?.getObjectByName("ExplorationChunk:0:0")).not.toBeUndefined();
     world.update(new THREE.Vector3(16, 0, 0));
     const expandedCount = world.getLoadedChunkCount();
-    expect(expandedCount).toBe(121);
+    expect(expandedCount).toBe(5);
 
     world.update(new THREE.Vector3(0, 0, 0));
     expect(world.getLoadedChunkCount()).toBe(expandedCount);

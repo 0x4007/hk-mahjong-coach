@@ -1,6 +1,126 @@
 # Implementation status
 
+## 2026-08-08 — One-and-a-half-times-base trot
+
+- Set the shared upright trot multiplier to exactly `1.5×` the 3.4 m/s base: 5.1 m/s (18.36 km/h).
+- Derived player and simulant walk-to-sprint telemetry from that speed, placing trot at a 0.25 blend and producing
+  about +5.17 O₂ points per second while moving. Walk lock, crouch speed, and 3× sprint behavior remain unchanged.
+
+## 2026-08-07 — Crouch-controlled walking lock
+
+- Ported the parametric branch's hidden locomotion mode into the current scene without importing its unrelated weapon
+  or world-scale modules. Upright movement defaults to the 1.5×-base trot, while crouching enables a
+  hidden 1×-base walk lock for the next upright movement.
+- A successful sprint request clears the lock and returns to full sprint, then to trot when sprint input ends. Crouched
+  movement remains its independent 0.5× posture speed, and reload still caps unlocked sprint at trot.
+- The lock is reset on spawn/debug preset changes and reconstructed from the persisted crouch posture; it is not
+  exposed in the HUD or visual scene snapshot schema.
+
+## 2026-08-07 — Release muzzle smoke at visual clear-out
+
+- Added one shared `0.01` opacity threshold for pooled muzzle and thermal smoke. A particle is now returned to its fixed
+  pool as soon as it is visually clear, while the existing five-second lifetime remains a hard safety bound.
+- This preserves the world-space smoke appearance and seeded motion but prevents rapid fire from retaining invisible
+  sprites and reducing available plume capacity.
+
+## 2026-08-07 — Gunless simulant runner
+
+- Removed the simulant weapon model, weapon state, hitscan firing, muzzle effects, and AI damage path.
+- The scene-only competitor now runs directly toward the player and stops at a 2.4 m standoff. Its body bob and
+  movement presentation remain active, while the player-facing weapon definitions and damage model are untouched.
+
+## 2026-08-07 — Compact 250 m runner map
+
+- Reduced the streamed exploration bounds to 125 m from the origin in each direction, producing a 250 m × 250 m map
+  and 9 candidate chunks instead of the previous 500 m × 500 m, 36-chunk layout; the later corner omission leaves 5
+  visible resident chunks.
+
+## 2026-08-07 — Omitted corner chunks
+
+- Kept the existing square movement and physics envelope, but skipped the four diagonal chunks when preloading the
+  procedural world. The rendered footprint now contains the central chunk and four axis-aligned edge chunks.
+- Removed the circular mesh clipping and all circular player/simulant clamping; this is a visual chunk-selection change,
+  not an invisible gameplay wall.
+- Added a focused regression proving the four corner chunk names are absent and the resident count is five.
+- Validation: the server-owned test-bus snapshot `1786139040449-25981-dd9776a8` passed all 439 assertions; strict
+  typecheck, web build, targeted formatting, `git diff --check`, and the explicit Vite HMR request also passed. No new
+  browser session was opened.
+
+## 2026-08-07 — Compact 500 m runner map
+
+- Reduced the streamed exploration bounds to 250 m from the origin in each direction, producing a 500 m × 500 m map
+  and 36 resident chunks instead of the previous 1 km × 1 km, 121-chunk layout.
+
+## 2026-08-07 — Correct-base local competitor repair
+
+- Kept the implementation on the existing `visual-table-gb9d082b587` checkout; the unrelated,
+  uncommitted `multiplayer-spec` server lane is not part of this feature.
+- The visible competitor now has a normal-height character body and a visible weapon model. Its
+  weapon origin follows the live muzzle, and shared camera-motion output drives its gait bob, roll,
+  breathing sway, and recoil aim response.
+- Competitor fire uses the existing `WeaponRuntime.fireFrom` path. Clear line-of-sight shots apply
+  the ordinary per-projectile payload through the shared player vitals damage path, including the
+  full pellet payload for a shotgun. Seeded spread, weapon selection, movement, O₂ drain, shield,
+  and health all remain room-seed deterministic.
+- A defeated competitor hides for the same three-second respawn interval as the local player, then
+  returns with full ordinary vitals and a reset magazine at a new seeded ground position.
+- Added focused coverage for the deterministic shot-payload calculation. Browser gameplay remains
+  unverified because no new browser session was opened.
+
+## 2026-08-06 — Proximity for all weapon audio
+
+- Routed the muzzle blast, crack, mechanical click, and tail through one shared positional Web Audio output per shot.
+- The listener follows the camera pose; HRTF panning and inverse-distance rolloff use the measured world source point,
+  with a bounded 1–32 m proximity envelope retained as a legacy-browser fallback. Player shots use the world muzzle;
+  simulated opponent shots use their world origin.
+- Routed bullet pass-by voices through the same spatial path, retaining their closest-approach gate and stereo side
+  placement. No weapon sound layer connects directly to the global audio output.
+- Validation: the server-owned test bus passed `434/434` assertions on run `1786027182224-32746-46f4370b`, including
+  the proximity regression; strict typecheck, lint, production build, targeted Prettier, `git diff --check`, and the
+  explicit Vite HMR request also passed. No new browser session was opened.
+
+## 2026-08-06 — Procedural bullet pass-by audio
+
+- Weapon fire now derives one resolved gun audio profile per shot and can schedule a pass-by whizz for each pellet.
+- The whizz is an 80/20 procedural mix of band-pass white-noise turbulence and a sine whistle. Damage selects the audible start/end pitch band, closest approach controls gain, filter width, and sweep depth, and projectile speed controls the 28-100 ms duration.
+- A closest-approach check gates the effect so only shots that pass near the camera produce a whizz; the existing muzzle report remains on the normal gun-audio path.
+- Simulant fire enables both layers: the muzzle report is delayed by source distance at 343 m/s, while the incoming near-miss uses the supersonic projectile timeline and arrives first.
+- Pass-by timing uses the supplied projectile travel distance even when a render surface receives the impact, so an incoming round can still produce its near-miss cue before the impact event.
+- Acoustic ordering is explicit: muzzle arrival is `muzzle distance / speed of sound`; whizz arrival is `bullet travel + pass-point distance / speed of sound`.
+- The resolved gun profile now also derives projectile speed from damage and barrel length: the continuous range is 280-900 m/s, with short low-damage weapons near subsonic and heavy long-barrel weapons near the supersonic ceiling. Scope metadata does not affect velocity.
+
+## 2026-08-06 — Seeded map-wide weapon pickups
+
+- Removed the fixed table-side weapon layout. Every pickup is now generated from the room seed in the full ±125 m procedural world, with a requested ceiling of 24 copies per weapon. The default 75 m spacing rule stops earlier when no valid point remains.
+- Increased the default pickup population from 18 to 144 and expanded each seeded quadrant to an 8 × 8 cell grid, so traversal encounters remain dense across the full map instead of relying on sparse fallback samples.
+- The generator uses four seeded map sectors and shuffled interior cells, then rejects authored play areas, known coarse obstacles, and nearby duplicate placements. This keeps the result deterministic while guaranteeing coverage across the map when valid cells exist.
+- The visual scene passes the three 50 m authored play-area rectangles and the current physics boxes as no-spawn constraints. Pickup models remain in the scene for traversal, so HMR/reloads reproduce the same positions for the same room seed.
+- Validation: the server-owned snapshot `1786028081818-32746-03f1127f` passed all 435 assertions, including the dense default-population regression; strict typecheck, focused weapon ESLint, Prettier, `git diff --check`, and the web production build passed. The explicit HMR request was sent while Vite was running; no new browser session was opened.
+
 ## Canonical state
+
+## 2026-08-06 — Visual-table simulant combat prototype
+
+- The simulant starts on a seeded random ground azimuth at the 250 m world radius and advances toward the
+  player at the shared O₂-neutral trot speed (8.2 m/s) until it reaches a close 2.4 m runner standoff.
+- The simulant uses a private instance of the shared camera-motion damper. Trot movement and each
+  projectile update its O₂ reserve; the damper feeds breathing sway and recoil back into its aim.
+
+- Added a basic scene-only competitor in `mahjong-table.ts` seeded from `roomSeed`:
+  - random spawn at one opponent hand anchor (`north`, `east`, or `west`)
+  - random weapon selected from `WEAPON_IDS`
+  - marker mesh added at spawn for visible debugging
+- Player deaths now apply the shared camera death tumble, clear movement and fire input, and hold the
+  fallen view for a three-second transition. The final 650 ms fades a full-screen black overlay in;
+  `resetToSpawn` runs only while the view is black, using a seeded random world sample and
+  physics-grounded point inside `WORLD_BOUNDS`, and the respawn camera faces map center before the
+  overlay fades back out.
+- Added a reusable weapon `fireFrom` path in `WeaponRuntime` with optional `maxDistance` and
+  `onTargetHit` callback, then wired player `tryFire` through it.
+- Added a frame-looped simulant fire attempt: direction targets the player camera, and per-shot spread
+  uses seeded randomness to apply random aim.
+- Added dispose cleanup for simulant state and marker.
+- No automated validation run yet; this is a prototype lane-only behavior change.
 
 - Common repository: `/Users/nv/repos/0x4007/hk-mahjong-coach`
 - Worktree:
@@ -126,9 +246,10 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 - The procedural backdrop now uses a local PMREM `RoomEnvironment`, six nearer rooftop masses with parapet
   caps, and a separated final drawn tile in the staged hand so the room, skyline depth, and teaching fixture
   read clearly without external assets.
-- The FPS play space and procedural backdrop now span five 100 m chunks per side (a 1 km × 1 km navigable world,
-  ±500 m from the origin) and apply a 2× per-chunk feature density multiplier across buildings, props, signs,
-  and utility posts. Weapon pickups use the same full-world bounds instead of a smaller legacy spawn square.
+- The FPS play space and procedural backdrop now span three 100 m chunks per axis with the four diagonal chunks omitted
+  (a 250 m × 250 m square movement envelope, five rendered chunks) and apply the seeded feature-density multiplier across
+  buildings, props, signs, and utility posts. Weapon pickups use the same full-world bounds instead of a smaller
+  legacy spawn square.
 - Mobile browsers keep the landscape guidance in shipping and expose motion look, touch swipe, joystick,
   crouch, and jump against the same composed initial camera.
 - Development mode now exposes `?debug=1` controls for camera presets, FOV, exposure, tone mapper, fog,
@@ -566,6 +687,25 @@ restart/resume path before beginning dependent CLI/server integration.
   around the opposite table corners.
 - Preserved the existing seeded outdoor pickup counts and obstacle/reserved-area filtering. The intentional
   table-side set is marked with `nearTable` so tests and scene diagnostics can distinguish it from outdoor spawns.
+
+## 2026-08-06 — Randomized full-world weapon spawns
+
+- Removed the dedicated table-side spawn set so every pistol, shotgun, machine gun, sniper, scoped carbine, and
+  submachine gun pickup now uses the same seeded world placement path in `generateWeaponPickups`.
+- Kept pickup count semantics (`DEFAULT_PICKUP_COUNT_PER_WEAPON`, per-weapon optional override, and spacing limits)
+  but now all placements are resolved from world-wide sample candidates with only obstacle and reserved-area guards.
+- Kept the existing starter pistol marker on the first generated spawn for continuity and updated the pickup tests to
+  assert full-world spread behavior.
+
+## 2026-08-06 — Taller, denser procedural skyline
+
+- Increased exploration skyline density and vertical scale by tuning the global city density multiplier and per-biome
+  `buildingDensity` and `buildingHeightMin/Max` ranges in `apps/web/src/scene/mahjong-table.ts`.
+- Kept seeded biome style and feature-noise weighting so each room seed still reproduces stable city neighborhoods while
+  increasing backdrop coverage and silhouette height.
+- Added a second shared lift: the density multiplier is now `2.85`, district elevation spans `0.65–3.15`, and each
+  building derives extra height from both elevation and feature noise. This keeps the skyline deterministic while
+  making high-elevation districts visibly denser and taller without adding per-seed exceptions.
 
 ## 2026-08-06 — Sniper scope magnification shader
 
@@ -1040,7 +1180,7 @@ and five-minute cleanup state"`; a direct wall shot then reported `shotsHit=11` 
 - Moved scope geometry and projection inputs into a reusable optic profile. Both the existing sniper and the new
   carbine now use the same camera-child lens anchor and projected world feed, with magnification supplied by the
   equipped weapon instead of a sniper-only constant.
-- Added deterministic table-side pickups, number-row slots 5 and 6, six-row armory chart output, and HUD guidance for
+- Added seeded full-world pickups, number-row slots 5 and 6, six-row armory chart output, and HUD guidance for
   all six weapons. New derived chart rows expose fire mode, burst size, cooldown, and optic magnification directly from
   the definitions.
 - Validation on the final dirty fingerprint: the server-owned test bus passed all `432/432` assertions, including

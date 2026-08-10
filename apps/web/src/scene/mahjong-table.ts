@@ -28,6 +28,7 @@ import {
   WEAPON_RELOAD_INSERT_IMPULSE_DURATION_SECONDS,
   WEAPON_BARREL_SMOKE_MAX_RATE,
   WEAPON_BARREL_SMOKE_POOL_SIZE,
+  shouldClearWeaponSmoke,
   WEAPON_BARREL_AMBIENT_TEMPERATURE_C,
   resolveWeaponBarrelSmokeRatio,
   type WeaponId,
@@ -42,6 +43,10 @@ import {
   resolveWeaponHotkey,
   resolveGunAudioProfile,
   GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+  resolveWeaponAudioProximity,
+  WEAPON_AUDIO_MAX_DISTANCE_METERS,
+  WEAPON_AUDIO_REFERENCE_DISTANCE_METERS,
+  WEAPON_AUDIO_ROLLOFF_FACTOR,
   resolveWeaponBarrelTemperatureC,
   resolveWeaponBarrelGlowRatio,
   type WeaponSpawnRect,
@@ -62,7 +67,6 @@ import {
   O2_JUMP_COST,
   O2_JUMP_RECOVERY_DELAY_SECONDS,
   O2_MINI_HOP_SPEED_BLEND,
-  O2_NEUTRAL_JOG_SPEED_BLEND,
   O2_SPRINT_DRAIN_PER_SECOND,
   O2_STAND_COST,
   PLAYER_MAX_O2,
@@ -270,21 +274,39 @@ export const normalizeVisualRoomSeed = (seed: string | undefined): string => {
 
 const VISUAL_SCENE_STATE_STORAGE_PREFIX = "hk-mahjong-coach:visual-scene:v1:";
 const VISUAL_SCENE_FALL_RESET_Y = -2;
-// Keep the 1 km FPS world bounded to five coarse chunks from the origin in
-// each direction. The larger chunk preserves long traversal sightlines while
-// keeping the resident grid at a manageable 11 × 11 chunks.
+const WORLD_SPAWN_MARGIN = 1;
+const WORLD_SPAWN_ATTEMPTS = 24;
+const WORLD_SPAWN_DROP_HEIGHT = 80;
+const WORLD_SPAWN_DROP_DISTANCE = WORLD_SPAWN_DROP_HEIGHT * 2;
+const PLAYER_DEATH_RESPAWN_DELAY_MS = 3_000;
+const PLAYER_DEATH_FADE_DURATION_MS = 650;
+const PLAYER_RESPAWN_FADE_IN_DURATION_MS = 260;
+const SIMULANT_STOP_DISTANCE_METERS = 2.4;
+// Keep the 250 m FPS world bounded to 125 m from the origin in each direction.
+// The coarse chunks preserve long traversal sightlines while keeping the
+// resident grid compact enough for the runner prototype.
 const EXPLORATION_CHUNK_SIZE = 100;
-const EXPLORATION_CHUNKS_PER_SIDE = 5;
-const EXPLORATION_DENSITY_MULTIPLIER = 2;
+const EXPLORATION_CHUNKS_PER_SIDE = 1.25;
+const EXPLORATION_DENSITY_MULTIPLIER = 2.85;
 const EXPLORATION_DENSITY_SCALE =
   EXPLORATION_DENSITY_MULTIPLIER * Math.sqrt(EXPLORATION_CHUNK_SIZE / 8);
+const EXPLORATION_DISTRICT_ELEVATION_MIN = 0.65;
+const EXPLORATION_DISTRICT_ELEVATION_MAX = 3.15;
+const EXPLORATION_BUILDING_ELEVATION_LIFT = 1.15;
+const EXPLORATION_BUILDING_FEATURE_LIFT = 0.75;
 const EXPLORATION_WORLD_HALF_SIZE = EXPLORATION_CHUNK_SIZE * EXPLORATION_CHUNKS_PER_SIDE;
+export const EXPLORATION_WORLD_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
 const WORLD_BOUNDS = {
   minX: -EXPLORATION_WORLD_HALF_SIZE,
   maxX: EXPLORATION_WORLD_HALF_SIZE,
   minZ: -EXPLORATION_WORLD_HALF_SIZE,
   maxZ: EXPLORATION_WORLD_HALF_SIZE,
 } as const;
+const SIMULANT_SPAWN_RADIUS_METERS = EXPLORATION_WORLD_HALF_SIZE;
+const SIMULANT_MIN_START_DISTANCE_METERS = 180;
+const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.09;
+const SIMULANT_BODY_TARGET_HEIGHT_METERS = 1.8;
+const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.05;
 export const PLAY_AREA_SIZE_METERS = 50;
 const PLAY_AREA_GAP_METERS = 10;
 const PLAY_AREA_SPACING_METERS = PLAY_AREA_SIZE_METERS + PLAY_AREA_GAP_METERS;
@@ -1279,12 +1301,22 @@ const PLAYER_COLLIDER_CENTER_HEIGHT = PLAYER_COLLIDER_HALF_HEIGHT + PLAYER_COLLI
 const SWIPE_LOOK_SENSITIVITY = 0.00594;
 const TOUCH_SIDEWAYS_SPRINT_FRACTION = 0.5;
 const WALK_SPEED_RATIO = 1 / SPRINT_MULTIPLIER;
-const NEUTRAL_JOG_SPEED_RATIO =
-  WALK_SPEED_RATIO + (1 - WALK_SPEED_RATIO) * O2_NEUTRAL_JOG_SPEED_BLEND;
-const NEUTRAL_JOG_SPEED_MULTIPLIER = SPRINT_MULTIPLIER * NEUTRAL_JOG_SPEED_RATIO;
+/** Standing trot is exactly one-and-a-half times the base movement speed. */
+const TROT_SPEED_MULTIPLIER = 1.5;
+const TROT_LOCOMOTION_BLEND =
+  (TROT_SPEED_MULTIPLIER / SPRINT_MULTIPLIER - WALK_SPEED_RATIO) / (1 - WALK_SPEED_RATIO);
+const CROUCH_SPEED_MULTIPLIER = 0.5;
+const WALK_SPEED_MULTIPLIER = 1;
+const SIMULANT_TROT_SPEED_METERS_PER_SECOND =
+  PLAYER_MOVE_SPEED_METERS_PER_SECOND * TROT_SPEED_MULTIPLIER;
+const SIMULANT_TROT_SPEED_RATIO =
+  SIMULANT_TROT_SPEED_METERS_PER_SECOND / (PLAYER_MOVE_SPEED_METERS_PER_SECOND * SPRINT_MULTIPLIER);
+const SIMULANT_TROT_LOCOMOTION_BLEND = TROT_LOCOMOTION_BLEND;
 
 export interface PlayerMovementSpeedInput {
   readonly crouching: boolean;
+  /** Internal posture toggle used by keyboard/touch movement; never surfaced in the HUD. */
+  readonly walking?: boolean;
   readonly sprinting: boolean;
   readonly jogging: boolean;
   readonly reloading: boolean;
@@ -1293,27 +1325,37 @@ export interface PlayerMovementSpeedInput {
 /**
  * Resolve the grounded movement multiplier.
  *
- * Reloading caps the requested standing speed at the O₂-neutral trot. It does
- * not promote ordinary walking to trot, and it never allows a full sprint
- * while the weapon is being reloaded.
+ * Standing movement defaults to the O₂-neutral trot. Crouching always keeps
+ * its own slower posture speed; the hidden walking toggle only applies while
+ * the player is upright. Sprint clears that toggle, and reload caps the
+ * requested sprint at the same trot.
  */
 export const resolvePlayerMovementSpeedMultiplier = ({
   crouching,
+  walking = false,
   sprinting,
-  jogging,
   reloading,
 }: PlayerMovementSpeedInput): number => {
   if (crouching) {
-    return 0.5;
+    return CROUCH_SPEED_MULTIPLIER;
   }
-  const requestedMultiplier = sprinting
-    ? SPRINT_MULTIPLIER
-    : jogging
-      ? NEUTRAL_JOG_SPEED_MULTIPLIER
-      : 1;
-  return reloading
-    ? Math.min(requestedMultiplier, NEUTRAL_JOG_SPEED_MULTIPLIER)
-    : requestedMultiplier;
+  if (walking) {
+    return WALK_SPEED_MULTIPLIER;
+  }
+  const requestedMultiplier = sprinting ? SPRINT_MULTIPLIER : TROT_SPEED_MULTIPLIER;
+  return reloading ? Math.min(requestedMultiplier, TROT_SPEED_MULTIPLIER) : requestedMultiplier;
+};
+
+/** Apply one ordinary weapon shot's full projectile payload to a target. */
+export const resolveSimulantShotDamage = (
+  damagePerProjectile: number,
+  projectileCount = 1,
+): number => {
+  const damage = Number.isFinite(damagePerProjectile) ? Math.max(0, damagePerProjectile) : 0;
+  const projectiles = Number.isFinite(projectileCount)
+    ? Math.max(0, Math.floor(projectileCount))
+    : 0;
+  return damage * projectiles;
 };
 
 const RETICLE_SWAY_PIXELS_PER_RADIAN = 150;
@@ -2089,10 +2131,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.2,
     humidityTolerance: 0.22,
     elevationTolerance: 0.24,
-    buildingDensity: 1.45,
-    buildingHeightMin: 1.5,
-    buildingHeightMax: 5.6,
-    windowHeight: 3.8,
+    buildingDensity: 1.75,
+    buildingHeightMin: 2,
+    buildingHeightMax: 6.4,
+    windowHeight: 4.2,
     pathFrequency: 0.55,
     bridgeDensity: 0.15,
     propDensity: 1.05,
@@ -2112,10 +2154,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.23,
     humidityTolerance: 0.2,
     elevationTolerance: 0.25,
-    buildingDensity: 1.0,
-    buildingHeightMin: 1,
-    buildingHeightMax: 4.2,
-    windowHeight: 2.8,
+    buildingDensity: 1.25,
+    buildingHeightMin: 1.3,
+    buildingHeightMax: 5.1,
+    windowHeight: 3.1,
     pathFrequency: 0.45,
     bridgeDensity: 0.12,
     propDensity: 1.36,
@@ -2135,10 +2177,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.21,
     humidityTolerance: 0.22,
     elevationTolerance: 0.22,
-    buildingDensity: 1.95,
-    buildingHeightMin: 1.8,
-    buildingHeightMax: 5.9,
-    windowHeight: 4.2,
+    buildingDensity: 2.25,
+    buildingHeightMin: 2.1,
+    buildingHeightMax: 6.6,
+    windowHeight: 4.8,
     pathFrequency: 0.52,
     bridgeDensity: 0.2,
     propDensity: 1.0,
@@ -2158,10 +2200,10 @@ const EXPLORATION_BIOMES: readonly ExplorationBiomeStyle[] = [
     temperatureTolerance: 0.21,
     humidityTolerance: 0.21,
     elevationTolerance: 0.2,
-    buildingDensity: 1.15,
-    buildingHeightMin: 2.8,
-    buildingHeightMax: 7,
-    windowHeight: 4.6,
+    buildingDensity: 1.5,
+    buildingHeightMin: 2.9,
+    buildingHeightMax: 8.1,
+    windowHeight: 5,
     pathFrequency: 0.58,
     bridgeDensity: 0.35,
     propDensity: 0.85,
@@ -3792,6 +3834,48 @@ const addHand = (
   parent.add(hand);
 };
 
+const createSimulantBody = (color: THREE.Color): THREE.Group => {
+  const root = new THREE.Group();
+  root.name = "SimulantBody";
+  const bodyScale = SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS;
+  root.scale.setScalar(bodyScale);
+  root.position.y = SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS * bodyScale;
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.48,
+    metalness: 0.08,
+    emissive: color,
+    emissiveIntensity: 0.2,
+  });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), bodyMaterial);
+  head.position.set(0, 0.86, 0);
+  root.add(head);
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.52, 8, 8), bodyMaterial);
+  torso.position.set(0, 0.44, 0);
+  root.add(torso);
+  const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  leftArm.position.set(-0.28, 0.52, 0.02);
+  leftArm.rotation.z = 0.25;
+  root.add(leftArm);
+  const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
+  rightArm.position.set(0.28, 0.52, 0.02);
+  rightArm.rotation.z = -0.25;
+  root.add(rightArm);
+  const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  leftLeg.position.set(-0.12, 0.05, 0);
+  root.add(leftLeg);
+  const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
+  rightLeg.position.set(0.12, 0.05, 0);
+  root.add(rightLeg);
+  root.traverse((node) => {
+    if (node instanceof THREE.Mesh) {
+      node.castShadow = true;
+      node.receiveShadow = true;
+    }
+  });
+  return root;
+};
+
 const addOpenMeld = (
   parent: THREE.Object3D,
   cache: TileTextureCache,
@@ -4005,6 +4089,12 @@ interface WeaponRuntime {
   ) => void;
   readonly setFireHeld: (held: boolean) => void;
   readonly fire: () => void;
+  readonly fireFrom: (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options?: WeaponFireFromOptions,
+  ) => void;
   readonly reload: () => void;
   readonly isReloading: () => boolean;
   readonly interact: () => void;
@@ -4018,6 +4108,24 @@ interface WeaponRuntime {
   } | null;
   readonly getSnapshot: () => WeaponStateSnapshot;
   readonly dispose: () => void;
+}
+
+interface WeaponFireFromOptions {
+  readonly random?: { readonly nextFloat: () => number };
+  readonly spreadRadians?: number;
+  readonly maxDistance?: number;
+  readonly showWorldEffects?: boolean;
+  readonly showCameraMuzzle?: boolean;
+  readonly playAudio?: boolean;
+  readonly playPassByAudio?: boolean;
+  readonly trackShotHits?: boolean;
+  readonly onHit?: (hitObject: THREE.Object3D, damage: number) => void;
+  readonly onTargetHit?: () => void;
+}
+
+interface WeaponAudioSpatialOutput {
+  readonly destination: GainNode;
+  readonly cleanup: () => void;
 }
 
 const getWeaponAccent = (weapon: WeaponId): string =>
@@ -4050,6 +4158,23 @@ const WEAPON_SHOT_SOUND_MASTER_GAIN = 0.08;
 const WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ = 3200;
 const WEAPON_SHOT_SOUND_CRACK_FILTER_Q = 0.7;
 const WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ = 190;
+const WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND = 343;
+const WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS = 6;
+const WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS = 0.2;
+const WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS = 0.028;
+const WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS = 0.1;
+const WEAPON_BULLET_WHIZZ_PAN_SCALE = 0.95;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ = 5000;
+const WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ = 2200;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ = 2500;
+const WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ = 700;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ = 2000;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ = 6000;
+const WEAPON_BULLET_WHIZZ_NOISE_MIN_Q = 2;
+const WEAPON_BULLET_WHIZZ_NOISE_MAX_Q = 10;
+const WEAPON_BULLET_WHIZZ_NOISE_MIX = 0.8;
+const WEAPON_BULLET_WHIZZ_WHISTLE_MIX = 0.2;
+const WEAPON_BULLET_WHIZZ_VOLUME_SCALE = 1.1;
 
 const createWeaponShotSaturationCurve = (): Float32Array => {
   const curve = new Float32Array(256);
@@ -4489,6 +4614,7 @@ const createWeaponRuntime = (
   pickups: readonly WeaponPickupSpawn[],
   onStateChange?: (state: WeaponStateSnapshot) => void,
   onWeaponShot?: (damage: number, projectileCount: number) => void,
+  onWeaponHit?: (hitObject: THREE.Object3D, damage: number) => void,
   onWeaponSwitch?: (hasOutgoingWeapon: boolean) => void,
 ): WeaponRuntime => {
   const pickupRoot = new THREE.Group();
@@ -4642,6 +4768,14 @@ const createWeaponRuntime = (
   const pelletDirection = new THREE.Vector3();
   const effectEnd = new THREE.Vector3();
   const effectStart = new THREE.Vector3();
+  const passByDirection = new THREE.Vector3();
+  const passByToListener = new THREE.Vector3();
+  const passByClosestPoint = new THREE.Vector3();
+  const passByRightAxis = new THREE.Vector3();
+  const audioListenerPosition = new THREE.Vector3();
+  const audioListenerForward = new THREE.Vector3();
+  const audioListenerUp = new THREE.Vector3();
+  const audioListenerQuaternion = new THREE.Quaternion();
   const hitColor = new THREE.Color();
   const surfaceNormal = new THREE.Vector3();
   const bulletHoleForward = new THREE.Vector3(0, 0, 1);
@@ -4709,13 +4843,87 @@ const createWeaponRuntime = (
     return { context: shotAudioContext, output, noiseBuffer };
   };
 
-  const playWeaponShotSound = (damage: number, barrelLength: number): void => {
+  const updateShotAudioListener = (context: AudioContext): void => {
+    camera.getWorldPosition(audioListenerPosition);
+    camera.getWorldDirection(audioListenerForward);
+    camera.getWorldQuaternion(audioListenerQuaternion);
+    audioListenerUp.set(0, 1, 0).applyQuaternion(audioListenerQuaternion).normalize();
+    const listener = context.listener;
+    const when = context.currentTime;
+    try {
+      listener.positionX.setValueAtTime(audioListenerPosition.x, when);
+      listener.positionY.setValueAtTime(audioListenerPosition.y, when);
+      listener.positionZ.setValueAtTime(audioListenerPosition.z, when);
+      listener.forwardX.setValueAtTime(audioListenerForward.x, when);
+      listener.forwardY.setValueAtTime(audioListenerForward.y, when);
+      listener.forwardZ.setValueAtTime(audioListenerForward.z, when);
+      listener.upX.setValueAtTime(audioListenerUp.x, when);
+      listener.upY.setValueAtTime(audioListenerUp.y, when);
+      listener.upZ.setValueAtTime(audioListenerUp.z, when);
+    } catch {
+      // Unsupported listener positioning should not block visual firing. The
+      // shared proximity gain remains active even without HRTF placement.
+    }
+  };
+
+  const createWeaponAudioSpatialOutput = (
+    audio: { readonly context: AudioContext; readonly output: GainNode },
+    sourcePosition: THREE.Vector3,
+    when: number,
+  ): WeaponAudioSpatialOutput => {
+    updateShotAudioListener(audio.context);
+    const proximity = resolveWeaponAudioProximity(sourcePosition.distanceTo(audioListenerPosition));
+    const proximityGain = audio.context.createGain();
+    proximityGain.gain.setValueAtTime(proximity, when);
+    let panner: PannerNode | null = null;
+    try {
+      panner = audio.context.createPanner();
+      panner.panningModel = "HRTF";
+      panner.distanceModel = "inverse";
+      panner.refDistance = WEAPON_AUDIO_REFERENCE_DISTANCE_METERS;
+      panner.maxDistance = WEAPON_AUDIO_MAX_DISTANCE_METERS;
+      panner.rolloffFactor = WEAPON_AUDIO_ROLLOFF_FACTOR;
+      panner.positionX.setValueAtTime(sourcePosition.x, when);
+      panner.positionY.setValueAtTime(sourcePosition.y, when);
+      panner.positionZ.setValueAtTime(sourcePosition.z, when);
+      proximityGain.connect(panner);
+      panner.connect(audio.output);
+    } catch {
+      panner?.disconnect();
+      // The gain still applies the bounded proximity envelope when a browser
+      // lacks a usable PannerNode implementation.
+      proximityGain.connect(audio.output);
+      panner = null;
+    }
+    let cleaned = false;
+    return {
+      destination: proximityGain,
+      cleanup: (): void => {
+        if (cleaned) {
+          return;
+        }
+        cleaned = true;
+        proximityGain.disconnect();
+        panner?.disconnect();
+      },
+    };
+  };
+
+  const playWeaponShotSound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    sourcePosition: THREE.Vector3,
+  ): void => {
     const audio = ensureShotAudio();
     if (audio === null) {
       return;
     }
-    const profile = resolveGunAudioProfile({ damage, barrelLength });
     const now = audio.context.currentTime;
+    updateShotAudioListener(audio.context);
+    const muzzlePropagationDelay =
+      sourcePosition.distanceTo(audioListenerPosition) /
+      WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const startAt = now + Math.max(0, muzzlePropagationDelay);
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, sourcePosition, startAt);
     const scheduleNoiseLayer = (options: {
       readonly durationSeconds: number;
       readonly gain: number;
@@ -4734,12 +4942,12 @@ const createWeaponRuntime = (
         filter = audio.context.createBiquadFilter();
         envelope = audio.context.createGain();
         source.buffer = audio.noiseBuffer;
-        source.playbackRate.setValueAtTime(options.playbackRate, now);
+        source.playbackRate.setValueAtTime(options.playbackRate, startAt);
         filter.type = options.filterType;
-        filter.frequency.setValueAtTime(options.filterFrequencyHz, now);
-        filter.Q.setValueAtTime(options.filterQ, now);
-        envelope.gain.setValueAtTime(Math.max(0.0001, options.gain), now);
-        envelope.gain.exponentialRampToValueAtTime(0.0001, now + options.durationSeconds);
+        filter.frequency.setValueAtTime(options.filterFrequencyHz, startAt);
+        filter.Q.setValueAtTime(options.filterQ, startAt);
+        envelope.gain.setValueAtTime(Math.max(0.0001, options.gain), startAt);
+        envelope.gain.exponentialRampToValueAtTime(0.0001, startAt + options.durationSeconds);
         source.connect(filter);
         filter.connect(envelope);
         envelope.connect(options.destination);
@@ -4749,8 +4957,8 @@ const createWeaponRuntime = (
           envelope?.disconnect();
           options.onEnded?.();
         };
-        source.start(now);
-        source.stop(now + options.durationSeconds);
+        source.start(startAt);
+        source.stop(startAt + options.durationSeconds);
       } catch {
         source?.disconnect();
         filter?.disconnect();
@@ -4759,16 +4967,16 @@ const createWeaponRuntime = (
     };
 
     const muzzleCompressor = audio.context.createDynamicsCompressor();
-    muzzleCompressor.threshold.setValueAtTime(-24, now);
-    muzzleCompressor.knee.setValueAtTime(12, now);
-    muzzleCompressor.ratio.setValueAtTime(2, now);
-    muzzleCompressor.attack.setValueAtTime(0.001, now);
-    muzzleCompressor.release.setValueAtTime(0.05, now);
+    muzzleCompressor.threshold.setValueAtTime(-24, startAt);
+    muzzleCompressor.knee.setValueAtTime(12, startAt);
+    muzzleCompressor.ratio.setValueAtTime(2, startAt);
+    muzzleCompressor.attack.setValueAtTime(0.001, startAt);
+    muzzleCompressor.release.setValueAtTime(0.05, startAt);
     const muzzleSaturation = audio.context.createWaveShaper();
     muzzleSaturation.curve = WEAPON_SHOT_SATURATION_CURVE as unknown as Float32Array<ArrayBuffer>;
     muzzleSaturation.oversample = "2x";
     muzzleCompressor.connect(muzzleSaturation);
-    muzzleSaturation.connect(audio.output);
+    muzzleSaturation.connect(spatialOutput.destination);
     scheduleNoiseLayer({
       durationSeconds: WEAPON_SHOT_SOUND_MUZZLE_DURATION_SECONDS,
       gain: profile.damageVolume,
@@ -4790,27 +4998,27 @@ const createWeaponRuntime = (
       filterType: "highpass",
       filterFrequencyHz: WEAPON_SHOT_SOUND_CRACK_FILTER_FREQUENCY_HZ,
       filterQ: WEAPON_SHOT_SOUND_CRACK_FILTER_Q,
-      destination: audio.output,
+      destination: spatialOutput.destination,
     });
 
     try {
       const clickOscillator = audio.context.createOscillator();
       const clickEnvelope = audio.context.createGain();
       clickOscillator.type = "square";
-      clickOscillator.frequency.setValueAtTime(WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ, now);
-      clickEnvelope.gain.setValueAtTime(0.1, now);
+      clickOscillator.frequency.setValueAtTime(WEAPON_SHOT_SOUND_CLICK_FREQUENCY_HZ, startAt);
+      clickEnvelope.gain.setValueAtTime(0.1, startAt);
       clickEnvelope.gain.exponentialRampToValueAtTime(
         0.0001,
-        now + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS,
+        startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS,
       );
       clickOscillator.connect(clickEnvelope);
-      clickEnvelope.connect(audio.output);
+      clickEnvelope.connect(spatialOutput.destination);
       clickOscillator.onended = (): void => {
         clickOscillator.disconnect();
         clickEnvelope.disconnect();
       };
-      clickOscillator.start(now);
-      clickOscillator.stop(now + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS);
+      clickOscillator.start(startAt);
+      clickOscillator.stop(startAt + WEAPON_SHOT_SOUND_CLICK_DURATION_SECONDS);
     } catch {
       // Web Audio is optional; visual firing must continue if a node fails.
     }
@@ -4822,8 +5030,198 @@ const createWeaponRuntime = (
       filterType: "lowpass",
       filterFrequencyHz: profile.tailCutoffFrequencyHz,
       filterQ: 0.8,
-      destination: audio.output,
+      destination: spatialOutput.destination,
+      onEnded: spatialOutput.cleanup,
     });
+  };
+
+  const playWeaponPassBySound = (
+    profile: ReturnType<typeof resolveGunAudioProfile>,
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    distance: number,
+  ): void => {
+    const audio = ensureShotAudio();
+    if (audio === null) {
+      return;
+    }
+    updateShotAudioListener(audio.context);
+    if (distance <= 0 || !Number.isFinite(distance)) {
+      return;
+    }
+    const safeDirection = passByDirection.copy(direction).normalize();
+    if (safeDirection.lengthSq() <= 0) {
+      return;
+    }
+    passByToListener.copy(audioListenerPosition).sub(origin);
+    const projection = passByToListener.dot(safeDirection);
+    if (projection < WEAPON_BULLET_WHIZZ_MIN_PROJECTION_METERS) {
+      return;
+    }
+    const clampedProjection = Math.max(0, Math.min(distance, projection));
+    passByClosestPoint.copy(origin).addScaledVector(safeDirection, clampedProjection);
+    const closestDistance = passByClosestPoint.distanceTo(audioListenerPosition);
+    if (
+      !Number.isFinite(closestDistance) ||
+      closestDistance > WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS
+    ) {
+      return;
+    }
+    const nearDistanceSpan = Math.max(
+      0.05,
+      WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS - closestDistance,
+    );
+    const startProjection = Math.max(0, clampedProjection - nearDistanceSpan);
+    const endProjection = Math.min(distance, clampedProjection + nearDistanceSpan);
+    passByToListener.copy(origin).addScaledVector(safeDirection, startProjection);
+    const startSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    passByToListener.copy(origin).addScaledVector(safeDirection, endProjection);
+    const endSoundDistance = passByToListener.distanceTo(audioListenerPosition);
+    const now = audio.context.currentTime;
+    const start =
+      now +
+      startProjection / profile.bulletSpeedMetersPerSecond +
+      startSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const end =
+      now +
+      endProjection / profile.bulletSpeedMetersPerSecond +
+      endSoundDistance / WEAPON_SOUND_SPEED_OF_SOUND_METERS_PER_SECOND;
+    const duration = Math.max(
+      WEAPON_BULLET_WHIZZ_MIN_EVENT_DURATION_SECONDS,
+      Math.min(WEAPON_BULLET_WHIZZ_MAX_EVENT_DURATION_SECONDS, end - start),
+    );
+    const travelRatio = THREE.MathUtils.clamp(
+      1 - closestDistance / WEAPON_BULLET_WHIZZ_MAX_DISTANCE_METERS,
+      0,
+      1,
+    );
+    const damageRatio = THREE.MathUtils.clamp((profile.damageVolume - 0.8) / 0.5, 0, 1);
+    const lightDamageStartPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_START_PITCH_HZ;
+    const heavyDamageStartPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_START_PITCH_HZ;
+    const lightDamageEndPitch = WEAPON_BULLET_WHIZZ_LIGHT_DAMAGE_END_PITCH_HZ;
+    const heavyDamageEndPitch = WEAPON_BULLET_WHIZZ_HEAVY_DAMAGE_END_PITCH_HZ;
+    const baseStartPitch = THREE.MathUtils.lerp(
+      lightDamageStartPitch,
+      heavyDamageStartPitch,
+      damageRatio,
+    );
+    const baseEndPitch = THREE.MathUtils.lerp(
+      lightDamageEndPitch,
+      heavyDamageEndPitch,
+      damageRatio,
+    );
+    const sweepDepth = 0.35 + travelRatio * 0.65;
+    const startPitch = baseStartPitch;
+    const endPitch = THREE.MathUtils.lerp(baseStartPitch, baseEndPitch, sweepDepth);
+    const noiseStartFrequency = THREE.MathUtils.clamp(
+      startPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseEndFrequency = THREE.MathUtils.clamp(
+      endPitch * 0.9,
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_CENTER_HZ * 0.75,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_CENTER_HZ,
+    );
+    const noiseStartQ = THREE.MathUtils.lerp(
+      WEAPON_BULLET_WHIZZ_NOISE_MIN_Q,
+      WEAPON_BULLET_WHIZZ_NOISE_MAX_Q,
+      travelRatio,
+    );
+    const noiseEndQ = Math.max(1.4, noiseStartQ * 0.72);
+    const peakGain = Math.max(
+      0.0001,
+      profile.damageVolume * WEAPON_BULLET_WHIZZ_VOLUME_SCALE * (0.08 + travelRatio * 0.92),
+    );
+    const spatialOutput = createWeaponAudioSpatialOutput(audio, passByClosestPoint, start);
+
+    let turbulenceSource: AudioBufferSourceNode | null = null;
+    let turbulenceFilter: BiquadFilterNode | null = null;
+    let turbulenceGain: GainNode | null = null;
+    let whistleOscillator: OscillatorNode | null = null;
+    let whistleGain: GainNode | null = null;
+    let passByPan: StereoPannerNode | null = null;
+    let finishedLayers = 0;
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      turbulenceSource?.disconnect();
+      turbulenceFilter?.disconnect();
+      turbulenceGain?.disconnect();
+      whistleOscillator?.disconnect();
+      whistleGain?.disconnect();
+      passByPan?.disconnect();
+      spatialOutput.cleanup();
+    };
+    const finishLayer = (): void => {
+      finishedLayers += 1;
+      if (finishedLayers >= 2) {
+        cleanup();
+      }
+    };
+    try {
+      turbulenceSource = audio.context.createBufferSource();
+      turbulenceFilter = audio.context.createBiquadFilter();
+      turbulenceGain = audio.context.createGain();
+      whistleOscillator = audio.context.createOscillator();
+      whistleGain = audio.context.createGain();
+      turbulenceSource.buffer = audio.noiseBuffer;
+      turbulenceFilter.type = "bandpass";
+      turbulenceFilter.frequency.setValueAtTime(noiseStartFrequency, start);
+      turbulenceFilter.frequency.exponentialRampToValueAtTime(noiseEndFrequency, start + duration);
+      turbulenceFilter.Q.setValueAtTime(noiseStartQ, start);
+      turbulenceFilter.Q.exponentialRampToValueAtTime(noiseEndQ, start + duration);
+      whistleOscillator.type = "sine";
+      whistleOscillator.frequency.setValueAtTime(startPitch, start);
+      whistleOscillator.frequency.exponentialRampToValueAtTime(endPitch, start + duration);
+      const peakTime = start + Math.min(0.005, duration * 0.2);
+      turbulenceGain.gain.setValueAtTime(0.0001, start);
+      turbulenceGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_NOISE_MIX,
+        peakTime,
+      );
+      turbulenceGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      whistleGain.gain.setValueAtTime(0.0001, start);
+      whistleGain.gain.exponentialRampToValueAtTime(
+        peakGain * WEAPON_BULLET_WHIZZ_WHISTLE_MIX,
+        peakTime,
+      );
+      whistleGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+      turbulenceSource.connect(turbulenceFilter);
+      turbulenceFilter.connect(turbulenceGain);
+      whistleOscillator.connect(whistleGain);
+      passByToListener.copy(audioListenerPosition).sub(passByClosestPoint);
+      if (audio.context.createStereoPanner === undefined) {
+        turbulenceGain.connect(spatialOutput.destination);
+        whistleGain.connect(spatialOutput.destination);
+      } else {
+        passByPan = audio.context.createStereoPanner();
+        passByRightAxis.set(1, 0, 0).applyQuaternion(audioListenerQuaternion);
+        const rawPan = passByToListener.normalize().dot(passByRightAxis);
+        passByPan.pan.setValueAtTime(
+          THREE.MathUtils.clamp(rawPan * WEAPON_BULLET_WHIZZ_PAN_SCALE, -1, 1),
+          start,
+        );
+        turbulenceGain.connect(passByPan);
+        whistleGain.connect(passByPan);
+        passByPan.connect(spatialOutput.destination);
+      }
+      turbulenceSource.onended = (): void => {
+        finishLayer();
+      };
+      whistleOscillator.onended = (): void => {
+        finishLayer();
+      };
+      turbulenceSource.start(start);
+      turbulenceSource.stop(start + duration);
+      whistleOscillator.start(start);
+      whistleOscillator.stop(start + duration);
+    } catch {
+      cleanup();
+    }
   };
 
   const isReloadPresentationActive = (): boolean =>
@@ -5056,7 +5454,6 @@ const createWeaponRuntime = (
         continue;
       }
       particle.age += safeDelta;
-      const progress = Math.min(1, particle.age / Math.max(0.001, particle.lifetime));
       // Inherit the moving muzzle's world velocity, then damp all motion so
       // the plume gradually stops travelling forward while hot lift remains.
       particle.velocity.multiplyScalar(Math.exp(-particle.velocityDrag * safeDelta));
@@ -5085,7 +5482,14 @@ const createWeaponRuntime = (
       // Both plumes follow their expansion: bright at source scale, then
       // transparent while the max-size cloud lingers.
       particle.material.opacity = particle.startOpacity * easedFadeIn * (1 - sizeProgress);
-      if (progress >= 1) {
+      if (
+        shouldClearWeaponSmoke(
+          particle.material.opacity,
+          particle.age,
+          particle.lifetime,
+          fadeInDuration,
+        )
+      ) {
         particle.active = false;
         particle.sprite.visible = false;
         particle.material.opacity = 0;
@@ -5484,11 +5888,13 @@ const createWeaponRuntime = (
   const findWeaponHit = (
     origin: THREE.Vector3,
     direction: THREE.Vector3,
+    maxDistance?: number,
   ): THREE.Intersection | undefined => {
     shotRaycaster.set(origin, direction);
     // Shots are hitscan and continue until the first render surface. Keep the
     // raycaster unbounded instead of applying a weapon-specific distance cap.
-    shotRaycaster.far = Number.POSITIVE_INFINITY;
+    shotRaycaster.far =
+      maxDistance === undefined || maxDistance < 0 ? Number.POSITIVE_INFINITY : maxDistance;
     try {
       // Chunks and other streamed render roots can be added after weapon
       // construction. Resolve the current scene children for every shot so
@@ -5509,6 +5915,108 @@ const createWeaponRuntime = (
       return undefined;
     }
   };
+  const fireFrom = (
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
+    weapon: WeaponId,
+    options: WeaponFireFromOptions = {},
+  ): void => {
+    const definition = WEAPON_DEFINITIONS[weapon];
+    const spreadRadians = options.spreadRadians ?? resolveWeaponSpreadRadians(definition);
+    const random = options.random ?? shotRandom;
+    const maxDistance = options.maxDistance;
+    const baseDirection = direction.clone().normalize();
+    if (baseDirection.lengthSq() <= 0) {
+      return;
+    }
+    const useCameraMuzzle = options.showCameraMuzzle ?? false;
+    const useWorldEffects = options.showWorldEffects ?? true;
+    const shouldPlayAudio = options.playAudio === true;
+    const shouldPlayPassByAudio = options.playPassByAudio !== false;
+    const shouldTrackShotHits = options.trackShotHits === true;
+    const onHit = options.onHit ?? null;
+    const onTargetHit = options.onTargetHit ?? null;
+    const applyTargetHit = onTargetHit !== null;
+    const weaponModel = viewModels.get(weapon);
+    const viewModel = useCameraMuzzle ? weaponModel : undefined;
+    const shotProfile = resolveGunAudioProfile({
+      damage: definition.damage,
+      barrelLength: weaponModel?.hotBarrelLength ?? GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
+    });
+    if (useCameraMuzzle) {
+      scene.updateMatrixWorld(true);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      updateWeaponSmokeWorldFrame(viewModel, 0);
+    }
+    if (shouldPlayAudio) {
+      const soundOrigin = viewModel?.muzzleWorldPosition ?? origin;
+      playWeaponShotSound(shotProfile, soundOrigin);
+    }
+    if (useCameraMuzzle && viewModel !== undefined) {
+      viewModel.muzzleFlash.visible = true;
+      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
+      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
+      const puffCount = Math.min(
+        WEAPON_BARREL_SMOKE_POOL_SIZE,
+        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
+      );
+      for (let puff = 0; puff < puffCount; puff += 1) {
+        spawnWeaponSmoke(viewModel, false, smokePower);
+      }
+    }
+    let targetWasHit = false;
+    for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
+      pelletDirection.copy(baseDirection);
+      if (spreadRadians > 0) {
+        const angle = random.nextFloat() * Math.PI * 2;
+        const radius = Math.sqrt(random.nextFloat()) * spreadRadians;
+        rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
+        if (rightVector.lengthSq() < 0.0001) {
+          rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
+        }
+        rightVector.normalize();
+        upVector.crossVectors(rightVector, baseDirection).normalize();
+        pelletDirection
+          .addScaledVector(rightVector, Math.cos(angle) * radius)
+          .addScaledVector(upVector, Math.sin(angle) * radius)
+          .normalize();
+      }
+      const hit = findWeaponHit(origin, pelletDirection, maxDistance);
+      const distance = hit?.distance ?? maxDistance ?? camera.far;
+      // Audio follows the intended projectile path rather than stopping at an
+      // intervening render surface. Otherwise a table or wall can swallow an
+      // incoming near-miss before the listener ever hears the whizz.
+      const passByDistance = maxDistance ?? distance;
+      if (useWorldEffects) {
+        addTracer(origin, pelletDirection, distance, definition.color);
+      }
+      if (shouldPlayPassByAudio) {
+        playWeaponPassBySound(shotProfile, origin, pelletDirection, passByDistance);
+      }
+      if (hit !== undefined) {
+        if (shouldTrackShotHits) {
+          shotsHit += 1;
+        }
+        addWeaponHitHeat(definition.id, definition.damage);
+        onHit?.(hit.object, definition.damage);
+        if (useWorldEffects) {
+          addImpact(hit.point, definition.color);
+          addBulletHole(hit, pelletDirection, definition.color);
+        }
+        hitColor.set(definition.color);
+        hit.object.userData.lastWeaponHit = {
+          weapon: definition.id,
+          damage: definition.damage,
+          color: hitColor.getHexString(),
+        };
+      } else if (applyTargetHit && maxDistance !== undefined && !targetWasHit) {
+        targetWasHit = true;
+        onTargetHit();
+      }
+    }
+  };
+
   const tryFire = (canStartBurst: boolean): void => {
     if (
       !controlsActive ||
@@ -5556,65 +6064,17 @@ const createWeaponRuntime = (
     recoilAmount = Math.min(1, recoilAmount + resolveWeaponRecoilAmount(definition.damage));
     onWeaponShot?.(definition.damage, definition.pellets);
     shotsFired += 1;
-    scene.updateMatrixWorld(true);
     const baseDirection = latestAimRay.direction.clone().normalize();
-    const viewModel = viewModels.get(activeWeapon);
-    playWeaponShotSound(
-      definition.damage,
-      viewModel?.hotBarrelLength ?? GUN_AUDIO_MIN_BARREL_LENGTH_METERS,
-    );
-    if (viewModel !== undefined) {
-      updateWeaponSmokeWorldFrame(viewModel, 0);
-      viewModel.muzzleFlash.visible = true;
-      viewModel.muzzleFlash.scale.setScalar(1.2 + shotRandom.nextFloat() * 0.7);
-      const smokePower = resolveWeaponSmokePower(definition.totalDamagePerShot);
-      const puffCount = Math.min(
-        WEAPON_BARREL_SMOKE_POOL_SIZE,
-        // Each puff is now five times larger, so one machine-gun sprite per
-        // shot is enough while shotgun and sniper damage still add puffs.
-        Math.max(1, Math.ceil(definition.totalDamagePerShot / 32)),
-      );
-      for (let puff = 0; puff < puffCount; puff += 1) {
-        spawnWeaponSmoke(viewModel, false, smokePower);
-      }
-    }
-    const spreadRadians = resolveWeaponSpreadRadians(definition);
-    if (spreadRadians > 0) {
-      rightVector.crossVectors(baseDirection, new THREE.Vector3(0, 1, 0));
-      if (rightVector.lengthSq() < 0.0001) {
-        rightVector.crossVectors(baseDirection, new THREE.Vector3(1, 0, 0));
-      }
-      rightVector.normalize();
-      upVector.crossVectors(rightVector, baseDirection).normalize();
-    }
-    for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
-      pelletDirection.copy(baseDirection);
-      if (spreadRadians > 0) {
-        const angle = shotRandom.nextFloat() * Math.PI * 2;
-        const radius = Math.sqrt(shotRandom.nextFloat()) * spreadRadians;
-        pelletDirection
-          .addScaledVector(rightVector, Math.cos(angle) * radius)
-          .addScaledVector(upVector, Math.sin(angle) * radius)
-          .normalize();
-      }
-      const hit = findWeaponHit(latestAimRay.origin, pelletDirection);
-      // A miss has no surface to terminate the tracer. Use the camera's far
-      // plane only for finite effect geometry; it is not a gameplay range.
-      const distance = hit?.distance ?? camera.far;
-      addTracer(latestAimRay.origin, pelletDirection, distance, definition.color);
-      if (hit !== undefined) {
-        shotsHit += 1;
-        addWeaponHitHeat(definition.id, definition.damage);
-        addImpact(hit.point, definition.color);
-        addBulletHole(hit, pelletDirection, definition.color);
-        hitColor.set(definition.color);
-        hit.object.userData.lastWeaponHit = {
-          weapon: definition.id,
-          damage: definition.damage,
-          color: hitColor.getHexString(),
-        };
-      }
-    }
+    const fireOptions: WeaponFireFromOptions = {
+      random: shotRandom,
+      spreadRadians: resolveWeaponSpreadRadians(definition),
+      showCameraMuzzle: true,
+      playAudio: true,
+      showWorldEffects: true,
+      trackShotHits: true,
+      ...(onWeaponHit === undefined ? {} : { onHit: onWeaponHit }),
+    };
+    fireFrom(latestAimRay.origin, baseDirection, activeWeapon, fireOptions);
     emitState(true);
   };
   const update = (
@@ -5629,6 +6089,11 @@ const createWeaponRuntime = (
     controlsActive = active;
     viewActive = visibleInView;
     latestAimRay = aimRay;
+    if (shotAudioContext !== null && shotAudioContext.state !== "closed") {
+      // Keep active tails and pass-by voices attached to the moving listener,
+      // not just to the camera pose from the frame that spawned them.
+      updateShotAudioListener(shotAudioContext);
+    }
     // Traversal state arrives from the shared camera damper before firing or
     // reload input is processed for this frame.
     viewmodelTransitionActive = viewmodelTransition.phase !== "idle";
@@ -5885,6 +6350,9 @@ const createWeaponRuntime = (
     update,
     setFireHeld,
     fire: () => tryFire(true),
+    fireFrom: (origin, direction, weapon, options) => {
+      fireFrom(origin, direction, weapon, options);
+    },
     reload,
     isReloading: isReloadPresentationActive,
     interact,
@@ -7635,6 +8103,12 @@ export const createExplorationWorld = (
   const chunkCoordinate = (value: number): number =>
     Math.floor((value + EXPLORATION_CHUNK_SIZE / 2) / EXPLORATION_CHUNK_SIZE);
   const chunkKey = (x: number, z: number): string => `${String(x)}:${String(z)}`;
+  // Keep the playable square bounds unchanged, but omit diagonal chunks whose
+  // centers sit beyond the compact radial footprint. This gives the skyline a
+  // rough circle without adding a gameplay boundary or clipping each mesh.
+  const shouldRenderExplorationChunk = (chunkX: number, chunkZ: number): boolean =>
+    Math.hypot(chunkX * EXPLORATION_CHUNK_SIZE, chunkZ * EXPLORATION_CHUNK_SIZE) <=
+    EXPLORATION_WORLD_RADIUS_METERS;
   const describeArea = (position: THREE.Vector3): string => {
     const playArea = PLAY_AREA_BOUNDS.find(
       (bounds) =>
@@ -7671,7 +8145,11 @@ export const createExplorationWorld = (
     if (style === undefined) {
       throw new Error("Exploration zone styles are empty");
     }
-    const terrainHeight = THREE.MathUtils.lerp(0.45, 1.7, biome.elevation);
+    const terrainHeight = THREE.MathUtils.lerp(
+      EXPLORATION_DISTRICT_ELEVATION_MIN,
+      EXPLORATION_DISTRICT_ELEVATION_MAX,
+      biome.elevation,
+    );
     const featureBias = biome.featureNoise;
     const routeSeed = createSeededRandom(
       `${normalizedSeed}|exploration-route|${String(chunkX)}|${String(chunkZ)}`,
@@ -7765,7 +8243,8 @@ export const createExplorationWorld = (
     const buildingCount = Math.max(
       1,
       Math.round(
-        (style.buildingDensity + terrainHeight * 1.6 + featureBias) * EXPLORATION_DENSITY_SCALE,
+        (style.buildingDensity + terrainHeight * 1.72 + featureBias * 1.15) *
+          EXPLORATION_DENSITY_SCALE,
       ),
     );
     const buildingSpecs: ExplorationBuildingSpec[] = [];
@@ -7790,7 +8269,8 @@ export const createExplorationWorld = (
       const height = quantizeScale(
         style.buildingHeightMin +
           random.nextFloat() * (style.buildingHeightMax - style.buildingHeightMin) +
-          terrainHeight * 0.8,
+          terrainHeight * EXPLORATION_BUILDING_ELEVATION_LIFT +
+          featureBias * EXPLORATION_BUILDING_FEATURE_LIFT,
       );
       const depth = quantizeScale(1 + random.nextFloat() * (1 + terrainHeight));
       const rotation = random.nextInt(4) * (Math.PI / 2);
@@ -8397,6 +8877,9 @@ export const createExplorationWorld = (
 
     for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX += 1) {
       for (let chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ += 1) {
+        if (!shouldRenderExplorationChunk(chunkX, chunkZ)) {
+          continue;
+        }
         const key = chunkKey(chunkX, chunkZ);
         if (activeChunks.has(key)) {
           continue;
@@ -8998,6 +9481,19 @@ export const createMahjongTableScene = (
   container.dataset.sceneQuality = quality.preset;
   container.dataset.controlActive = "false";
   container.replaceChildren(renderer.domElement);
+  const deathFadeOverlay = document.createElement("div");
+  deathFadeOverlay.setAttribute("aria-hidden", "true");
+  deathFadeOverlay.dataset.playerDeathFade = "true";
+  deathFadeOverlay.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:2147483647",
+    "pointer-events:none",
+    "background:#000",
+    "opacity:0",
+    "transition:opacity 260ms ease-out",
+  ].join(";");
+  container.append(deathFadeOverlay);
 
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
   const roomEnvironment = new RoomEnvironment();
@@ -9471,6 +9967,9 @@ export const createMahjongTableScene = (
   let eyeHeight = STANDING_EYE_HEIGHT;
   let firstPersonGroundY = 0;
   let isCrouched = false;
+  // Crouching enables the next upright movement to use walk speed. Sprinting
+  // clears this hidden lock; crouched speed remains independently controlled.
+  let isWalkingMode = false;
   let lastDofZoomed: boolean | null = null;
   const syncDofIntensityForZoom = (): void => {
     const zoomedView = activeView === "seat" && aimingDownSights;
@@ -9506,7 +10005,18 @@ export const createMahjongTableScene = (
   const lastMovementTapAtByKey = new Map<string, number>();
   let lastSceneStateSaveAt = Number.NEGATIVE_INFINITY;
   let lastSceneStateSerialized: string | null = null;
+  const simulantRandom = createSeededRandom(`${roomSeed}|simulant-combat-v1`);
+  const playerRespawnRandom = createSeededRandom(`${roomSeed}|player-death-respawn-v1`);
+  let simulantMarker: THREE.Group | null = null;
+  let simulantBody: THREE.Group | null = null;
+  let simulantRespawnTimer = 0;
+  const simulantSpawnPosition = new THREE.Vector3();
+  const simulantPosition = new THREE.Vector3();
+  const simulantPerspectiveRig = createCameraMotionDamper();
+  let simulantVitals = createPlayerVitals();
   let playerVitals = createPlayerVitals();
+  let deathFadeStartTimer = 0;
+  let deathRespawnTimer = 0;
   let vitalsPublishElapsed = 0;
   let speedPublishElapsed = 0;
   let publishedPlayerSpeed: number | null = null;
@@ -9573,11 +10083,52 @@ export const createMahjongTableScene = (
     nextVitals.oxygenRecoveryDelaySeconds !== playerVitals.oxygenRecoveryDelaySeconds ||
     nextVitals.holdingBreath !== playerVitals.holdingBreath ||
     nextVitals.holdBreathLocked !== playerVitals.holdBreathLocked;
+  const cancelDeathRespawn = (): void => {
+    if (deathFadeStartTimer !== 0) {
+      window.clearTimeout(deathFadeStartTimer);
+      deathFadeStartTimer = 0;
+    }
+    if (deathRespawnTimer !== 0) {
+      window.clearTimeout(deathRespawnTimer);
+      deathRespawnTimer = 0;
+    }
+  };
+  const scheduleDeathRespawn = (): void => {
+    cancelDeathRespawn();
+    deathFadeOverlay.style.transition = "none";
+    deathFadeOverlay.style.opacity = "0";
+    deathFadeStartTimer = window.setTimeout(() => {
+      deathFadeStartTimer = 0;
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_DEATH_FADE_DURATION_MS}ms ease-in`;
+      deathFadeOverlay.style.opacity = "1";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS - PLAYER_DEATH_FADE_DURATION_MS);
+    deathRespawnTimer = window.setTimeout(() => {
+      deathRespawnTimer = 0;
+      resetToSpawn();
+      deathFadeOverlay.style.transition = `opacity ${PLAYER_RESPAWN_FADE_IN_DURATION_MS}ms ease-out`;
+      deathFadeOverlay.style.opacity = "0";
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
+  };
   const damagePlayer = (damage: number): PlayerVitalsDamageResult => {
+    const wasDead = playerVitals.isDead;
     const result = applyPlayerDamage(playerVitals, damage);
     if (result.damage > 0) {
       playerVitals = result.state;
       publishPlayerVitals(true);
+    }
+    if (!wasDead && result.killed) {
+      cameraMotion.applyDeathTumble();
+      pressedKeys.clear();
+      jumpKeyHeld = false;
+      touchMovementActive = false;
+      touchForward = 0;
+      touchRight = 0;
+      isSprinting = false;
+      forwardVelocity = 0;
+      strafeVelocity = 0;
+      verticalVelocity = 0;
+      weaponRuntime?.setFireHeld(false);
+      scheduleDeathRespawn();
     }
     return result;
   };
@@ -9625,6 +10176,152 @@ export const createMahjongTableScene = (
   const syncAimingFromInput = (): void => {
     const aimInput = resolveDesktopAimInput(leftCommandHeld, rightMouseAiming);
     setAiming(aimInput.aimingDownSights, aimInput.holdingBreath);
+  };
+  const resolveRandomSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const spawnRangeX = maxX - minX;
+    const spawnRangeZ = maxZ - minZ;
+    const fallbackX = THREE.MathUtils.clamp(WORLD_BOUNDS.minX + spawnRangeX / 2, minX, maxX);
+    const fallbackZ = THREE.MathUtils.clamp(WORLD_BOUNDS.minZ + spawnRangeZ / 2, minZ, maxZ);
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const sampleX =
+        spawnRangeX > 0 ? minX + spawnRangeX * playerRespawnRandom.nextFloat() : fallbackX;
+      const sampleZ =
+        spawnRangeZ > 0 ? minZ + spawnRangeZ * playerRespawnRandom.nextFloat() : fallbackZ;
+      if (physicsRuntime === null) {
+        return {
+          x: sampleX,
+          y: PLAYER_COLLIDER_CENTER_HEIGHT,
+          z: sampleZ,
+        };
+      }
+      const settled = physicsRuntime.move(
+        { x: sampleX, y: WORLD_SPAWN_DROP_HEIGHT, z: sampleZ },
+        { x: 0, y: -WORLD_SPAWN_DROP_DISTANCE, z: 0 },
+      );
+      if (
+        Number.isFinite(settled.position.x) &&
+        Number.isFinite(settled.position.y) &&
+        Number.isFinite(settled.position.z) &&
+        settled.grounded
+      ) {
+        return {
+          x: THREE.MathUtils.clamp(settled.position.x, minX, maxX),
+          y: settled.position.y,
+          z: THREE.MathUtils.clamp(settled.position.z, minZ, maxZ),
+        };
+      }
+    }
+    return {
+      x: fallbackX,
+      y: PLAYER_COLLIDER_CENTER_HEIGHT,
+      z: fallbackZ,
+    };
+  };
+  const resolveSimulantSpawnPosition = (): PhysicsVector => {
+    const minX = WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN;
+    const maxX = WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN;
+    const minZ = WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN;
+    const maxZ = WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN;
+    const playerX = camera.position.x;
+    const playerZ = camera.position.z;
+    let bestDistance = Number.NEGATIVE_INFINITY;
+    let bestX = minX;
+    let bestZ = minZ;
+    for (let attempt = 0; attempt < WORLD_SPAWN_ATTEMPTS; attempt += 1) {
+      const simulantSpawnAngle = simulantRandom.nextFloat() * Math.PI * 2;
+      const sampleX = Math.cos(simulantSpawnAngle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const sampleZ = Math.sin(simulantSpawnAngle) * SIMULANT_SPAWN_RADIUS_METERS;
+      const candidateX = THREE.MathUtils.clamp(sampleX, minX, maxX);
+      const candidateZ = THREE.MathUtils.clamp(sampleZ, minZ, maxZ);
+      const distanceToPlayer =
+        Number.isFinite(playerX) && Number.isFinite(playerZ)
+          ? Math.hypot(candidateX - playerX, candidateZ - playerZ)
+          : Number.POSITIVE_INFINITY;
+      if (distanceToPlayer > bestDistance) {
+        bestDistance = distanceToPlayer;
+        bestX = candidateX;
+        bestZ = candidateZ;
+      }
+      if (distanceToPlayer >= SIMULANT_MIN_START_DISTANCE_METERS) {
+        return { x: candidateX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: candidateZ };
+      }
+    }
+    return { x: bestX, y: PLAYER_COLLIDER_CENTER_HEIGHT, z: bestZ };
+  };
+  const syncSimulantMarkerVitals = (): void => {
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.userData.simulantHealth = simulantVitals.health;
+    simulantMarker.userData.simulantShield = simulantVitals.shield;
+    simulantMarker.userData.simulantO2 = simulantVitals.o2;
+  };
+  const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
+    const bodyBaseY =
+      SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+      (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+    if (simulantBody !== null) {
+      simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+      simulantBody.rotation.z = motion.roll;
+    }
+  };
+  const cancelSimulantRespawn = (): void => {
+    if (simulantRespawnTimer !== 0) {
+      window.clearTimeout(simulantRespawnTimer);
+      simulantRespawnTimer = 0;
+    }
+  };
+  const respawnSimulant = (): void => {
+    if (simulantMarker === null) {
+      return;
+    }
+    const spawnPosition = resolveSimulantSpawnPosition();
+    simulantPosition.set(spawnPosition.x, spawnPosition.y, spawnPosition.z);
+    simulantMarker.position.copy(simulantPosition);
+    simulantMarker.visible = true;
+    simulantVitals = createPlayerVitals();
+    simulantPerspectiveRig.reset();
+    syncSimulantMarkerVitals();
+  };
+  const scheduleSimulantRespawn = (): void => {
+    cancelSimulantRespawn();
+    if (simulantMarker === null) {
+      return;
+    }
+    simulantMarker.visible = false;
+    simulantRespawnTimer = window.setTimeout(() => {
+      simulantRespawnTimer = 0;
+      respawnSimulant();
+    }, PLAYER_DEATH_RESPAWN_DELAY_MS);
+  };
+  const getSimulantHitObject = (hitObject: THREE.Object3D): THREE.Object3D | null => {
+    let current: THREE.Object3D | null = hitObject;
+    while (current !== null) {
+      if (current.userData.simulantCombatMarker === true) {
+        return current;
+      }
+      current = current.parent;
+    }
+    return null;
+  };
+  const damageSimulant = (hitObject: THREE.Object3D, damage: number): void => {
+    if (simulantMarker === null || getSimulantHitObject(hitObject) === null) {
+      return;
+    }
+    const nextVitals = applyPlayerDamage(simulantVitals, damage);
+    if (nextVitals.damage <= 0) {
+      return;
+    }
+    simulantVitals = nextVitals.state;
+    syncSimulantMarkerVitals();
+    if (!nextVitals.killed) {
+      return;
+    }
+    scheduleSimulantRespawn();
   };
   const resetVitalsState = (): PlayerVitalsState => {
     playerVitals = resetPlayerVitals();
@@ -9751,12 +10448,20 @@ export const createMahjongTableScene = (
     if (isCrouched && !nextCrouched && !spendPlayerO2(O2_STAND_COST)) {
       return false;
     }
+    if (nextCrouched) {
+      // Crouch also enables the hidden upright walk switch. The crouched
+      // posture branch remains authoritative while it is active.
+      isWalkingMode = true;
+      // Do not let a prior sprint request resume automatically while crouched.
+      isSprinting = false;
+    }
     isCrouched = nextCrouched;
     return true;
   };
   const startSprint = (): void => {
     const sprintAccepted = !isCrouched || setCrouched(false);
     isCrouched = resolveCrouchedStateAfterSprint(isCrouched, sprintAccepted);
+    isWalkingMode = isCrouched;
     if (isCrouched) {
       isSprinting = false;
       return;
@@ -9978,6 +10683,7 @@ export const createMahjongTableScene = (
     firstPersonGroundY = 0;
     eyeHeight = STANDING_EYE_HEIGHT;
     isCrouched = false;
+    isWalkingMode = false;
     jumpOffset = 0;
     verticalVelocity = 0;
     grounded = true;
@@ -10065,6 +10771,7 @@ export const createMahjongTableScene = (
     firstPersonGroundY = 0;
     eyeHeight = STANDING_EYE_HEIGHT;
     isCrouched = false;
+    isWalkingMode = false;
     jumpOffset = 0;
     verticalVelocity = 0;
     grounded = true;
@@ -10075,9 +10782,13 @@ export const createMahjongTableScene = (
     isSprinting = false;
     lastMovementTapAtByKey.clear();
 
-    const preset = cameraPresets.seat;
-    camera.position.copy(preset.position);
-    camera.lookAt(preset.target);
+    const spawnPosition = resolveRandomSpawnPosition();
+    camera.position.set(
+      spawnPosition.x,
+      spawnPosition.y + STANDING_EYE_HEIGHT - PLAYER_COLLIDER_CENTER_HEIGHT,
+      spawnPosition.z,
+    );
+    camera.lookAt(0, camera.position.y, 0);
     debugFovOverride = null;
     camera.fov = debugEnabled ? DEBUG_STANDING_FOV : SEAT_STANDING_FOV;
     camera.updateProjectionMatrix();
@@ -10109,6 +10820,7 @@ export const createMahjongTableScene = (
       firstPersonGroundY = FOCUS_CALIBRATION_DECK_HEIGHT;
       eyeHeight = STANDING_EYE_HEIGHT;
       isCrouched = false;
+      isWalkingMode = false;
       jumpOffset = 0;
       verticalVelocity = 0;
       grounded = true;
@@ -10153,6 +10865,7 @@ export const createMahjongTableScene = (
       firstPersonGroundY = CLIMBING_GYM_RUN_Y;
       eyeHeight = STANDING_EYE_HEIGHT;
       isCrouched = false;
+      isWalkingMode = false;
       jumpOffset = 0;
       verticalVelocity = 0;
       grounded = true;
@@ -10213,6 +10926,7 @@ export const createMahjongTableScene = (
       setDebugCameraPreset("focusCalibration");
       firstPersonGroundY = FOCUS_CALIBRATION_DECK_HEIGHT;
       isCrouched = state.isCrouched;
+      isWalkingMode = isCrouched;
       ledgeClimbTransition = null;
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
@@ -10233,6 +10947,7 @@ export const createMahjongTableScene = (
       setDebugCameraPreset("climbingGym");
       firstPersonGroundY = CLIMBING_GYM_RUN_Y;
       isCrouched = state.isCrouched;
+      isWalkingMode = isCrouched;
       ledgeClimbTransition = null;
       eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
       camera.position.fromArray(state.cameraPosition);
@@ -10271,6 +10986,7 @@ export const createMahjongTableScene = (
     ledgeClimbTransition = null;
     firstPersonGroundY = 0;
     isCrouched = state.isCrouched;
+    isWalkingMode = isCrouched;
     eyeHeight = isCrouched ? SEATED_EYE_HEIGHT : STANDING_EYE_HEIGHT;
     camera.position.x = THREE.MathUtils.clamp(
       state.cameraPosition[0],
@@ -10682,6 +11398,38 @@ export const createMahjongTableScene = (
   const wallRoot = createWall(textureCache);
   scene.add(wallRoot);
   const anchors = createPresentationAnchors(scene, table, wallRoot);
+  simulantVitals = createPlayerVitals();
+  simulantMarker = new THREE.Group();
+  simulantMarker.name = "SimulantSpawnMarker";
+  const spawnPosition = resolveSimulantSpawnPosition();
+  simulantSpawnPosition.set(spawnPosition.x, spawnPosition.y, spawnPosition.z);
+  simulantPosition.copy(simulantSpawnPosition);
+  simulantMarker.position.copy(simulantSpawnPosition);
+  simulantMarker.userData = {
+    simulantCombatMarker: true,
+    simulantHealth: simulantVitals.health,
+    simulantShield: simulantVitals.shield,
+    simulantO2: simulantVitals.o2,
+  };
+  const simulantColor = new THREE.Color(COLORS.red);
+  simulantBody = createSimulantBody(simulantColor);
+  simulantBody.name = "SimulantCombatMarker";
+  simulantMarker.add(simulantBody);
+  const simulantRing = new THREE.Mesh(
+    new THREE.RingGeometry(0.15, 0.27, 18),
+    new THREE.MeshBasicMaterial({
+      color: simulantColor,
+      transparent: true,
+      opacity: 0.45,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  );
+  simulantRing.name = "SimulantCombatRing";
+  simulantRing.rotation.x = -Math.PI / 2;
+  simulantRing.position.y = 0.02;
+  simulantMarker.add(simulantRing);
+  scene.add(simulantMarker);
   addHand(
     scene,
     textureCache,
@@ -10968,6 +11716,15 @@ export const createMahjongTableScene = (
         ),
       });
     },
+    (hitObject, damage) => {
+      if (simulantMarker === null) {
+        return;
+      }
+      if (getSimulantHitObject(hitObject) === null) {
+        return;
+      }
+      damageSimulant(hitObject, damage);
+    },
     (hasOutgoingWeapon) => {
       cameraMotion.applyWeaponSwitchImpulse({ hasOutgoingWeapon });
     },
@@ -11234,6 +11991,7 @@ export const createMahjongTableScene = (
                 moveSpeed *
                   resolvePlayerMovementSpeedMultiplier({
                     crouching,
+                    walking: isWalkingMode,
                     sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
                     jogging: joggingMovement,
                     reloading: reloadingMovement,
@@ -11243,6 +12001,7 @@ export const createMahjongTableScene = (
             moveSpeed *
               resolvePlayerMovementSpeedMultiplier({
                 crouching,
+                walking: isWalkingMode,
                 sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
                 jogging: joggingMovement,
                 reloading: reloadingMovement,
@@ -11259,23 +12018,28 @@ export const createMahjongTableScene = (
         right = touchRight * touchDirectionScale;
         movementMagnitude = touchMagnitude;
         const sprintCap = getTouchSprintCap(forward);
-        const fastMovementRequested = !crouching && touchMagnitude > 0.05;
+        const fastMovementRequested = isSprinting && !crouching && touchMagnitude > 0.05;
         sprintingMovement =
           fastMovementRequested &&
           !reloadingMovement &&
           canAffordPlayerO2Cost(playerVitals, O2_SPRINT_DRAIN_PER_SECOND * delta * touchMagnitude);
-        joggingMovement = fastMovementRequested && !sprintingMovement;
         const touchSpeedMultiplier = crouching
-          ? 0.5
-          : sprintingMovement
-            ? SPRINT_MULTIPLIER * sprintCap
-            : joggingMovement
-              ? NEUTRAL_JOG_SPEED_MULTIPLIER
-              : 1;
+          ? CROUCH_SPEED_MULTIPLIER
+          : isWalkingMode
+            ? WALK_SPEED_MULTIPLIER
+            : sprintingMovement
+              ? SPRINT_MULTIPLIER * sprintCap
+              : TROT_SPEED_MULTIPLIER;
         const reloadTouchSpeedMultiplier = reloadingMovement
           ? Math.min(
-              (fastMovementRequested ? SPRINT_MULTIPLIER * sprintCap : 1) * touchMagnitude,
-              NEUTRAL_JOG_SPEED_MULTIPLIER,
+              (crouching
+                ? CROUCH_SPEED_MULTIPLIER
+                : isWalkingMode
+                  ? WALK_SPEED_MULTIPLIER
+                  : fastMovementRequested
+                    ? SPRINT_MULTIPLIER * sprintCap
+                    : TROT_SPEED_MULTIPLIER) * touchMagnitude,
+              TROT_SPEED_MULTIPLIER,
             )
           : touchSpeedMultiplier * touchMagnitude;
         currentMoveSpeed = moveSpeed * reloadTouchSpeedMultiplier;
@@ -11300,6 +12064,7 @@ export const createMahjongTableScene = (
         joggingMovement = fastMovementRequested && !sprintingMovement;
         const speedMultiplier = resolvePlayerMovementSpeedMultiplier({
           crouching,
+          walking: isWalkingMode,
           sprinting: reloadingMovement ? fastMovementRequested : sprintingMovement,
           jogging: joggingMovement,
           reloading: reloadingMovement,
@@ -11914,6 +12679,62 @@ export const createMahjongTableScene = (
       cameraMotion.getOffsets().viewmodelOffset,
       cameraMotion.getOffsets().viewmodelTransition,
     );
+    if (simulantMarker !== null && !playerVitals.isDead) {
+      const safeDelta = Number.isFinite(delta) ? Math.max(0, delta) : 0;
+      const toPlayerX = camera.position.x - simulantPosition.x;
+      const toPlayerZ = camera.position.z - simulantPosition.z;
+      const horizontalDistance = Math.hypot(toPlayerX, toPlayerZ);
+      const simulantMoving = horizontalDistance > SIMULANT_STOP_DISTANCE_METERS;
+      simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
+        movementMagnitude: simulantMoving ? 1 : 0,
+        locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
+        walking: simulantMoving,
+        sprinting: false,
+        aimingDownSights: false,
+      });
+      const simulantMotion = simulantPerspectiveRig.update({
+        deltaSeconds: safeDelta,
+        lateralInput: 0,
+        movementMagnitude: simulantMoving ? 1 : 0,
+        movementSpeedRatio: simulantMoving ? SIMULANT_TROT_SPEED_RATIO : 0,
+        oxygenRatio: simulantVitals.o2 / PLAYER_MAX_O2,
+        crouching: false,
+        shiftEnabled: false,
+        bobEnabled: true,
+        aimingDownSights: false,
+        holdingBreath: false,
+        stabilizedByWall: false,
+        traversalActive: false,
+      });
+      syncSimulantPresentation(simulantMotion);
+      syncSimulantMarkerVitals();
+      if (horizontalDistance > SIMULANT_STOP_DISTANCE_METERS) {
+        const moveDistance = Math.min(
+          horizontalDistance - SIMULANT_STOP_DISTANCE_METERS,
+          SIMULANT_TROT_SPEED_METERS_PER_SECOND * safeDelta,
+        );
+        simulantPosition.x += (toPlayerX / horizontalDistance) * moveDistance;
+        simulantPosition.z += (toPlayerZ / horizontalDistance) * moveDistance;
+        simulantPosition.x = THREE.MathUtils.clamp(
+          simulantPosition.x,
+          WORLD_BOUNDS.minX + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxX - WORLD_SPAWN_MARGIN,
+        );
+        simulantPosition.z = THREE.MathUtils.clamp(
+          simulantPosition.z,
+          WORLD_BOUNDS.minZ + WORLD_SPAWN_MARGIN,
+          WORLD_BOUNDS.maxZ - WORLD_SPAWN_MARGIN,
+        );
+      }
+      simulantMarker.position.copy(simulantPosition);
+      if (horizontalDistance > 0.1 && Number.isFinite(horizontalDistance)) {
+        simulantMarker.rotation.y = Math.atan2(
+          camera.position.x - simulantPosition.x,
+          camera.position.z - simulantPosition.z,
+        );
+      }
+      simulantMarker.updateMatrixWorld(true);
+    }
     // Weapon viewmodel transforms (including the camera-child scope glass)
     // changed during the update above. Refresh their world matrices before
     // projecting the lens into the post-process buffer.
@@ -12143,6 +12964,8 @@ export const createMahjongTableScene = (
       saveSceneState(true);
       publishPlayerSpeed(0, true);
       disposed = true;
+      cancelDeathRespawn();
+      deathFadeOverlay.remove();
       window.cancelAnimationFrame(animationFrame);
       if (warmupTimer !== 0) {
         window.clearTimeout(warmupTimer);
@@ -12185,6 +13008,13 @@ export const createMahjongTableScene = (
       physicsRuntime?.dispose();
       physicsRuntime = null;
       physicsCharacterPosition = null;
+      cancelSimulantRespawn();
+      simulantMarker?.removeFromParent();
+      if (simulantMarker !== null) {
+        disposeObject(simulantMarker);
+        simulantMarker = null;
+      }
+      simulantBody = null;
       weaponRuntime?.dispose();
       weaponRuntime = null;
       explorationWorld?.dispose();
