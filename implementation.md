@@ -14,9 +14,15 @@
 - Consolidated camera acceleration roll/pitch into the shared rotational target and collision-stop impulse path. The
   head solver now accepts accumulated same-frame impulses and keeps the same analytic integrator for translation and
   rotation, including the bounded high-energy stop response.
-- Server-owned bus run `1786344257454-43196-336d40cf` passes all 652 assertions, including the new accumulated-impulse
-  regression. Browser, HMR, Playwright, and rendered acceptance remain intentionally excluded; the user must perform
-  the one-window visual check after deterministic gates.
+- Consolidated weapon and melee recoil into that same angular head state. Action callbacks publish a bounded immediate
+  snapshot, pending return impulses re-enter the shared solver, and event-time presentation advances only axes touched
+  by the action so a yaw-only impact cannot disturb an existing pitch response. Camera, viewmodel, reticule, aim ray,
+  and focus ray therefore read one recoil response without a second camera state machine or double-counted pitch.
+- Server-owned bus run `1786347257563-43196-683152f9` passes all 652 assertions across 138 suites on committed
+  `083205e35153d45681d12a6f257c84395d11a126`. The 21 deterministic movement scenarios pass 160/160 assertions;
+  strict lint, typecheck, formatting, `git diff --check`, and the production build also pass. Browser, HMR, Playwright,
+  and rendered acceptance remain intentionally excluded; the user must perform the one-window visual check after these
+  deterministic gates.
 
 ## 2026-08-08 — Damaged Warehouse servers lose their status lights
 

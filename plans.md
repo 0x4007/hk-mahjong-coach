@@ -150,10 +150,13 @@ Unified solver integration validated on `continuous-head-motion-3` (2026-08-10):
   physics delta-v is projected into the local frame before live and simulator impulses are submitted. Camera
   acceleration roll/pitch use the same rotational target and collision-stop impulse path, and same-frame events are
   accumulated before integration.
+- Weapon and melee recoil now enter that same angular state. Event-time action snapshots preserve untouched axes, while
+  delayed return impulses are accumulated with the next frame so camera, viewmodel, reticule, aim, and focus consumers
+  remain coherent.
 - The simulator records the snapshot and the severe-fall fixture checks `-0.60` to `-0.90 m` compression without airborne
   bias. A recovery regression keeps the supported capsule fixed while that offset returns smoothly toward zero. The
-  server-owned bus run `1786344257454-43196-336d40cf` passes 652/652 assertions; browser/HMR/Playwright remain
-  excluded.
+  server-owned bus run `1786347257563-43196-683152f9` passes 652/652 assertions on commit
+  `083205e35153d45681d12a6f257c84395d11a126`; browser/HMR/Playwright remain excluded.
 
 ## Milestone 8 — Teacher, learner model, curriculum, and drills (`pending`)
 

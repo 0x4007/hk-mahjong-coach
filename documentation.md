@@ -29,6 +29,12 @@ and focus consumers while leaving the capsule pose and collision height physics-
 The severe-fall regression also checks the post-impact recovery: after the minimum offset, the capsule remains at the
 support height while the shared head response returns smoothly toward the standing eye height.
 
+Weapon and melee recoil use the same shared angular head state. A shot or contact applies its signed local kick through
+an event-time presentation snapshot, while the delayed return impulse is accumulated with any other frame events before
+the analytic integration pass. The event callback advances only the axes touched by that action, so a lateral melee hit
+does not move a pre-existing pitch response. The camera, held viewmodel, reticule, aim ray, and focus ray consume the
+single composed snapshot; no separate camera recoil state or second pitch composition remains.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the
