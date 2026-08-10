@@ -21,8 +21,11 @@ import {
   resolveVaultTarget,
   resolveVaultTraversalArcHeight,
   resolveVaultTraversalDuration,
+  resolveWallClimbMotorVelocity,
   resolveWallClimbTarget as resolveSharedWallClimbTarget,
   resolveWallHangTargetDetails,
+  WALL_CLIMB_MANTLE_SPEED,
+  WALL_CLIMB_SPEED,
 } from "../apps/web/src/scene/mahjong-table.js";
 
 type RawScenario = {
@@ -131,8 +134,10 @@ type WallHangingState = {
 type ClimbingState = {
   readonly kind: "climbing";
   readonly startPosition: PhysicsVector;
+  currentPosition: PhysicsVector;
   readonly targetPosition: PhysicsVector;
   readonly box: PhysicsBox | null;
+  readonly wallMotor: boolean;
   readonly duration: number;
   readonly arcHeight: number;
   readonly phase: "vault" | "landingBoost";
@@ -140,6 +145,8 @@ type ClimbingState = {
   readonly preservedStrafeVelocity: number;
   readonly preserveSprinting: boolean;
   readonly landingBoostDistance: number;
+  climbPhase: "pull" | "mantle";
+  climbVelocity: PhysicsVector;
   elapsed: number;
 };
 
@@ -431,23 +438,90 @@ const smoothStep = (value: number): number => value * value * (3 - 2 * value);
 const advanceWallClimb = (
   traversal: ClimbingState,
   delta: number,
-): { readonly position: PhysicsVector; readonly reachedTarget: boolean } => {
+): {
+  readonly position: PhysicsVector;
+  readonly reachedTarget: boolean;
+  readonly velocityY: number;
+} => {
+  if (traversal.wallMotor) {
+    const currentPosition = traversal.currentPosition;
+    if (traversal.climbPhase === "pull" && currentPosition.y >= traversal.targetPosition.y - 0.04) {
+      traversal.climbPhase = "mantle";
+      traversal.climbVelocity = { x: 0, y: 0, z: 0 };
+    }
+    const remainingX = traversal.targetPosition.x - currentPosition.x;
+    const remainingZ = traversal.targetPosition.z - currentPosition.z;
+    const remainingDistance = Math.hypot(remainingX, remainingZ);
+    const targetVelocity: PhysicsVector =
+      traversal.climbPhase === "pull"
+        ? { x: 0, y: WALL_CLIMB_SPEED, z: 0 }
+        : remainingDistance <= Number.EPSILON
+          ? { x: 0, y: 0, z: 0 }
+          : {
+              x: (remainingX / remainingDistance) * WALL_CLIMB_MANTLE_SPEED,
+              y: 0,
+              z: (remainingZ / remainingDistance) * WALL_CLIMB_MANTLE_SPEED,
+            };
+    traversal.climbVelocity = resolveWallClimbMotorVelocity(
+      traversal.climbVelocity,
+      targetVelocity,
+      delta,
+    );
+    const nextPosition: PhysicsVector = { ...currentPosition };
+    if (traversal.climbPhase === "pull") {
+      nextPosition.y = Math.min(
+        traversal.targetPosition.y,
+        currentPosition.y + Math.max(0, traversal.climbVelocity.y) * delta,
+      );
+    } else {
+      nextPosition.x = clamp(
+        currentPosition.x + traversal.climbVelocity.x * delta,
+        Math.min(currentPosition.x, traversal.targetPosition.x),
+        Math.max(currentPosition.x, traversal.targetPosition.x),
+      );
+      nextPosition.z = clamp(
+        currentPosition.z + traversal.climbVelocity.z * delta,
+        Math.min(currentPosition.z, traversal.targetPosition.z),
+        Math.max(currentPosition.z, traversal.targetPosition.z),
+      );
+    }
+    traversal.currentPosition = nextPosition;
+    traversal.elapsed = Math.min(traversal.elapsed + delta, traversal.duration);
+    if (traversal.climbPhase === "pull" && nextPosition.y >= traversal.targetPosition.y - 0.04) {
+      traversal.climbPhase = "mantle";
+      traversal.climbVelocity = { x: 0, y: 0, z: 0 };
+    }
+    const reachedTarget =
+      traversal.climbPhase === "mantle" &&
+      Math.hypot(
+        traversal.targetPosition.x - nextPosition.x,
+        traversal.targetPosition.z - nextPosition.z,
+      ) <= 0.02;
+    return {
+      position: nextPosition,
+      reachedTarget,
+      velocityY: traversal.climbVelocity.y,
+    };
+  }
   traversal.elapsed = Math.min(traversal.elapsed + delta, traversal.duration);
   const progress = smoothStep(clamp(traversal.elapsed / traversal.duration, 0, 1));
+  const position = {
+    x:
+      traversal.startPosition.x +
+      (traversal.targetPosition.x - traversal.startPosition.x) * progress,
+    y:
+      traversal.startPosition.y +
+      (traversal.targetPosition.y - traversal.startPosition.y) * progress +
+      (traversal.phase === "vault" ? Math.sin(progress * Math.PI) * traversal.arcHeight : 0),
+    z:
+      traversal.startPosition.z +
+      (traversal.targetPosition.z - traversal.startPosition.z) * progress,
+  };
+  traversal.currentPosition = position;
   return {
-    position: {
-      x:
-        traversal.startPosition.x +
-        (traversal.targetPosition.x - traversal.startPosition.x) * progress,
-      y:
-        traversal.startPosition.y +
-        (traversal.targetPosition.y - traversal.startPosition.y) * progress +
-        (traversal.phase === "vault" ? Math.sin(progress * Math.PI) * traversal.arcHeight : 0),
-      z:
-        traversal.startPosition.z +
-        (traversal.targetPosition.z - traversal.startPosition.z) * progress,
-    },
+    position,
     reachedTarget: traversal.elapsed >= traversal.duration,
+    velocityY: 0,
   };
 };
 
@@ -567,25 +641,22 @@ const runScenario = async (
               scenario.staticBoxes,
             );
             if (targetPosition !== null) {
-              const preservedSpeed = Math.hypot(
-                traversalAtFrameStart.preservedForwardVelocity,
-                traversalAtFrameStart.preservedStrafeVelocity,
-              );
               state.traversal = {
                 kind: "climbing",
                 startPosition: { ...state.position },
+                currentPosition: { ...state.position },
                 targetPosition,
                 box: traversalAtFrameStart.box,
-                duration: resolveVaultTraversalDuration(targetPosition.y - state.position.y),
-                arcHeight: resolveVaultTraversalArcHeight(targetPosition.y - state.position.y),
+                wallMotor: true,
+                duration: Math.max(0.35, (targetPosition.y - state.position.y) / WALL_CLIMB_SPEED),
+                arcHeight: 0,
                 phase: "vault",
                 preservedForwardVelocity: traversalAtFrameStart.preservedForwardVelocity,
                 preservedStrafeVelocity: traversalAtFrameStart.preservedStrafeVelocity,
                 preserveSprinting: traversalAtFrameStart.preserveSprinting,
-                landingBoostDistance:
-                  preservedSpeed > 0
-                    ? Math.min(WALL_CLIMB_EXIT_BOOST_DISTANCE, preservedSpeed * 0.05)
-                    : 0,
+                landingBoostDistance: 0,
+                climbPhase: "pull",
+                climbVelocity: { x: 0, y: 0, z: 0 },
                 elapsed: 0,
               };
             }
@@ -600,7 +671,7 @@ const runScenario = async (
           const climb = advanceWallClimb(state.traversal, delta);
           state.position = climb.position;
           state.grounded = false;
-          state.verticalVelocity = 0;
+          state.verticalVelocity = climb.velocityY;
           movement = { position: { ...state.position }, grounded: false, collisions: 0 };
           if (climb.reachedTarget) {
             if (state.traversal.phase === "vault" && state.traversal.landingBoostDistance > 0) {
@@ -744,8 +815,10 @@ const runScenario = async (
             state.traversal = {
               kind: "climbing",
               startPosition: { ...state.position },
+              currentPosition: { ...state.position },
               targetPosition: { ...vaultTarget },
               box: null,
+              wallMotor: false,
               duration: resolveVaultTraversalDuration(climbHeight),
               arcHeight: resolveVaultTraversalArcHeight(climbHeight),
               phase: "vault",
@@ -762,6 +835,8 @@ const runScenario = async (
                       ) * 0.05,
                     )
                   : 0,
+              climbPhase: "pull",
+              climbVelocity: { x: 0, y: 0, z: 0 },
               elapsed: 0,
             };
             state.grounded = false;

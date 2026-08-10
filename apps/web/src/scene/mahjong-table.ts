@@ -123,6 +123,7 @@ import {
   PLAYER_CAPSULE_RADIUS,
   PLAYER_CROUCH_EYE_HEIGHT,
   PLAYER_JUMP_SPEED,
+  PLAYER_SUPPORT_SNAP_HEIGHT,
   PLAYER_STANDING_EYE_HEIGHT,
   PLAYER_STANDING_EYE_HEIGHT_METERS,
   PLAYER_WALK_MULTIPLIER,
@@ -1132,8 +1133,10 @@ interface WallHangState {
 }
 
 interface WallClimbTransition extends ClimbingTransition {
-  /** World-space launch velocity applied to the authoritative capsule. */
-  physicsVelocity: PhysicsVector;
+  /** World-space motor velocity applied while the capsule is climbing. */
+  climbVelocity: PhysicsVector;
+  /** Pull up the wall before moving inward across the cleared top. */
+  climbPhase: "pull" | "mantle";
   /** Safety timeout if the physical landing cannot be resolved. */
   timeoutSeconds: number;
 }
@@ -1469,28 +1472,6 @@ export const resolveJumpOxygenAvailability = (availableO2: number): JumpOxygenRe
     return { accepted: true, fullJump: false, launchSpeed: resolveJumpLaunchSpeed(false) };
   }
   return { accepted: false, fullJump: false, launchSpeed: 0 };
-};
-
-/** Resolve the physical launch impulse that clears a caught wall top. */
-export const resolveWallClimbLaunchVelocity = (
-  climbHeight: number,
-  climbDirection: PhysicsVector,
-  preservedSpeed: number,
-): PhysicsVector => {
-  const safeHeight = Number.isFinite(climbHeight) ? Math.max(0, climbHeight) : 0;
-  const horizontalLength = Math.hypot(climbDirection.x, climbDirection.z);
-  const horizontalDirection =
-    horizontalLength > Number.EPSILON
-      ? { x: climbDirection.x / horizontalLength, z: climbDirection.z / horizontalLength }
-      : { x: 0, z: 0 };
-  const horizontalSpeed = Number.isFinite(preservedSpeed)
-    ? Math.max(2.5, Math.min(6, Math.max(0, preservedSpeed)))
-    : 2.5;
-  return {
-    x: horizontalDirection.x * horizontalSpeed,
-    y: Math.sqrt(2 * GRAVITY * (safeHeight + 0.15)),
-    z: horizontalDirection.z * horizontalSpeed,
-  };
 };
 
 // Every platform traversal uses the same continuous climb-over transition.
@@ -2880,6 +2861,30 @@ export const WALL_HANG_MAX_TOP_GAP = 0.6;
 export const WALL_HANG_SIDE_BUFFER = 0.06;
 /** Speed at which the character climbs up while hanging (metres per second). */
 export const WALL_CLIMB_SPEED = 2.5;
+/** Faster, still motor-driven inward movement once the top is clear. */
+export const WALL_CLIMB_MANTLE_SPEED = 5;
+/** Acceleration of the hand-over-hand climb motor; it must not behave like a jump. */
+export const WALL_CLIMB_ACCELERATION = 12;
+
+/**
+ * Advance the constrained climb motor toward its requested velocity.
+ *
+ * The exponential response is independent of render frame rate. Starting from
+ * zero therefore produces a gradual pull rather than an initial launch impulse.
+ */
+export const resolveWallClimbMotorVelocity = (
+  currentVelocity: PhysicsVector,
+  targetVelocity: PhysicsVector,
+  deltaSeconds: number,
+): PhysicsVector => {
+  const safeDelta = Number.isFinite(deltaSeconds) ? Math.max(0, deltaSeconds) : 0;
+  const response = 1 - Math.exp(-WALL_CLIMB_ACCELERATION * safeDelta);
+  return {
+    x: currentVelocity.x + (targetVelocity.x - currentVelocity.x) * response,
+    y: currentVelocity.y + (targetVelocity.y - currentVelocity.y) * response,
+    z: currentVelocity.z + (targetVelocity.z - currentVelocity.z) * response,
+  };
+};
 
 const WALL_HANG_SEPARATION = 0.01;
 const WALL_HANG_EPSILON = 0.0001;
@@ -12243,39 +12248,13 @@ export const createMahjongTableScene = (
     if (!spendPlayerO2(traversalO2Cost, O2_JUMP_RECOVERY_DELAY_SECONDS)) {
       return false;
     }
-    const preservedSpeed = Math.hypot(wall.preservedForwardVelocity, wall.preservedStrafeVelocity);
-    const targetHorizontalDelta = {
-      x: targetPosition.x - wall.target.x,
-      z: targetPosition.z - wall.target.z,
-    };
-    const targetHorizontalDistance = Math.hypot(targetHorizontalDelta.x, targetHorizontalDelta.z);
-    const climbDirection =
-      targetHorizontalDistance > Number.EPSILON
-        ? {
-            x: targetHorizontalDelta.x / targetHorizontalDistance,
-            y: 0,
-            z: targetHorizontalDelta.z / targetHorizontalDistance,
-          }
-        : {
-            x: -wall.wallNormal.x,
-            y: 0,
-            z: -wall.wallNormal.z,
-          };
-    // Launch the capsule high enough to clear the actual top, with a small
-    // clearance margin. Horizontal motion is the caught approach impulse,
-    // capped so the controller can still resolve the wall face before the
-    // capsule rises over it.
-    const physicsVelocity = resolveWallClimbLaunchVelocity(
-      climbHeight,
-      climbDirection,
-      preservedSpeed,
+    const climbDuration = resolveO2ScaledTraversalDuration(
+      Math.max(0.35, climbHeight / WALL_CLIMB_SPEED),
+      oxygenRatio,
     );
     wallClimbTransition = {
-      duration: resolveO2ScaledTraversalDuration(
-        resolveVaultTraversalDuration(climbHeight),
-        oxygenRatio,
-      ),
-      arcHeight: resolveVaultTraversalArcHeight(climbHeight),
+      duration: climbDuration,
+      arcHeight: 0,
       elapsed: 0,
       phase: "vault",
       traversalHeightMeters: climbHeight,
@@ -12289,15 +12268,14 @@ export const createMahjongTableScene = (
       preservedStrafeVelocity: wall.preservedStrafeVelocity,
       preserveSprinting: wall.preserveSprinting,
       landingBoostDistance: 0,
-      physicsVelocity,
-      timeoutSeconds:
-        resolveO2ScaledTraversalDuration(resolveVaultTraversalDuration(climbHeight), oxygenRatio) +
-        1,
+      climbVelocity: { x: 0, y: 0, z: 0 },
+      climbPhase: "pull",
+      timeoutSeconds: climbDuration + 1,
     };
     wallHangState = null;
     wallHangElapsed = 0;
     grounded = false;
-    verticalVelocity = physicsVelocity.y;
+    verticalVelocity = 0;
     physicsCharacterPosition = { ...wall.target };
     forwardVelocity = 0;
     strafeVelocity = 0;
@@ -14353,17 +14331,61 @@ export const createMahjongTableScene = (
                 z: transition.startZ,
               };
               transition.elapsed = Math.min(transition.elapsed + delta, transition.timeoutSeconds);
-              transition.physicsVelocity = {
-                ...transition.physicsVelocity,
-                y: transition.physicsVelocity.y - GRAVITY * delta,
+              if (
+                transition.climbPhase === "pull" &&
+                previousPosition.y >= transition.targetY - WALL_CLIMB_CLEARANCE
+              ) {
+                transition.climbPhase = "mantle";
+                transition.climbVelocity = { x: 0, y: 0, z: 0 };
+              }
+              const targetVelocity: PhysicsVector =
+                transition.climbPhase === "pull"
+                  ? { x: 0, y: WALL_CLIMB_SPEED, z: 0 }
+                  : (() => {
+                      const remainingX = transition.targetX - previousPosition.x;
+                      const remainingZ = transition.targetZ - previousPosition.z;
+                      const remainingDistance = Math.hypot(remainingX, remainingZ);
+                      if (remainingDistance <= Number.EPSILON) {
+                        return { x: 0, y: 0, z: 0 };
+                      }
+                      return {
+                        x: (remainingX / remainingDistance) * WALL_CLIMB_MANTLE_SPEED,
+                        y: 0,
+                        z: (remainingZ / remainingDistance) * WALL_CLIMB_MANTLE_SPEED,
+                      };
+                    })();
+              transition.climbVelocity = resolveWallClimbMotorVelocity(
+                transition.climbVelocity,
+                targetVelocity,
+                delta,
+              );
+              const desiredDelta: PhysicsVector = {
+                x: transition.climbVelocity.x * delta,
+                y: transition.climbVelocity.y * delta,
+                z: transition.climbVelocity.z * delta,
               };
-              verticalVelocity = transition.physicsVelocity.y;
-              const movement = physicsRuntime.move(previousPosition, {
-                x: transition.physicsVelocity.x * delta,
-                y: transition.physicsVelocity.y * delta,
-                z: transition.physicsVelocity.z * delta,
-              });
-              const position: PhysicsVector = {
+              if (transition.climbPhase === "pull") {
+                desiredDelta.y = Math.min(
+                  desiredDelta.y,
+                  Math.max(0, transition.targetY - previousPosition.y),
+                );
+                desiredDelta.x = 0;
+                desiredDelta.z = 0;
+              } else {
+                desiredDelta.x = THREE.MathUtils.clamp(
+                  desiredDelta.x,
+                  Math.min(0, transition.targetX - previousPosition.x),
+                  Math.max(0, transition.targetX - previousPosition.x),
+                );
+                desiredDelta.z = THREE.MathUtils.clamp(
+                  desiredDelta.z,
+                  Math.min(0, transition.targetZ - previousPosition.z),
+                  Math.max(0, transition.targetZ - previousPosition.z),
+                );
+                desiredDelta.y = 0;
+              }
+              const movement = physicsRuntime.move(previousPosition, desiredDelta);
+              let position: PhysicsVector = {
                 x: THREE.MathUtils.clamp(movement.position.x, WORLD_BOUNDS.minX, WORLD_BOUNDS.maxX),
                 y: movement.position.y,
                 z: THREE.MathUtils.clamp(movement.position.z, WORLD_BOUNDS.minZ, WORLD_BOUNDS.maxZ),
@@ -14374,24 +14396,68 @@ export const createMahjongTableScene = (
                 z: (position.z - previousPosition.z) / velocityDeltaSeconds,
               };
               physicsCharacterPosition = position;
-              grounded = movement.grounded && verticalVelocity <= 0;
-              if (!grounded) {
-                maximumFallSpeed = Math.max(maximumFallSpeed, Math.max(0, -verticalVelocity));
-              }
+              verticalVelocity = resolvedWorldVelocity.y;
+              grounded = false;
               jumpOffset = Math.max(0, position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
               camera.position.x = position.x;
               camera.position.z = position.z;
               baseCameraY = position.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
               forwardVelocity = transition.preservedForwardVelocity;
               strafeVelocity = transition.preservedStrafeVelocity;
-              const reachedSupportedTop = grounded && position.y >= transition.targetY - 0.12;
-              if (reachedSupportedTop || transition.elapsed >= transition.timeoutSeconds) {
-                wallClimbTransition = null;
-                if (reachedSupportedTop) {
-                  grounded = true;
-                  verticalVelocity = 0;
+              if (
+                transition.climbPhase === "pull" &&
+                position.y >= transition.targetY - WALL_CLIMB_CLEARANCE
+              ) {
+                transition.climbPhase = "mantle";
+                transition.climbVelocity = { x: 0, y: 0, z: 0 };
+              }
+              const remainingHorizontalDistance = Math.hypot(
+                transition.targetX - position.x,
+                transition.targetZ - position.z,
+              );
+              if (
+                transition.climbPhase === "mantle" &&
+                remainingHorizontalDistance <= Math.max(0.02, WALL_CLIMB_MANTLE_SPEED * delta)
+              ) {
+                const landing = physicsRuntime.move(position, {
+                  x: transition.targetX - position.x,
+                  y: -PLAYER_SUPPORT_SNAP_HEIGHT,
+                  z: transition.targetZ - position.z,
+                });
+                position = {
+                  x: THREE.MathUtils.clamp(
+                    landing.position.x,
+                    WORLD_BOUNDS.minX,
+                    WORLD_BOUNDS.maxX,
+                  ),
+                  y: landing.position.y,
+                  z: THREE.MathUtils.clamp(
+                    landing.position.z,
+                    WORLD_BOUNDS.minZ,
+                    WORLD_BOUNDS.maxZ,
+                  ),
+                };
+                physicsCharacterPosition = position;
+                camera.position.x = position.x;
+                camera.position.z = position.z;
+                baseCameraY = position.y - PLAYER_COLLIDER_CENTER_HEIGHT + eyeHeight;
+                jumpOffset = Math.max(0, position.y - PLAYER_COLLIDER_CENTER_HEIGHT);
+                grounded = landing.grounded;
+                verticalVelocity = 0;
+                resolvedWorldVelocity = {
+                  x: (position.x - previousPosition.x) / velocityDeltaSeconds,
+                  y: (position.y - previousPosition.y) / velocityDeltaSeconds,
+                  z: (position.z - previousPosition.z) / velocityDeltaSeconds,
+                };
+                if (grounded) {
+                  wallClimbTransition = null;
                   maximumFallSpeed = 0;
                 }
+              }
+              if (transition.elapsed >= transition.timeoutSeconds && wallClimbTransition !== null) {
+                wallClimbTransition = null;
+                grounded = false;
+                verticalVelocity = 0;
               }
             }
           }

@@ -25,7 +25,7 @@ import {
   resolveVaultTraversalO2Cost,
   resolveO2ScaledTraversalDuration,
   resolveWallClimbTarget,
-  resolveWallClimbLaunchVelocity,
+  resolveWallClimbMotorVelocity,
   resolveWallHangTarget,
   resolveWallHangTargetDetails,
   WALL_HANG_MIN_TOP,
@@ -480,15 +480,23 @@ describe("jump posture", () => {
     });
   });
 
-  it("scales the wall climb launch from the physical clearance height", () => {
-    const low = resolveWallClimbLaunchVelocity(0.5, { x: 0, y: 0, z: -1 }, 1);
-    const high = resolveWallClimbLaunchVelocity(2, { x: 0, y: 0, z: -1 }, 12);
+  it("ramps a wall climb from rest instead of launching the capsule", () => {
+    const fromRest = resolveWallClimbMotorVelocity(
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: WALL_CLIMB_SPEED, z: 0 },
+      1 / 60,
+    );
+    const afterLongerFrame = resolveWallClimbMotorVelocity(
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: WALL_CLIMB_SPEED, z: 0 },
+      1 / 30,
+    );
 
-    expect(low.y).toBeGreaterThan(0);
-    expect(high.y).toBeGreaterThan(low.y);
-    expect(low.z).toBeLessThan(0);
-    expect(Math.abs(low.z)).toBeCloseTo(2.5, 8);
-    expect(Math.abs(high.z)).toBeCloseTo(6, 8);
+    expect(fromRest.x).toBe(0);
+    expect(fromRest.y).toBeGreaterThan(0);
+    expect(fromRest.y).toBeLessThan(WALL_CLIMB_SPEED);
+    expect(afterLongerFrame.y).toBeGreaterThan(fromRest.y);
+    expect(afterLongerFrame.y).toBeLessThan(WALL_CLIMB_SPEED);
   });
 });
 

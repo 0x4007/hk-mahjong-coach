@@ -579,8 +579,9 @@ Milestone 5 — Persistence and replay repairs and acceptance.
 
 - Re-enabled the live wall-hang detector and hold-to-climb input. A short jump-request buffer keeps a quick tap alive
   through the airborne contact frame, so climbing no longer depends on holding Space until the wall is reached.
-- Wall climbs now launch the authoritative physics capsule with an upward/inward impulse and let Rapier or the fallback
-  controller resolve the top support. The rendered camera follows that resolved capsule position.
+- Wall climbs now start the authoritative capsule at zero velocity. A frame-rate-independent motor pulls it upward
+  while attached, moves inward only after the capsule clears the top, and lets Rapier or the fallback controller resolve
+  the support. The rendered camera follows that resolved capsule position; there is no ballistic climb launch.
 - Restored the O₂ jump contract: a full 5-point reserve charge gives the full jump, a partial reserve rejects the jump,
   and only exactly empty O₂ permits the free reduced mini-hop.
 

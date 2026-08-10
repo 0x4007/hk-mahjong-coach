@@ -180,9 +180,10 @@
   player caught the wall; it does not slide to a skinny wall's centre. The wall target scan includes streamed static
   boxes but excludes knocked dynamic props, and wall entry requires the same airborne gate as other parkour traversal
   so low vault/ledge movement is not reclassified as a wall hang. A quick jump tap is buffered through the airborne
-  contact window. Forward or Jump starts a physical upward/inward impulse on the authoritative capsule; Rapier or the
-  fallback controller resolves the wall face, top support, and landing rather than moving only the rendered camera.
-  The captured tangent momentum is restored after the supported landing.
+  contact window. Forward or Jump starts a zero-velocity, frame-rate-independent climb motor: the capsule is pulled
+  upward while attached, then moves inward only after its head clears the wall top. Rapier or the fallback controller
+  resolves the wall face, top support, and landing rather than moving only the rendered camera. The captured tangent
+  momentum is restored after the supported landing.
 - During local development, the visual scene stores a validated v1 snapshot in room-scoped
   `sessionStorage`. HMR disposal, page hide, and tab unload flush the latest camera position/orientation,
   seat/overhead view, crouch state, FOV, and debug orbit target; the next scene mount restores it. This
@@ -340,9 +341,10 @@ The returned centre is outside the face by the 0.26 m capsule radius plus a 0.01
 not embed the player in the collider. The helper scans all boxes and chooses the closest valid candidate.
 
 The simulator retains the wall face, outward normal, and top height while hanging. Gravity and ordinary movement
-are suppressed. Forward or jump starts its deterministic vault-style climb approximation, keeping the caught tangent
-coordinate and preserved momentum before a supported landing query. The live browser path instead applies a physical
-upward/inward capsule impulse. Samples emit `wallHang` only on the entry frame and expose `hanging`, `climbing`, and
+are suppressed. Forward or jump starts its constrained climb approximation, keeping the caught tangent coordinate and
+preserved momentum while the capsule is pulled upward and then moved inward over the cleared top. The live browser path
+uses the same zero-start climb motor and lets the physics controller resolve the supported landing. Samples emit
+`wallHang` only on the entry frame and expose `hanging`, `climbing`, and
 `traversalState` for later frames. JSON mode writes only the summary to stdout; the current Rapier package warning is
 emitted on stderr. The rotated-backdrop regression is
 `pnpm test:movement:sim scripts/movement-scenarios/wall-hang-generated-rotated-test.json --json`.
