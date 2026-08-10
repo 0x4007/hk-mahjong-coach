@@ -303,3 +303,19 @@ The visual penthouse occupies the complete 50 m x 50 m development play space. I
   complete milestones or wired through the placeholder CLI, server, and browser clients.
 - The persistence slice still needs deletion/privacy, recovery/export, migration, restart/resume,
   and coverage repairs before Milestone 5 can close.
+## Unreal visual prototype
+
+The `feat/unreal` worktree adds an isolated UE5 project under `unreal/`. It is a
+presentation-only fixture and does not move game rules, scoring, persistence, or
+authoritative state into Unreal. The game mode creates a camera and procedural
+penthouse scene at runtime, so no generated binary map is required for the first
+visual pass. See `unreal/README.md` for setup and the exact external validation
+boundary.
+
+The visual direction is a bright Manhattan penthouse: the table is the hero,
+the skyline is layered behind thin window mullions, and red/cyan accents are
+used sparingly. The renderer profile requests Lumen, virtual shadow maps, TSR,
+height fog, reflection capture, warm sun light, cool sky fill, and a restrained
+cinematic post process. This is an experimental graybox slice; authored Nanite
+assets should replace the runtime boxes only after the UE5 camera composition is
+accepted.

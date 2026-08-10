@@ -244,3 +244,9 @@ restart/resume path before beginning dependent CLI/server integration.
 - The mahjong table remains centered on an enlarged presentation inset while fixed furniture is distributed sparsely around the perimeter.
 - The authored penthouse map uses a 48 m x 48 m interior floor and five deliberate accent entities; procedural room props are reduced to a low-density fallback.
 - Penthouse exploration clipping follows the expanded shell footprint, keeping streamed city geometry outside the room.
+## Unreal visual lane (2026-08-05)
+
+- The dedicated `feat/unreal` worktree now contains `unreal/HkMahjongCoach.uproject` and a runtime-generated UE5 visual slice.
+- `AMahjongVisualGameMode` spawns a cinematic camera pawn and `AMahjongPenthouseActor`, which builds the penthouse, table, tile fixture, skyline landmark, lights, fog, reflection capture, and restrained post process at runtime.
+- Renderer defaults enable Lumen, virtual shadow maps, TSR, auto exposure, bloom, and distance fields through `unreal/Config/DefaultEngine.ini`.
+- Acceptance is incomplete: this machine has no `UnrealEditor` executable, so project generation, C++ compilation, and rendered-frame inspection remain pending on a UE5-equipped machine.

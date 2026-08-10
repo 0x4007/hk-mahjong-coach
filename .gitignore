@@ -10,3 +10,15 @@ test-results/
 *.sqlite-wal
 .env
 .DS_Store
+
+# Unreal Engine generated artifacts (feat/unreal project)
+unreal/Binaries/
+unreal/Build/
+unreal/Intermediate/
+unreal/Saved/
+unreal/DerivedDataCache/
+unreal/.vs/
+unreal/*.sln
+unreal/*.sln.DotSettings
+unreal/*.xcodeproj
+unreal/*.xcworkspace
