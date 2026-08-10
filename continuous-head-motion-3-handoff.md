@@ -175,3 +175,9 @@ The server-owned bus run `1786340058047-43196-d49e1c72` recorded the new smooth-
 other failures are pre-existing dirty-lane core-engine, simulation, Warehouse, and map-catalog failures; their exact
 result files are listed in that manifest. Browser, HMR, Playwright, and rendered one-window acceptance remain pending
 for the user by the contract above.
+
+Follow-up validation on 2026-08-10 also consolidated camera acceleration roll and pitch into the shared rotational
+head state. `HeadMotionStepInput` accumulates same-frame impulses before the analytic integration pass, and the
+high-energy stop path submits a bounded angular collision-stop impulse. Bus run `1786344257454-43196-336d40cf`
+passes 652/652 assertions on the dirty canonical worktree. The remaining acceptance boundary is still the user's
+single-window ledge-fall visual check; no browser or HMR proof is claimed here.

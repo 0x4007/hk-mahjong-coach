@@ -56,6 +56,8 @@ export interface HeadMotionStepInput {
   readonly targetTranslation?: HeadMotionVector;
   readonly targetRotation?: HeadRotationVector;
   readonly impulse?: HeadImpulse;
+  /** Multiple same-frame events are accumulated before one integration pass. */
+  readonly impulses?: readonly HeadImpulse[];
   readonly limits?: Partial<HeadMotionLimits>;
 }
 
@@ -64,6 +66,9 @@ export interface HeadMotionSolverOptions {
   readonly stiffness: number;
   /** Shared second-order damping for every axis. */
   readonly damping: number;
+  /** Optional rotational tuning using the same analytic integrator. */
+  readonly rotationStiffness?: number;
+  readonly rotationDamping?: number;
   /** Opposite head response multiplier applied to body delta-v. */
   readonly impulseScale: number;
   readonly limits: HeadMotionLimits;
@@ -78,6 +83,8 @@ const DEFAULT_LIMITS: HeadMotionLimits = {
 export const HEAD_MOTION_DEFAULT_OPTIONS: HeadMotionSolverOptions = {
   stiffness: 72,
   damping: 17,
+  rotationStiffness: 1200,
+  rotationDamping: 34,
   impulseScale: 0.82,
   limits: DEFAULT_LIMITS,
 };
@@ -255,15 +262,26 @@ export const integrateHeadMotion = (
   input: HeadMotionStepInput,
   options: HeadMotionSolverOptions = HEAD_MOTION_DEFAULT_OPTIONS,
 ): { readonly state: HeadMotionState; readonly snapshot: HeadMotionSnapshot } => {
-  const impulse = input.impulse;
-  const translationImpulse =
-    impulse === undefined
-      ? { right: 0, up: 0, forward: 0 }
-      : scaleVector(impulse.deltaVelocity, -finite(options.impulseScale));
-  const rotationImpulse =
-    impulse?.angularDeltaVelocity === undefined
-      ? { pitch: 0, yaw: 0, roll: 0 }
-      : scaleRotation(impulse.angularDeltaVelocity, -finite(options.impulseScale));
+  const impulses = [
+    ...(input.impulses ?? []),
+    ...(input.impulse === undefined ? [] : [input.impulse]),
+  ];
+  const translationImpulse = impulses.reduce(
+    (sum, impulse) =>
+      addVector(sum, scaleVector(impulse.deltaVelocity, -finite(options.impulseScale))),
+    { right: 0, up: 0, forward: 0 },
+  );
+  const rotationImpulse = impulses.reduce(
+    (sum, impulse) =>
+      addRotation(
+        sum,
+        scaleRotation(
+          impulse.angularDeltaVelocity ?? { pitch: 0, yaw: 0, roll: 0 },
+          -finite(options.impulseScale),
+        ),
+      ),
+    { pitch: 0, yaw: 0, roll: 0 },
+  );
   const translationVelocity = addVector(state.translationVelocity, translationImpulse);
   const rotationVelocity = addRotation(state.rotationVelocity, rotationImpulse);
   const targetTranslation = input.targetTranslation ?? { right: 0, up: 0, forward: 0 };
@@ -281,8 +299,8 @@ export const integrateHeadMotion = (
     rotationVelocity,
     targetRotation,
     input.deltaSeconds,
-    options.stiffness,
-    options.damping,
+    options.rotationStiffness ?? options.stiffness,
+    options.rotationDamping ?? options.damping,
   );
   const limits = {
     translation: input.limits?.translation ?? options.limits.translation,
@@ -298,7 +316,7 @@ export const integrateHeadMotion = (
   });
   const snapshot: HeadMotionSnapshot = Object.freeze({
     ...nextState,
-    source: impulse?.source ?? null,
+    source: impulses.at(-1)?.source ?? null,
     translationClamped:
       boundedTranslation.right !== translation.right ||
       boundedTranslation.up !== translation.up ||

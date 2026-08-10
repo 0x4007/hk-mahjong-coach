@@ -21,6 +21,11 @@ visual-table milestone or provide browser/HMR/Playwright acceptance.
 Each movement trace also records `camera.visibleEyeHeight`; the severe-fall fixture bounds its minimum to `0.85–1.15 m`
 so the requested approximately one-metre eye height is tested directly, not inferred only from an offset.
 
+The shared solver also accepts multiple same-frame body/contact events and a rotational target. Camera acceleration
+roll and pitch now enter that same rotation state; high-energy stops are bounded angular impulses rather than a second
+camera response machine. This preserves one post-physics presentation snapshot for camera, viewmodel, reticule, aim,
+and focus consumers while leaving the capsule pose and collision height physics-authoritative.
+
 The severe-fall regression also checks the post-impact recovery: after the minimum offset, the capsule remains at the
 support height while the shared head response returns smoothly toward the standing eye height.
 

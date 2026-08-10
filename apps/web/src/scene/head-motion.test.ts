@@ -75,6 +75,34 @@ describe("unified head motion solver", () => {
     );
   });
 
+  it("accumulates same-frame body and contact impulses before integration", () => {
+    const state = createHeadMotionState();
+    const combined = integrateHeadMotion(state, {
+      deltaSeconds: 1 / 60,
+      impulses: [
+        {
+          source: "locomotion",
+          deltaVelocity: { right: 2, up: 0, forward: 0 },
+        },
+        {
+          source: "collision-stop",
+          deltaVelocity: { right: 0, up: 4, forward: 0 },
+        },
+      ],
+    });
+    const summed = integrateHeadMotion(state, {
+      deltaSeconds: 1 / 60,
+      impulse: {
+        source: "collision-stop",
+        deltaVelocity: { right: 2, up: 4, forward: 0 },
+      },
+    });
+
+    expect(combined.snapshot.translation.right).toBeCloseTo(summed.snapshot.translation.right, 12);
+    expect(combined.snapshot.translation.up).toBeCloseTo(summed.snapshot.translation.up, 12);
+    expect(combined.snapshot.source).toBe("collision-stop");
+  });
+
   it("does not accumulate a free-fall gravity bias", () => {
     let state = createHeadMotionState();
     for (let index = 0; index < 120; index += 1) {

@@ -14320,6 +14320,12 @@ export const createMahjongTableScene = (
     debugBokehStrength = resolveDofIntensityForPosture(isCrouched, zoomedView);
     persistDebugPreferences();
   };
+  /**
+   * Physics bridge bookkeeping. These values are resolved by the movement
+   * controller and collision runtime; they are not a second presentation
+   * state. The camera receives only the post-physics delta-v impulse and never
+   * writes any of these values back into the capsule.
+   */
   let jumpOffset = 0;
   let verticalVelocity = 0;
   let presentationWorldVelocity: CameraMotionVector = { x: 0, y: 0, z: 0 };
@@ -14484,6 +14490,7 @@ export const createMahjongTableScene = (
   let aimingDownSightsRequested = false;
   let aimingDownSights = false;
   let impactDamageCooldown = 0;
+  /** Accumulated fall speed is physics/O₂ bookkeeping, never a camera load. */
   let maximumFallSpeed = 0;
   const publishSprintingActivity = (sprinting: boolean): void => {
     if (publishedSprintingActivity === sprinting) {

@@ -11,8 +11,12 @@
   weaker normal-jump response. Reticle, aim-ray, and focus-ray traces remain identical.
 - Added a regression that follows the severe-fall minimum through recovery: the supported capsule stays fixed while the
   shared eye offset returns smoothly to standing height.
-- Validation is in progress on the canonical `continuous-head-motion-3` worktree. Browser, HMR, Playwright, and rendered
-  acceptance are intentionally excluded; the user must perform the one-window visual check after deterministic gates.
+- Consolidated camera acceleration roll/pitch into the shared rotational target and collision-stop impulse path. The
+  head solver now accepts accumulated same-frame impulses and keeps the same analytic integrator for translation and
+  rotation, including the bounded high-energy stop response.
+- Server-owned bus run `1786344257454-43196-336d40cf` passes all 652 assertions, including the new accumulated-impulse
+  regression. Browser, HMR, Playwright, and rendered acceptance remain intentionally excluded; the user must perform
+  the one-window visual check after deterministic gates.
 
 ## 2026-08-08 — Damaged Warehouse servers lose their status lights
 

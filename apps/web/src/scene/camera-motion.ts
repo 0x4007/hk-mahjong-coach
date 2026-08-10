@@ -209,8 +209,8 @@ export const CAMERA_ACCELERATION_HARD_STOP_THRESHOLD_METERS_PER_SECOND_SQUARED =
   CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED * 2;
 export const CAMERA_ACCELERATION_HARD_STOP_SATURATION_METERS_PER_SECOND_SQUARED =
   CAMERA_ACCELERATION_REFERENCE_METERS_PER_SECOND_SQUARED * 10;
-export const CAMERA_ACCELERATION_TARGET_DAMPING = 4;
-export const CAMERA_ACCELERATION_DAMPING = 6;
+/** Compensates for the shared head impulse scale on a one-frame hard stop. */
+export const CAMERA_ACCELERATION_HARD_STOP_IMPULSE_GAIN = 1.15;
 export const CAMERA_BOB_AMPLITUDE = 0.025;
 export const CAMERA_BOB_LATERAL_AMPLITUDE = 0.012;
 export const CAMERA_BOB_DEPTH_AMPLITUDE = 0.008;
@@ -403,25 +403,6 @@ const clamp = (value: number, min: number, max: number): number =>
 
 const damp = (current: number, target: number, damping: number, deltaSeconds: number): number =>
   current + (target - current) * (1 - Math.exp(-damping * deltaSeconds));
-
-/** Integrate the target-and-response acceleration filter exactly over one held input step. */
-const integrateAccelerationCascade = (
-  target: number,
-  response: number,
-  source: number,
-  deltaSeconds: number,
-): readonly [target: number, response: number] => {
-  const targetDecay = Math.exp(-CAMERA_ACCELERATION_TARGET_DAMPING * deltaSeconds);
-  const responseDecay = Math.exp(-CAMERA_ACCELERATION_DAMPING * deltaSeconds);
-  const targetDelta = target - source;
-  const coupling =
-    (CAMERA_ACCELERATION_DAMPING * (targetDecay - responseDecay)) /
-    (CAMERA_ACCELERATION_DAMPING - CAMERA_ACCELERATION_TARGET_DAMPING);
-  return [
-    source + targetDelta * targetDecay,
-    response * responseDecay + source * (1 - responseDecay) + targetDelta * coupling,
-  ];
-};
 
 const resolveFiniteMotionVector = (vector: CameraMotionVector): CameraMotionVector => ({
   x: Number.isFinite(vector.x) ? vector.x : 0,
@@ -882,10 +863,6 @@ const createDefaultOffsets = (): CameraMotionOffsets => ({
 
 /** Create the one presentation damper shared by camera output and reticule aim. */
 export const createCameraMotionDamper = (): CameraMotionDamper => {
-  let accelerationRoll = 0;
-  let accelerationRollTarget = 0;
-  let accelerationPitch = 0;
-  let accelerationPitchTarget = 0;
   let bobPhase = 0;
   let bobAmount = 0;
   let breathingPhase = 0;
@@ -918,10 +895,12 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   let deathTumbleActive = false;
 
   const clearAcceleration = (): void => {
-    accelerationRoll = 0;
-    accelerationRollTarget = 0;
-    accelerationPitch = 0;
-    accelerationPitchTarget = 0;
+    headMotionState = Object.freeze({
+      ...headMotionState,
+      rotation: { pitch: 0, yaw: 0, roll: 0 },
+      rotationVelocity: { pitch: 0, yaw: 0, roll: 0 },
+    });
+    headMotionSnapshot = integrateHeadMotion(headMotionState, { deltaSeconds: 0 }).snapshot;
     offsets = {
       ...offsets,
       roll: 0,
@@ -959,10 +938,6 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
   const reset = (): void => {
     deathTumbleElapsedSeconds = Number.POSITIVE_INFINITY;
     deathTumbleActive = false;
-    accelerationRoll = 0;
-    accelerationRollTarget = 0;
-    accelerationPitch = 0;
-    accelerationPitchTarget = 0;
     bobPhase = 0;
     bobAmount = 0;
     breathingPhase = 0;
@@ -1118,54 +1093,36 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
     const accelerationRollSource = hasLateralAcceleration
       ? resolveCameraAccelerationRoll(localAcceleration.right)
       : 0;
-    if (hasLateralAcceleration) {
-      // A hard stop is a one-frame delta-v impulse. Add only the overload to
-      // the current damper state so ordinary sprint response stays unchanged,
-      // while a wall or prop stop is visible immediately instead of waiting
-      // for the target spring to catch up over several frames.
-      const overload = -resolveCameraAccelerationOverload(
-        localAcceleration.right,
-        CAMERA_ACCELERATION_ROLL_MAX,
-      );
-      if (Math.abs(overload) > Number.EPSILON) {
-        accelerationRoll = clamp(
-          accelerationRoll + overload,
-          -CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
-          CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
-        );
-      }
-    }
-    [accelerationRollTarget, accelerationRoll] = integrateAccelerationCascade(
-      accelerationRollTarget,
-      accelerationRoll,
-      accelerationRollSource,
-      deltaSeconds,
-    );
-
     const hasForwardAcceleration =
       input.shiftEnabled && Math.abs(localAcceleration.forward) > Number.EPSILON;
     const accelerationPitchSource = hasForwardAcceleration
       ? resolveCameraAccelerationPitch(localAcceleration.forward)
       : 0;
-    if (hasForwardAcceleration) {
-      const overload = -resolveCameraAccelerationOverload(
-        localAcceleration.forward,
-        CAMERA_ACCELERATION_PITCH_MAX,
-      );
-      if (Math.abs(overload) > Number.EPSILON) {
-        accelerationPitch = clamp(
-          accelerationPitch + overload,
-          -CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
-          CAMERA_ACCELERATION_HARD_STOP_MAX_RESPONSE,
-        );
-      }
-    }
-    [accelerationPitchTarget, accelerationPitch] = integrateAccelerationCascade(
-      accelerationPitchTarget,
-      accelerationPitch,
-      accelerationPitchSource,
-      deltaSeconds,
-    );
+    // High-energy stops are explicit angular events in the same head stream as
+    // physics impulses. The division by frame duration converts the bounded
+    // one-frame angle overload into angular delta-v for the shared solver.
+    const angularStopDeltaVelocity =
+      deltaSeconds > Number.EPSILON
+        ? {
+            pitch: hasForwardAcceleration
+              ? (resolveCameraAccelerationOverload(
+                  localAcceleration.forward,
+                  CAMERA_ACCELERATION_PITCH_MAX,
+                ) *
+                  CAMERA_ACCELERATION_HARD_STOP_IMPULSE_GAIN) /
+                deltaSeconds
+              : 0,
+            yaw: 0,
+            roll: hasLateralAcceleration
+              ? (resolveCameraAccelerationOverload(
+                  localAcceleration.right,
+                  CAMERA_ACCELERATION_ROLL_MAX,
+                ) *
+                  CAMERA_ACCELERATION_HARD_STOP_IMPULSE_GAIN) /
+                deltaSeconds
+              : 0,
+          }
+        : { pitch: 0, yaw: 0, roll: 0 };
 
     // Gait represents footfall, so it must not continue while the physics
     // capsule is airborne or moving through a vault/wall traversal. Keep the
@@ -1247,8 +1204,25 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
         up: input.headMotionTarget?.up ?? headBobTarget,
         forward: gait.headBobDepth,
       },
+      targetRotation: {
+        pitch: accelerationPitchSource,
+        yaw: 0,
+        roll: accelerationRollSource,
+      },
     };
-    const headImpulse = input.headImpulse ?? compatibilityImpulse;
+    const baseHeadImpulse = input.headImpulse ?? compatibilityImpulse;
+    const hasAngularStop =
+      Math.abs(angularStopDeltaVelocity.pitch) > Number.EPSILON ||
+      Math.abs(angularStopDeltaVelocity.roll) > Number.EPSILON;
+    const headImpulse = hasAngularStop
+      ? {
+          ...(baseHeadImpulse ?? {
+            source: "collision-stop" as const,
+            deltaVelocity: { right: 0, up: 0, forward: 0 },
+          }),
+          angularDeltaVelocity: angularStopDeltaVelocity,
+        }
+      : baseHeadImpulse;
     const headMotion =
       headImpulse === undefined
         ? integrateHeadMotion(headMotionState, headMotionInput)
@@ -1262,7 +1236,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       weightShift * CAMERA_WEIGHT_PITCH_POSITION_SCALE
     );
     const headBobPitch = clamp(
-      weightPitch + accelerationPitch,
+      weightPitch + headMotionSnapshot.rotation.pitch,
       -CAMERA_WEIGHT_PITCH_MAX,
       CAMERA_WEIGHT_PITCH_MAX,
     );
@@ -1371,7 +1345,7 @@ export const createCameraMotionDamper = (): CameraMotionDamper => {
       });
     }
     offsets = {
-      roll: accelerationRoll + coverLeanRoll + deathRoll,
+      roll: headMotionSnapshot.rotation.roll + coverLeanRoll + deathRoll,
       coverLeanRoll,
       coverLeanOffset,
       headBob: headBobTarget,
