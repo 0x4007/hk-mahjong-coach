@@ -1,7 +1,9 @@
 node_modules
+third_party
 dist
 coverage
 playwright-report
 test-results
 pnpm-lock.yaml
 spec.md
+artifacts/visual/visual-debug-state.json

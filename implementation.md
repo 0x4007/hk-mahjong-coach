@@ -1,5 +1,28 @@
 # Implementation status
 
+## 2026-08-10 — MotionBricks stick-figure experiment
+
+- Created the isolated worktree `/Users/nv/repos/0x4007/hk-mahjong-coach/.codex-worktrees/continuous-head-motion-motionbricks`
+  on `experimental/continuous-head-motion-motionbricks`, based on the clean continuous-head-motion branch at
+  `0e698917d1ecc13a70b080bb2fb0be878ee0d3e2`.
+- Added `third_party/GR00T-WholeBodyControl` as a Git submodule pinned to the requested
+  `1983e88888217f6c69283cf3a9d1af01e87f07af` commit. The reproducible
+  `scripts/export_motionbricks_clips.py` exporter extracts the 14 required joints from the pinned `G1-clip.ckpt`
+  into the committed `apps/web/src/scene/motionbricks-clip-data.json` asset (15 clips at 30 FPS). The upstream
+  Python, CUDA, MuJoCo, and large neural-model stack is not loaded by the browser.
+- Replaced the capsule-and-box simulant body with a simple cylinder-and-sphere stick figure that preserves the existing
+  named combat hit zones and ragdoll pivots. Added four seated table figures with deterministic MotionBricks idle
+  playback, seated reach/head tracking, and a moving simulant that selects walk, walk-gun, or walk-boxing clips in
+  `apps/web/src/scene/player-stick-figure.ts`.
+- The South seat consumes the live first-person camera direction, so continuous head movement drives the visible player
+  figure's head. All pose phase progression is caller-owned and deterministic.
+- Validation: server-owned snapshot `1786337185072-62641-c362779c` passed 649/649 assertions across 138 suites,
+  including eight stick-figure and MotionBricks regressions, against dirty HEAD
+  `0e698917d1ecc13a70b080bb2fb0be878ee0d3e2` with dirty fingerprint
+  `ac9f7ffd24b3c312ad17b20596b6ff5032ce4793cade385ddbbd02f4af318750`. Strict typecheck, lint, production build,
+  formatting, and `git diff --check` also pass. Browser and HMR acceptance remain pending because the shared browser
+  policy allows only the existing user session.
+
 ## 2026-08-08 — Damaged Warehouse servers lose their status lights
 
 - Added a per-cabinet damage presentation state to the Warehouse rack resource. A projectile or melee impact marks the

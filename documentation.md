@@ -1,5 +1,29 @@
 # Architecture and implementation log
 
+## 2026-08-10 — MotionBricks-inspired stick-figure presentation
+
+This experiment is based on the clean continuous-head-motion branch and vendors the upstream research repository as the
+`third_party/GR00T-WholeBodyControl` submodule at commit `1983e88888217f6c69283cf3a9d1af01e87f07af`. The linked
+`motionbricks/` project is a Python/CUDA/MuJoCo training and inference stack. The reproducible
+`scripts/export_motionbricks_clips.py` exporter reads its pinned `G1-clip.ckpt` and writes only the 14 joints needed by
+the browser into `apps/web/src/scene/motionbricks-clip-data.json`; the large training and neural-model assets remain
+outside the browser bundle and are not runtime dependencies.
+
+The browser uses a small TypeScript adapter in `apps/web/src/scene/player-stick-figure.ts` and
+`apps/web/src/scene/motionbricks-clip.ts`. It builds one canonical stick-figure rig from cylinder bones, sphere joints,
+and a head sphere, then samples and interpolates the real MotionBricks G1 clips at 30 FPS into named bone directions.
+Seated figures retain their seated leg pose while using the checkpoint's upper-body motion; the moving simulant selects
+the idle, walk, walk-gun, or boxing clip from its combat state. The combat simulant and temporary player death body
+retain the old `RagdollHead`, `RagdollTorso`, limb names, hit-zone metadata, and ragdoll seam. The penthouse adds South,
+North, East, and West seated figures; the scene updates their poses from an owned phase clock rather than wall-clock
+randomness. The phase still drives breathing, head intent, and table interaction, while the South figure's head yaw and
+pitch are derived from the live first-person camera direction, so continuous head movement has a visible avatar
+counterpart.
+
+The adapter is deliberately presentation-only. It does not change the authoritative mahjong engine or expose hidden
+tiles. The generated clip asset is committed for offline browser playback; the submodule and exporter are reproducible
+research inputs, while the browser works without Python, CUDA, MuJoCo, or an external API.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the

@@ -144,6 +144,18 @@ Experimental continuous head-motion prototype evidence recorded 2026-08-09 (does
   Browser, HMR, Playwright, and computer-use validation are excluded from this implementation run. The user must still
   complete the real one-window browser acceptance, so the visual-table milestone remains pending.
 
+Experimental MotionBricks stick-figure branch evidence recorded 2026-08-10 (does not complete Milestone 7):
+
+- The isolated branch `experimental/continuous-head-motion-motionbricks` starts at the clean continuous-head-motion
+  commit `0e698917d1ecc13a70b080bb2fb0be878ee0d3e2` and pins the requested upstream repository as a submodule at
+  `1983e88888217f6c69283cf3a9d1af01e87f07af`.
+- The branch pins the requested MotionBricks submodule and includes a reproducible exporter plus a committed 30 FPS,
+  15-clip browser asset extracted from the pinned `G1-clip.ckpt`. The adapter maps those joint trajectories onto simple
+  stick figures with named combat/ragdoll pivots; seated actors use idle upper-body playback and the moving simulant
+  selects walk, walk-gun, or walk-boxing playback while retaining deterministic camera-driven head poses.
+- The upstream Python/CUDA/MuJoCo stack is not a browser runtime dependency, and the browser does not download the large
+  checkpoints. Browser and HMR acceptance remain pending under the single-session browser policy.
+
 ## Milestone 8 — Teacher, learner model, curriculum, and drills (`pending`)
 
 - Implement analysis facts, calibrated templates, modes/hints, post-hand review, mastery/evidence

@@ -255,6 +255,14 @@ import {
   type RagdollState,
 } from "./ragdoll.js";
 import {
+  advanceStickFigurePhase,
+  applyStickFigureAnimationPose,
+  createStickFigureBody,
+  resolveStickFigureAnimationPose,
+  resolveStickFigureMotionClip,
+  type StickFigureRig,
+} from "./player-stick-figure.js";
+import {
   createMeleeImpactFlashPass,
   MELEE_IMPACT_DOF_BOOST_DURATION_SECONDS,
   MELEE_IMPACT_DOF_INTENSITY_MULTIPLIER,
@@ -568,7 +576,7 @@ const PLAYER_KNOCKBACK_DAMPING_PER_SECOND = 5.2;
 // Coarse chunks preserve long traversal sightlines while keeping the resident
 // grid compact enough for the runner prototype.
 const SIMULANT_MIN_START_DISTANCE_METERS = 180;
-const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.09;
+const SIMULANT_BODY_SOURCE_HEIGHT_METERS = 1.1;
 const SIMULANT_BODY_TARGET_HEIGHT_METERS = 1.8;
 const SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS = 0.05;
 export const EXPLORATION_CHUNK_SIZE = 100;
@@ -4841,58 +4849,47 @@ const addHand = (
   parent.add(hand);
 };
 
-const createSimulantBody = (color: THREE.Color, name = "SimulantBody"): THREE.Group => {
-  const root = new THREE.Group();
-  root.name = name;
-  const bodyScale = SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS;
-  root.scale.setScalar(bodyScale);
-  root.position.y = SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS * bodyScale;
-  const bodyMaterial = new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.48,
-    metalness: 0.08,
-    emissive: color,
-    emissiveIntensity: 0.2,
+interface SeatedStickFigureActor {
+  readonly rig: StickFigureRig;
+  readonly phaseOffsetSeconds: number;
+  readonly baseY: number;
+}
+
+const createSeatedStickFigures = (parent: THREE.Object3D): readonly SeatedStickFigureActor[] => {
+  const roster = new THREE.Group();
+  roster.name = "MahjongStickFigurePlayers";
+  roster.userData = { playerModels: true, animationSource: "continuous-head-motion" };
+  const placements = [
+    ["South", 0, 1.92, 0, COLORS.red],
+    ["North", 0, -1.92, Math.PI, COLORS.cyan],
+    ["East", 1.92, 0, -Math.PI / 2, COLORS.red],
+    ["West", -1.92, 0, Math.PI / 2, COLORS.cyan],
+  ] as const;
+  const actors: SeatedStickFigureActor[] = [];
+  placements.forEach(([seat, x, z, rotation, color], index) => {
+    const rig = createStickFigureBody({
+      color,
+      name: `${seat}StickFigure`,
+      scale: 0.82,
+    });
+    rig.root.position.set(x, rig.root.position.y, z);
+    rig.root.rotation.y = rotation;
+    rig.root.userData = {
+      playerModel: true,
+      seat,
+      animationSource: "continuous-head-motion",
+      weaponRaycastIgnore: true,
+      physicsIgnore: true,
+    };
+    roster.add(rig.root);
+    actors.push({
+      rig,
+      phaseOffsetSeconds: index * 1.37,
+      baseY: rig.root.position.y,
+    });
   });
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), bodyMaterial);
-  head.name = "RagdollHead";
-  head.userData = { combatHitZone: "head", ragdollPart: "head" };
-  head.position.set(0, 0.86, 0);
-  root.add(head);
-  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.23, 0.52, 8, 8), bodyMaterial);
-  torso.name = "RagdollTorso";
-  torso.userData = { combatHitZone: "body", ragdollPart: "torso" };
-  torso.position.set(0, 0.44, 0);
-  root.add(torso);
-  const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
-  leftArm.name = "RagdollLeftArm";
-  leftArm.userData = { combatHitZone: "body", ragdollPart: "leftArm" };
-  leftArm.position.set(-0.28, 0.52, 0.02);
-  leftArm.rotation.z = 0.25;
-  root.add(leftArm);
-  const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.18), bodyMaterial);
-  rightArm.name = "RagdollRightArm";
-  rightArm.userData = { combatHitZone: "body", ragdollPart: "rightArm" };
-  rightArm.position.set(0.28, 0.52, 0.02);
-  rightArm.rotation.z = -0.25;
-  root.add(rightArm);
-  const leftLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
-  leftLeg.name = "RagdollLeftLeg";
-  leftLeg.userData = { combatHitZone: "body", ragdollPart: "leftLeg" };
-  leftLeg.position.set(-0.12, 0.05, 0);
-  root.add(leftLeg);
-  const rightLeg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.4, 0.08), bodyMaterial);
-  rightLeg.name = "RagdollRightLeg";
-  rightLeg.userData = { combatHitZone: "body", ragdollPart: "rightLeg" };
-  rightLeg.position.set(0.12, 0.05, 0);
-  root.add(rightLeg);
-  root.traverse((node) => {
-    if (node instanceof THREE.Mesh) {
-      node.castShadow = true;
-      node.receiveShadow = true;
-    }
-  });
-  return root;
+  parent.add(roster);
+  return actors;
 };
 
 interface RagdollBodyParts {
@@ -4933,6 +4930,14 @@ const resetRagdollBodyPose = (body: THREE.Group, parts: RagdollBodyParts): void 
   parts.rightArm.rotation.set(0, 0, -0.25);
   parts.leftLeg.rotation.set(0, 0, 0);
   parts.rightLeg.rotation.set(0, 0, 0);
+  for (const jointName of [
+    "StickLeftForearm",
+    "StickRightForearm",
+    "StickLeftLowerLeg",
+    "StickRightLowerLeg",
+  ]) {
+    body.getObjectByName(jointName)?.rotation.set(0, 0, 0);
+  }
 };
 
 const applyRagdollBodyPose = (
@@ -14428,6 +14433,7 @@ export const createMahjongTableScene = (
   const playerRespawnRandom = createSeededRandom(`${roomSeed}|player-death-respawn-v1`);
   let simulantMarker: THREE.Group | null = null;
   let simulantBody: THREE.Group | null = null;
+  let simulantStickFigureRig: StickFigureRig | null = null;
   let simulantBodyParts: RagdollBodyParts | null = null;
   let simulantRing: THREE.Mesh | null = null;
   let simulantRagdollState: RagdollState | null = null;
@@ -14446,6 +14452,8 @@ export const createMahjongTableScene = (
   let simulantShieldFlareRemainingSeconds = 0;
   let simulantShieldFlareElapsedSeconds = 0;
   let simulantRespawnTimer = 0;
+  let simulantAnimationPhaseSeconds = 0;
+  let simulantAnimationMoving = false;
   const simulantPosition = new THREE.Vector3();
   let simulantWorldVelocity: PhysicsVector = { x: 0, y: 0, z: 0 };
   const simulantKnockbackVelocity = new THREE.Vector3();
@@ -16130,15 +16138,79 @@ export const createMahjongTableScene = (
     }
     syncSimulantShieldFlare();
   };
+  const seatedPlayerLookDirection = new THREE.Vector3();
+  const updateSeatedStickFigureAnimation = (deltaSeconds: number): void => {
+    if (seatedStickFigureActors.length === 0) {
+      return;
+    }
+    seatedStickFigurePhaseSeconds = advanceStickFigurePhase(
+      seatedStickFigurePhaseSeconds,
+      deltaSeconds,
+      0,
+      0,
+      true,
+    );
+    let playerHeadYaw = 0;
+    let playerHeadPitch = -0.05;
+    if (activeView === "seat") {
+      camera.getWorldDirection(seatedPlayerLookDirection);
+      playerHeadYaw = Math.atan2(seatedPlayerLookDirection.x, -seatedPlayerLookDirection.z);
+      playerHeadPitch = Math.asin(THREE.MathUtils.clamp(seatedPlayerLookDirection.y, -1, 1));
+    }
+    for (const [index, actor] of seatedStickFigureActors.entries()) {
+      const phase = seatedStickFigurePhaseSeconds + actor.phaseOffsetSeconds;
+      const pose = resolveStickFigureAnimationPose({
+        phaseSeconds: phase,
+        activity: "idle",
+        movementMagnitude: 0,
+        speedRatio: 0,
+        grounded: true,
+        seated: true,
+        headYaw: index === 0 ? playerHeadYaw : Math.sin(phase * 0.31) * 0.16,
+        headPitch: index === 0 ? playerHeadPitch : -0.05 + Math.sin(phase * 0.22) * 0.035,
+        interaction: Math.max(0, Math.sin(phase * 0.43)) ** 8,
+        motionClip: "idle",
+        motionPlaybackRate: 1,
+      });
+      applyStickFigureAnimationPose(actor.rig, pose);
+      actor.rig.root.position.y = actor.baseY + pose.rootBob;
+    }
+  };
   const syncSimulantPresentation = (motion: CameraMotionOffsets): void => {
     if (simulantRagdollState !== null || simulantBody === null) {
       syncSimulantWeaponPresentation();
       return;
     }
-    const bodyBaseY =
-      SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
-      (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
-    simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+    if (simulantStickFigureRig !== null) {
+      const motionClip = resolveStickFigureMotionClip({
+        moving: simulantAnimationMoving,
+        meleeSwinging: simulantMeleeSwinging,
+        weapon: simulantWeapon?.kind === "gun" ? "gun" : simulantWeapon === null ? "none" : "melee",
+      });
+      const pose = resolveStickFigureAnimationPose({
+        phaseSeconds: simulantAnimationPhaseSeconds,
+        activity: simulantMeleeSwinging ? "strike" : simulantAnimationMoving ? "walk" : "idle",
+        movementMagnitude: simulantAnimationMoving ? 1 : 0,
+        speedRatio: simulantAnimationMoving ? SIMULANT_TROT_SPEED_RATIO : 0,
+        grounded: true,
+        seated: false,
+        headYaw: motion.headBobLateral * 2.2,
+        headPitch: motion.headBobPitch * 2.2,
+        interaction: 0,
+        motionClip,
+        motionPlaybackRate: simulantAnimationMoving || simulantMeleeSwinging ? 0.5 : 1,
+      });
+      applyStickFigureAnimationPose(simulantStickFigureRig, pose);
+      const bodyBaseY =
+        SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+        (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+      simulantBody.position.y = bodyBaseY + motion.verticalOffset + pose.rootBob;
+    } else {
+      const bodyBaseY =
+        SIMULANT_BODY_SOURCE_FOOT_OFFSET_METERS *
+        (SIMULANT_BODY_TARGET_HEIGHT_METERS / SIMULANT_BODY_SOURCE_HEIGHT_METERS);
+      simulantBody.position.y = bodyBaseY + motion.verticalOffset;
+    }
     simulantBody.rotation.z = motion.roll;
     syncSimulantWeaponPresentation();
   };
@@ -17078,8 +17150,11 @@ export const createMahjongTableScene = (
     simulantWeaponHuntTarget: null,
     simulantMeleeSwinging: false,
   };
-  simulantBody = createSimulantBody(new THREE.Color(COLORS.red));
-  simulantBody.name = "SimulantCombatBody";
+  simulantStickFigureRig = createStickFigureBody({
+    color: new THREE.Color(COLORS.red),
+    name: "SimulantCombatBody",
+  });
+  simulantBody = simulantStickFigureRig.root;
   simulantBodyParts = resolveRagdollBodyParts(simulantBody);
   simulantShieldFlareMaterial = createShieldFlareMaterial();
   simulantShieldShell = new THREE.Mesh(
@@ -17114,7 +17189,10 @@ export const createMahjongTableScene = (
     playerDeathRagdoll: true,
     weaponRaycastIgnore: true,
   };
-  playerRagdollBody = createSimulantBody(new THREE.Color(COLORS.cyan), "PlayerDeathRagdollBody");
+  playerRagdollBody = createStickFigureBody({
+    color: new THREE.Color(COLORS.cyan),
+    name: "PlayerDeathRagdollBody",
+  }).root;
   playerRagdollBodyParts = resolveRagdollBodyParts(playerRagdollBody);
   playerRagdollMarker.add(playerRagdollBody);
   playerRagdollMarker.visible = false;
@@ -17131,6 +17209,8 @@ export const createMahjongTableScene = (
   if (penthouseEnabled) {
     scene.add(table);
   }
+  const seatedStickFigureActors = penthouseEnabled ? createSeatedStickFigures(scene) : [];
+  let seatedStickFigurePhaseSeconds = 0;
   const textureCache = penthouseEnabled
     ? createTextureCache(architectureResources.surfaceTextures.detail)
     : null;
@@ -17807,6 +17887,7 @@ export const createMahjongTableScene = (
     // the damping math to infinity.
     timer.update();
     const delta = THREE.MathUtils.clamp(timer.getDelta(), 0, PLAYER_MOVEMENT_MAX_STEP_SECONDS);
+    updateSeatedStickFigureAnimation(delta);
     // A reload can start from an empty magazine during weapon update. Reapply
     // the requested aim state before FOV, vitals, and camera motion are read so
     // the full first-person presentation leaves zoom for the reload window.
@@ -17915,6 +17996,14 @@ export const createMahjongTableScene = (
         pursuitDistance > pursuitStopDistance &&
         simulantStaggerSeconds <= 0 &&
         !simulantMeleeSwinging;
+      simulantAnimationMoving = simulantMoving;
+      simulantAnimationPhaseSeconds = advanceStickFigurePhase(
+        simulantAnimationPhaseSeconds,
+        safeDelta,
+        simulantMoving ? SIMULANT_TROT_SPEED_RATIO : 0,
+        simulantMoving ? 1 : 0,
+        false,
+      );
       simulantVitals = tickPlayerVitals(simulantVitals, safeDelta, {
         movementMagnitude: simulantMoving ? 1 : 0,
         locomotionBlend: simulantMoving ? SIMULANT_TROT_LOCOMOTION_BLEND : 0,
