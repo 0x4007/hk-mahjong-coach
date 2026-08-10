@@ -158,3 +158,17 @@ rough edges. A local commit is required before handoff; do not leave accepted mo
 > the exact base SHA and clean state. Preserve unrelated work, keep physics authoritative, use one shared impulse state
 > and one immutable head-motion snapshot, and do not open a browser. Run the required deterministic and repository gates,
 > commit the accepted feature, and report the exact SHA plus final clean status.
+
+## Current implementation checkpoint — 2026-08-10
+
+The contract is implemented on this canonical lane in commit `c60dff08f25c` (the follow-up recovery regression is
+currently being validated). `apps/web/src/scene/head-motion.ts` integrates bounded local translation and rotation from
+physics-resolved impulses, while the live and deterministic movement paths preserve capsule authority and omit repeated
+airborne gravity. The severe-fall fixture reaches a minimum shared head/camera offset of `-0.8793 m` from the standing
+`1.75 m` eye, which places the eye at about `0.87 m` above the support surface, and the capsule remains at the support
+height while the response returns toward zero.
+
+The server-owned bus run `1786340058047-43196-d49e1c72` recorded the new smooth-recovery assertion as passed. Its six
+other failures are pre-existing dirty-lane core-engine, simulation, Warehouse, and map-catalog failures; their exact
+result files are listed in that manifest. Browser, HMR, Playwright, and rendered one-window acceptance remain pending
+for the user by the contract above.

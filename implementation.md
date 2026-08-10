@@ -9,6 +9,8 @@
 - The movement simulator records the complete head snapshot and the severe-fall fixture checks a `-0.60` to `-0.90 m`
   eye-height compression, no airborne translation bias, and a weaker normal-jump response. Reticle, aim-ray, and focus-ray
   traces remain identical.
+- Added a regression that follows the severe-fall minimum through recovery: the supported capsule stays fixed while the
+  shared eye offset returns smoothly to standing height.
 - Validation is in progress on the canonical `continuous-head-motion-3` worktree. Browser, HMR, Playwright, and rendered
   acceptance are intentionally excluded; the user must perform the one-window visual check after deterministic gates.
 

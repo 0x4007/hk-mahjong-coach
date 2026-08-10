@@ -18,6 +18,9 @@ impact response as a `0.60–0.90 m` downward camera offset from the `1.75 m` st
 shallower and airborne frames remain unbiased. This is an experimental visual-table prototype; it does not complete the
 visual-table milestone or provide browser/HMR/Playwright acceptance.
 
+The severe-fall regression also checks the post-impact recovery: after the minimum offset, the capsule remains at the
+support height while the shared head response returns smoothly toward the standing eye height.
+
 ## 2026-08-08 — Directional melee view impulse
 
 Melee impacts now use the centralized `camera-motion.ts` damper. The wielder receives a short recoil kick opposite the

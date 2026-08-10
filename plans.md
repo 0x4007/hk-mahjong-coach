@@ -149,7 +149,8 @@ Unified solver integration in progress on `continuous-head-motion-3` (2026-08-10
 - `apps/web/src/scene/head-motion.ts` now owns one bounded analytic translation/rotation response and immutable snapshot;
   physics delta-v is projected into the local frame before live and simulator impulses are submitted.
 - The simulator records the snapshot and the severe-fall fixture checks `-0.60` to `-0.90 m` compression without airborne
-  bias. The repository gates and a final bus receipt are still pending; browser/HMR/Playwright remain excluded.
+  bias. A recovery regression keeps the supported capsule fixed while that offset returns smoothly toward zero. The
+  repository gates and a final bus receipt are still pending; browser/HMR/Playwright remain excluded.
 
 ## Milestone 8 — Teacher, learner model, curriculum, and drills (`pending`)
 

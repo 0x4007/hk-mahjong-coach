@@ -520,6 +520,35 @@ describe("continuous head-motion movement scenarios", () => {
     expect(severeHeadMinimum).toBeLessThanOrEqual(-0.6);
   });
 
+  it("recovers the severe-fall eye height smoothly without moving the supported capsule", () => {
+    const severe = resultFor("severe-fall");
+    let minimumIndex = 0;
+    for (let index = 1; index < severe.trace.length; index += 1) {
+      if (
+        severe.trace[index]!.camera.headMotion.translation.up <
+        severe.trace[minimumIndex]!.camera.headMotion.translation.up
+      ) {
+        minimumIndex = index;
+      }
+    }
+    const impact = severe.trace[minimumIndex]!;
+    const supportY = impact.position.y;
+    const recovery = severe.trace.slice(minimumIndex);
+    expect(impact.grounded).toBe(true);
+    for (let index = 1; index < recovery.length; index += 1) {
+      expect(
+        Math.abs(
+          recovery[index]!.camera.headMotion.translation.up -
+            recovery[index - 1]!.camera.headMotion.translation.up,
+        ),
+      ).toBeLessThan(0.1);
+      expect(recovery[index]!.position.y).toBeCloseTo(supportY, 12);
+    }
+    const final = severe.trace[severe.trace.length - 1]!;
+    expect(final.camera.headMotion.translation.up).toBeCloseTo(0, 0.02);
+    expect(final.camera.offsets.verticalOffset).toBeCloseTo(0, 0.02);
+  });
+
   it("cancels a removed ledge before any false completion", () => {
     const result = resultFor("ledge-contact-loss");
     const events = result.orderedEvents.map((entry) => entry.event);
